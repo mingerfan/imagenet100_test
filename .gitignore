@@ -1,0 +1,43 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Training results
+results/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Logs
+*.log
+logs/
+runs/
+
+# Data
+data/cache/
+*.npy
+*.npz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
