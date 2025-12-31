@@ -106,7 +106,7 @@ def test_multi_gpu_manager():
             result_dir='./results',
             gpus=[0, 1, 2, 3],
             num_classes=100,
-            use_cache=False  # 测试时不使用缓存
+            use_memory_fs=False  # 测试时不使用内存FS
         )
         
         print(f"✓ 多GPU管理器创建成功")

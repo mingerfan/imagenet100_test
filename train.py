@@ -65,9 +65,10 @@ def parse_args():
         help='禁用并行训练，使用串行模式'
     )
     parser.add_argument(
-        '--no_cache',
+        '--use_memory_fs',
         action='store_true',
-        help='不使用内存缓存数据集'
+        default=True,
+        help='使用内存文件系统（/dev/shm）加速数据加载（推荐，避免并发内存问题）'
     )
     
     # 选择特定模型
@@ -151,7 +152,7 @@ def main():
         gpus=args.gpus,
         num_classes=args.num_classes,
         default_num_workers=args.num_workers,
-        use_cache=not args.no_cache
+        use_memory_fs=args.use_memory_fs
     )
     
     # 训练模型

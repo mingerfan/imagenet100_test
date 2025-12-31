@@ -1,67 +1,33 @@
 """
 ImageNet-100 数据加载器
-使用完全内存缓存优化数据加载性能
+支持内存文件系统加速模式（已移除内存缓存选项以避免并发问题）
 """
 
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
-from PIL import Image
-import time
-import os
+from .memory_fs import create_memory_fs_manager
 
 
 class ImageNet100Dataset(datasets.ImageFolder):
     """
-    带内存缓存的ImageFolder
-    将所有图片预加载到内存中，大幅提升数据读取速度
+    标准ImageFolder数据集
+    使用内存文件系统加速数据加载，避免内存缓存导致的并发问题
     """
-    def __init__(self, root, transform=None, use_cache=True):
+    def __init__(self, root, transform=None):
         super().__init__(root, transform=transform)
         
-        if use_cache:
-            print(f"\n正在将数据集缓存到内存: {root}")
-            print(f"总图片数: {len(self.samples)}")
-            
-            self.cache = {}
-            self.targets = []
-            
-            # 统计信息
-            total_images = len(self.samples)
-            cache_start = time.time()
-            
-            # 预加载所有图片到内存
-            for idx, (path, target) in enumerate(self.samples):
-                # 加载图片
-                img = Image.open(path).convert('RGB')
-                self.cache[idx] = img
-                self.targets.append(target)
-                
-                # 显示进度
-                if (idx + 1) % 1000 == 0 or (idx + 1) == total_images:
-                    progress = (idx + 1) / total_images * 100
-                    elapsed = time.time() - cache_start
-                    print(f"  进度: {idx + 1}/{total_images} ({progress:.1f}%) - 已用时间: {elapsed:.1f}s")
-            
-            self.targets = torch.tensor(self.targets)
-            
-            cache_time = time.time() - cache_start
-            print(f"✓ 数据集缓存完成! 耗时: {cache_time:.2f} 秒")
-            print(f"✓ 估计内存占用: ~{total_images * 0.5:.1f} MB (假设每张图片0.5MB)")
-        else:
-            self.cache = None
-            self.targets = torch.tensor([target for _, target in self.samples])
+        # 转换targets为tensor以提高性能
+        self.targets = torch.tensor([target for _, target in self.samples])
+        
+        print(f"✓ 数据集加载完成: {len(self.samples)} 张图片, {len(self.classes)} 个类别")
     
     def __getitem__(self, index):
         """
-        获取缓存的图片并应用transform
+        获取图片并应用transform
         """
-        # 从缓存获取原始图片
-        if self.cache is not None:
-            img = self.cache[index]
-        else:
-            path, target = self.samples[index]
-            img = self.loader(path)
+        path, target = self.samples[index]
+        img = self.loader(path)
         
         # 应用transform
         if self.transform is not None:
@@ -111,7 +77,7 @@ def create_dataloaders(
     batch_size=64,
     num_workers=8,
     pin_memory=True,
-    use_cache=True
+    use_memory_fs=False
 ):
     """
     创建训练和验证数据加载器
@@ -122,7 +88,7 @@ def create_dataloaders(
         batch_size: 批次大小
         num_workers: 数据加载的worker数量
         pin_memory: 是否使用内存固定（GPU训练时设为True）
-        use_cache: 是否使用内存缓存
+        use_memory_fs: 是否使用内存文件系统（推荐，避免并发问题）
     
     Returns:
         train_loader, val_loader, train_dataset, val_dataset
@@ -130,6 +96,19 @@ def create_dataloaders(
     print("=" * 60)
     print("ImageNet-100 数据加载器配置")
     print("=" * 60)
+    
+    # 优先使用内存文件系统
+    if use_memory_fs:
+        print("\n[0] 尝试使用内存文件系统...")
+        manager = create_memory_fs_manager(train_dir, val_dir, use_memory_fs=True)
+        
+        if manager is not None:
+            effective_path = manager.get_effective_path()
+            
+            # 使用内存FS路径或原始路径
+            train_dir = str(effective_path / "train")
+            val_dir = str(effective_path / "val")
+            print(f"\n[0] ✓ 使用内存文件系统模式")
     
     # 数据预处理
     print("\n[1] 配置数据预处理...")
@@ -143,13 +122,13 @@ def create_dataloaders(
     # 创建数据集
     print("\n[2] 加载数据集...")
     
-    if use_cache:
-        print("  使用完全内存缓存模式...")
+    if use_memory_fs:
+        print("  ✓ 使用内存文件系统模式（避免并发内存问题）")
     else:
-        print("  使用标准磁盘读取模式...")
+        print("  使用标准磁盘读取模式")
     
-    train_dataset = ImageNet100Dataset(train_dir, transform=train_transform, use_cache=use_cache)
-    val_dataset = ImageNet100Dataset(val_dir, transform=val_transform, use_cache=use_cache)
+    train_dataset = ImageNet100Dataset(train_dir, transform=train_transform)
+    val_dataset = ImageNet100Dataset(val_dir, transform=val_transform)
     
     # 打印数据集信息
     print(f"\n  训练集大小: {len(train_dataset):,} 张图片")

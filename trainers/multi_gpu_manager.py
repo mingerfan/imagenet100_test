@@ -29,7 +29,7 @@ class MultiGPUManager:
         default_batch_size: int = 128,
         default_lr: float = 0.001,
         default_num_workers: int = 16,
-        use_cache: bool = True
+        use_memory_fs: bool = True
     ):
         """
         初始化多GPU管理器
@@ -44,7 +44,9 @@ class MultiGPUManager:
             default_batch_size: 默认批次大小
             default_lr: 默认学习率
             default_num_workers: 默认数据加载worker数
-            use_cache: 是否使用内存缓存
+            use_memory_fs: 是否使用内存文件系统（推荐，避免并发内存问题）
+                           注意：内存文件系统本身就可以被所有进程共享访问，
+                           每个进程会创建独立的DataLoader实例
         """
         self.train_dir = train_dir
         self.val_dir = val_dir
@@ -55,7 +57,7 @@ class MultiGPUManager:
         self.default_batch_size = default_batch_size
         self.default_lr = default_lr
         self.default_num_workers = default_num_workers
-        self.use_cache = use_cache
+        self.use_memory_fs = use_memory_fs
         
         # 创建结果目录
         import os
@@ -141,13 +143,16 @@ class MultiGPUManager:
         batch_size = model_config.get('batch_size', self.default_batch_size)
         num_workers = model_config.get('num_workers', self.default_num_workers)
         
+        # 每个GPU进程创建独立的DataLoader实例
+        # 如果启用use_memory_fs，所有进程都会从同一个内存文件系统路径读取数据
+        # 这样实现了数据源的共享，而无需共享DataLoader实例
         train_loader, val_loader, _, _ = create_dataloaders(
             train_dir=self.train_dir,
             val_dir=self.val_dir,
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=device.type == 'cuda',
-            use_cache=self.use_cache
+            use_memory_fs=self.use_memory_fs
         )
         
         # 创建模型
