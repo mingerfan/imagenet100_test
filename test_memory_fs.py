@@ -20,7 +20,7 @@ def test_memory_fs():
         return False
     
     # 创建管理器
-    print(f"\n[1] 创建内存FS管理器...")
+    print("\n[1] 创建内存FS管理器...")
     manager = MemoryFSManager(
         source_path=dataset_path,
         shm_name="imagenet100_test",
@@ -28,7 +28,7 @@ def test_memory_fs():
     )
     
     # 检查可用性
-    print(f"\n[2] 检查 /dev/shm 可用性...")
+    print("\n[2] 检查 /dev/shm 可用性...")
     available, reason = manager.check_shm_available()
     if not available:
         print(f"  ❌ {reason}")
@@ -36,7 +36,7 @@ def test_memory_fs():
     print(f"  ✅ {reason}")
     
     # 检查容量
-    print(f"\n[3] 检查容量...")
+    print("\n[3] 检查容量...")
     enough, reason = manager.check_capacity()
     if not enough:
         print(f"  ❌ {reason}")
@@ -44,28 +44,28 @@ def test_memory_fs():
     print(f"  ✅ {reason}")
     
     # 检查是否已复制
-    print(f"\n[4] 检查是否已复制...")
+    print("\n[4] 检查是否已复制...")
     if manager.is_copied():
-        print(f"  ✅ 数据已在内存FS中")
+        print("  ✅ 数据已在内存FS中")
     else:
-        print(f"  ℹ️  数据未复制到内存FS")
+        print("  ℹ️  数据未复制到内存FS")
         
         # 询问是否复制
         response = input("\n  是否现在复制数据集到内存FS？(y/n): ")
         if response.lower() == 'y':
             manager.copy_to_shm()
         else:
-            print(f"  跳过复制")
+            print("  跳过复制")
             return True
     
     # 获取有效路径
-    print(f"\n[5] 获取有效路径...")
+    print("\n[5] 获取有效路径...")
     manager.auto_copy = False  # 已手动复制，不再自动
     effective_path = manager.get_effective_path()
     print(f"  ✅ 有效路径: {effective_path}")
     
     # 验证路径
-    print(f"\n[6] 验证路径...")
+    print("\n[6] 验证路径...")
     train_path = effective_path / "train"
     val_path = effective_path / "val"
     
@@ -79,15 +79,15 @@ def test_memory_fs():
         print(f"  ✅ 训练集文件数: {train_files:,}")
         print(f"  ✅ 验证集文件数: {val_files:,}")
     else:
-        print(f"  ❌ 路径验证失败")
+        print("  ❌ 路径验证失败")
         return False
     
     print(f"\n{'=' * 60}")
     print("✅ 所有测试通过！")
     print(f"{'=' * 60}")
-    print(f"\n提示: 现在可以运行训练:")
-    print(f"  python train.py --use_memory_fs")
-    print(f"\n或者清理内存FS:")
+    print("\n提示: 现在可以运行训练:")
+    print("  python train.py --use_memory_fs")
+    print("\n或者清理内存FS:")
     print(f"  python -c \"from data.memory_fs import MemoryFSManager; m = MemoryFSManager('{dataset_path}', 'imagenet100_test', False); m.cleanup()\"")
     
     return True
@@ -98,7 +98,7 @@ if __name__ == '__main__':
         success = test_memory_fs()
         exit(0 if success else 1)
     except KeyboardInterrupt:
-        print(f"\n\n测试已取消")
+        print("\n\n测试已取消")
         exit(1)
     except Exception as e:
         print(f"\n\n❌ 测试失败: {e}")

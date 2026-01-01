@@ -108,7 +108,7 @@ def create_dataloaders(
             # 使用内存FS路径或原始路径
             train_dir = str(effective_path / "train")
             val_dir = str(effective_path / "val")
-            print(f"\n[0] ✓ 使用内存文件系统模式")
+            print("\n[0] ✓ 使用内存文件系统模式")
     
     # 数据预处理
     print("\n[1] 配置数据预处理...")
