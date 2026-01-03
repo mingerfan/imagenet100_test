@@ -23,6 +23,84 @@ from utils import load_config, get_model_configs
 from data import create_dataloaders
 
 
+def check_tensor_finite(tensor, name="tensor"):
+    """
+    检查张量是否包含NaN或Inf值
+    
+    Args:
+        tensor: 要检查的张量
+        name: 张量名称（用于错误消息）
+    
+    Returns:
+        (是否有限, 错误信息)
+    """
+    if tensor is None:
+        return True, None
+    
+    if not torch.isfinite(tensor).all():
+        nan_count = torch.isnan(tensor).sum().item()
+        inf_count = torch.isinf(tensor).sum().item()
+        
+        error_msg = (
+            f"{name} 包含无效值: "
+            f"NaN={nan_count}, Inf={inf_count}, "
+            f"形状={tensor.shape}, "
+            f"值范围=[{tensor.min().item():.4f}, {tensor.max().item():.4f}]"
+        )
+        return False, error_msg
+    
+    return True, None
+
+
+def check_gradients_finite(model, verbose=False):
+    """
+    检查模型的所有梯度是否有限
+    
+    Args:
+        model: 要检查的模型
+        verbose: 是否打印详细梯度信息
+    
+    Returns:
+        (是否有限, 错误信息)
+    """
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            is_finite, error_msg = check_tensor_finite(param.grad, f"梯度[{name}]")
+            if not is_finite:
+                return False, error_msg
+            
+            if verbose:
+                grad_norm = param.grad.norm().item()
+                if grad_norm > 1000:  # 警告：梯度可能过大
+                    print(f"    ⚠️  警告: {name} 梯度范数过大: {grad_norm:.2f}")
+    
+    return True, None
+
+
+def check_parameters_finite(model, verbose=False):
+    """
+    检查模型的所有参数是否有限
+    
+    Args:
+        model: 要检查的模型
+        verbose: 是否打印详细参数信息
+    
+    Returns:
+        (是否有限, 错误信息)
+    """
+    for name, param in model.named_parameters():
+        is_finite, error_msg = check_tensor_finite(param, f"参数[{name}]")
+        if not is_finite:
+            return False, error_msg
+        
+        if verbose:
+            param_norm = param.norm().item()
+            if param_norm > 1000:  # 警告：参数可能过大
+                print(f"    ⚠️  警告: {name} 参数范数过大: {param_norm:.2f}")
+    
+    return True, None
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="快速验证模型结构")
@@ -100,11 +178,40 @@ def validate_model(model, dataloader, device, num_batches=5):
             # 前向传播
             outputs = model(images)
             loss = criterion(outputs, labels)
+            
+            # 检查输出是否包含NaN/Inf
+            is_finite, error_msg = check_tensor_finite(outputs, "模型输出")
+            if not is_finite:
+                return False, f"前向传播失败 - {error_msg}"
+            
+            # 检查损失值是否有效
+            is_finite, error_msg = check_tensor_finite(loss, "损失值")
+            if not is_finite:
+                return False, f"损失值无效 - {error_msg}"
+            
+            # 打印损失值用于监控
+            if batch_idx == 0:
+                print(f"    ✓ 初始损失值: {loss.item():.4f}")
+            
+            # 检查损失值是否过大（可能是梯度爆炸的早期迹象）
+            if loss.item() > 1000:
+                return False, f"损失值过大: {loss.item():.4f}, 可能导致梯度爆炸"
 
             # 反向传播
             optimizer.zero_grad()
             loss.backward()
+            
+            # 检查梯度是否包含NaN/Inf
+            is_finite, error_msg = check_gradients_finite(model, verbose=(batch_idx == 0))
+            if not is_finite:
+                return False, f"反向传播失败 - {error_msg}"
+            
             optimizer.step()
+            
+            # 检查更新后的参数是否有效
+            is_finite, error_msg = check_parameters_finite(model, verbose=(batch_idx == 0))
+            if not is_finite:
+                return False, f"参数更新失败 - {error_msg}"
 
             # 验证输出形状
             batch_size, num_classes = outputs.shape

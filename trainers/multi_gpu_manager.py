@@ -177,6 +177,11 @@ class MultiGPUManager:
         print(f"开始训练模型: {model_name} (GPU: {gpu_id})")
         print(f"{'=' * 60}")
         
+        # 检测是否使用 StablePoly4 激活函数
+        uses_stablepoly = 'stablepoly' in model_name.lower()
+        if uses_stablepoly:
+            print("⚠ 检测到 StablePoly4 激活函数，将使用更严格的梯度裁剪")
+        
         # 设置设备
         device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None else 'cpu')
         
@@ -226,6 +231,9 @@ class MultiGPUManager:
         model_result_dir = f"{self.result_dir}/{model_name}"
         
         # 创建训练器
+        # 对于 StablePoly4 模型，使用更严格的梯度裁剪
+        grad_clip_max_norm = 0.5 if uses_stablepoly else 1.0
+        
         trainer = Trainer(
             model=model,
             train_loader=train_loader,
@@ -237,7 +245,8 @@ class MultiGPUManager:
             epochs=epochs,
             scheduler=scheduler,
             use_amp=True,
-            save_freq=10
+            save_freq=10,
+            grad_clip_max_norm=grad_clip_max_norm
         )
         
         # 开始训练

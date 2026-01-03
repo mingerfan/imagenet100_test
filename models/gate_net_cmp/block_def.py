@@ -38,22 +38,71 @@ class StablePoly4(nn.Module):
     FHE友好激活函数 (多项式激活)
     f(x) = scale * (ax^4 + bx^3 + cx^2 + dx + e)
     用于: Standard Poly, Gated Poly (Ours)
+    
+    改进版本：
+    - 使用ReLU进行预热训练（前warmup_epochs个epoch）
+    - 平滑过渡到多项式激活
+    - 使用更小的初始化值防止梯度爆炸
+    - 添加梯度裁剪保护
+    - 限制高阶项的范围
     """
-    def __init__(self, output_scale=0.1):
+    def __init__(self, output_scale=0.1, warmup_epochs=30):
         super().__init__()
         self.output_scale = output_scale
-        # 初始化为近似线性，防止训练初期崩塌
+        self.warmup_epochs = warmup_epochs
+        
+        # 使用更小的初始化值，防止高阶项导致梯度爆炸
+        # a, b, c 初始化为接近0的小值
         self.a = nn.Parameter(torch.tensor(0.0)) 
         self.b = nn.Parameter(torch.tensor(0.0))
-        self.c = nn.Parameter(torch.tensor(0.0))   
-        self.d = nn.Parameter(torch.tensor(1.0)) 
+        self.c = nn.Parameter(torch.tensor(0.001))   # 二次项保留小值
+        self.d = nn.Parameter(torch.tensor(0.5))     # 线性项降为0.5
         self.e = nn.Parameter(torch.tensor(0.0))
+        
+        # 梯度裁剪阈值
+        self.grad_clip_value = 1.0
+        
+        # 当前epoch（用于控制过渡）
+        self.current_epoch = 0
+
+    def set_epoch(self, epoch):
+        """设置当前epoch，用于控制ReLU到多项式的过渡"""
+        self.current_epoch = epoch
 
     def forward(self, x):
-        x2 = x * x
-        x3 = x2 * x
-        x4 = x3 * x
-        out = self.a * x4 + self.b * x3 + self.c * x2 + self.d * x + self.e
+        # 数值稳定性保护：限制输入范围
+        x_clipped = torch.clamp(x, min=-10.0, max=10.0)
+        
+        # 计算ReLU激活（用于预热）
+        relu_out = torch.nn.functional.relu(x_clipped)
+        
+        # 计算多项式激活
+        x2 = x_clipped * x_clipped
+        x3 = x2 * x_clipped
+        x4 = x3 * x_clipped
+        
+        # 对高阶参数进行软约束，防止它们过大
+        a_clamped = torch.clamp(self.a, min=-0.01, max=0.01)
+        b_clamped = torch.clamp(self.b, min=-0.1, max=0.1)
+        c_clamped = torch.clamp(self.c, min=-0.5, max=0.5)
+        
+        poly_out = a_clamped * x4 + b_clamped * x3 + c_clamped * x2 + self.d * x_clipped + self.e
+        
+        # 渐进式过渡：前warmup_epochs个epoch完全使用ReLU，然后平滑过渡到多项式
+        if self.current_epoch < self.warmup_epochs:
+            # 预热阶段：使用ReLU
+            alpha = 0.0
+        elif self.current_epoch < self.warmup_epochs + 10:
+            # 过渡阶段（10个epoch）：从ReLU平滑过渡到多项式
+            progress = (self.current_epoch - self.warmup_epochs) / 10.0
+            alpha = progress
+        else:
+            # 完全使用多项式
+            alpha = 1.0
+        
+        # 混合ReLU和多项式输出
+        out = (1 - alpha) * relu_out + alpha * poly_out
+        
         return out * self.output_scale
 
 

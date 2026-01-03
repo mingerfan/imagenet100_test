@@ -10,39 +10,39 @@ global:
   default_num_workers: 16
 
 # 需要训练的模型列表（显式指定）
-models:
-  # ResNet18
-  - name: "resnet18"
-    class: "resnet18"
-    params:
-      num_classes: 100
-      pretrained: false
-    epochs: 60
-    batch_size: 128
-    learning_rate: 0.001
-    num_workers: 16
+# models:
+#   # ResNet18
+#   - name: "resnet18"
+#     class: "resnet18"
+#     params:
+#       num_classes: 100
+#       pretrained: false
+#     epochs: 60
+#     batch_size: 128
+#     learning_rate: 0.001
+#     num_workers: 16
   
-  # ResNet34
-  - name: "resnet34"
-    class: "resnet34"
-    params:
-      num_classes: 100
-      pretrained: false
-    epochs: 60
-    batch_size: 64
-    learning_rate: 0.001
-    num_workers: 16
+#   # ResNet34
+#   - name: "resnet34"
+#     class: "resnet34"
+#     params:
+#       num_classes: 100
+#       pretrained: false
+#     epochs: 60
+#     batch_size: 64
+#     learning_rate: 0.001
+#     num_workers: 16
   
-  # ResNet50
-  - name: "resnet50"
-    class: "resnet50"
-    params:
-      num_classes: 100
-      pretrained: false
-    epochs: 60
-    batch_size: 64
-    learning_rate: 0.001
-    num_workers: 16
+#   # ResNet50
+#   - name: "resnet50"
+#     class: "resnet50"
+#     params:
+#       num_classes: 100
+#       pretrained: false
+#     epochs: 60
+#     batch_size: 64
+#     learning_rate: 0.001
+#     num_workers: 16
 
 # 模型模式匹配（正则表达式）
 # 匹配的模型将自动使用指定的配置进行训练

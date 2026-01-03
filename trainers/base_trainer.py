@@ -12,7 +12,7 @@ import os
 import csv
 from tqdm import tqdm
 from datetime import datetime
-
+import pathlib
 
 class Trainer:
     """基础训练器类"""
@@ -29,7 +29,8 @@ class Trainer:
         epochs=60,
         scheduler=None,
         use_amp=True,
-        save_freq=10
+        save_freq=10,
+        grad_clip_max_norm=1.0
     ):
         """
         初始化训练器
@@ -46,6 +47,7 @@ class Trainer:
             scheduler: 学习率调度器
             use_amp: 是否使用混合精度训练
             save_freq: 保存检查点的频率
+            grad_clip_max_norm: 梯度裁剪的最大范数，用于防止梯度爆炸
         """
         self.model = model
         self.train_loader = train_loader
@@ -58,6 +60,7 @@ class Trainer:
         self.scheduler = scheduler
         self.use_amp = use_amp
         self.save_freq = save_freq
+        self.grad_clip_max_norm = grad_clip_max_norm
         
         # 创建结果目录
         os.makedirs(result_dir, exist_ok=True)
@@ -95,8 +98,10 @@ class Trainer:
         total_loss = 0.0
         correct = 0
         total = 0
+
+        model_name = pathlib.Path(self.result_dir).stem
         
-        pbar = tqdm(self.train_loader, desc=f'Epoch [{epoch}]', leave=False)
+        pbar = tqdm(self.train_loader, desc=f'Epoch [{epoch}]({model_name})', leave=False)
         
         for images, labels in pbar:
             images = images.to(self.device, non_blocking=True)
@@ -113,15 +118,15 @@ class Trainer:
             # 反向传播
             if self.use_amp:
                 self.scaler.scale(loss).backward()
-                # 梯度裁剪 - 防止梯度爆炸（特别是对poly激活函数）
+                # 梯度裁剪（在 unscale 之前进行）
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_max_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss.backward()
-                # 梯度裁剪 - 防止梯度爆炸（特别是对poly激活函数）
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_max_norm)
                 self.optimizer.step()
             
             # 统计
