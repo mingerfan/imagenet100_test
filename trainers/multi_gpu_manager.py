@@ -15,6 +15,47 @@ import threading
 import queue
 
 
+def create_smart_optimizer(model, lr=0.001):
+    """
+    智能优化器：为不同类型的参数使用不同的权重衰减策略
+    
+    Args:
+        model: 模型
+        lr: 学习率
+    
+    Returns:
+        optimizer: 配置好的优化器
+    """
+    poly_params = []
+    beta_params = []
+    normal_params = []
+    
+    for name, param in model.named_parameters():
+        # LearnableSwish和LearnableRelu的beta - 不约束防止归零
+        # 必须先匹配beta，因为'.act.beta'包含'.act.b'
+        if name.endswith('.beta'):
+            beta_params.append(param)
+        # StablePoly4的多项式系数 (如: .act.a, .act.b, .act.c, .act.d, .act.e) - 强约束防止爆炸
+        # 使用更精确的匹配，确保只匹配单个字母作为参数名
+        elif any(name.endswith(f'.act.{p}') for p in ['a', 'b', 'c', 'd', 'e']):
+            poly_params.append(param)
+        # 普通权重（卷积层、线性层等）- 标准约束
+        else:
+            normal_params.append(param)
+    
+    # 创建参数组，使用不同的权重衰减
+    optimizer = optim.AdamW(
+        [
+            {"params": normal_params, "weight_decay": 1e-4},
+            {"params": poly_params, "weight_decay": 0.1},  # Poly 强约束
+            {"params": beta_params, "weight_decay": 0.0},   # Beta 不约束
+        ],
+        lr=lr,
+    )
+    
+    return optimizer
+
+
 class MultiGPUManager:
     """多GPU训练管理器"""
     
@@ -169,11 +210,11 @@ class MultiGPUManager:
         # 损失函数
         criterion = nn.CrossEntropyLoss()
         
-        # 优化器
+        # 优化器 - 使用智能优化器，为不同参数类型使用不同权重衰减
         lr = model_config.get('learning_rate', self.default_lr)
-        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0001)
+        optimizer = create_smart_optimizer(model, lr=lr)
         
-        # 学习率调度器
+        # 学习率调度器 - 使用实际训练轮数
         epochs = model_config.get('epochs', self.default_epochs)
         scheduler = CosineAnnealingLR(
             optimizer,

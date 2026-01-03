@@ -69,13 +69,13 @@ class ResNet18Gate(nn.Module):
              "activation": self.activation},
             # Layer 2
             {"block_type": "basic", "out_channels": 128, "stride": 2, "num_blocks": 2, 
-             "activation": self.activation},
+             "activation": Relu},
             # Layer 3
             {"block_type": "basic", "out_channels": 256, "stride": 2, "num_blocks": 2, 
-             "activation": self.activation},
+             "activation": Relu},
             # Layer 4
             {"block_type": "basic", "out_channels": 512, "stride": 2, "num_blocks": 2, 
-             "activation": self.activation},
+             "activation": Relu},
         ]
         
         return SpecialResNet(config=config, in_channels=64)
@@ -116,83 +116,243 @@ class ResNet18Gate(nn.Module):
 
 # ===== Basic Block Variants =====
 @register_model('resnet-basic-relu-layer1block1')
-def resnet_basic_relu(num_classes=100):
+def resnet_basic_relu(num_classes=100, pretrained=False):
+    """
+    创建 Basic Block + ReLU 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic', Relu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic-learnableswish-layer1block1')
-def resnet_basic_learnableswish(num_classes=100):
+def resnet_basic_learnableswish(num_classes=100, pretrained=False):
+    """
+    创建 Basic Block + LearnableSwish 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic', LearnableSwish, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic-learnablerelu-layer1block1')
-def resnet_basic_learnablerelu(num_classes=100):
+def resnet_basic_learnablerelu(num_classes=100, pretrained=False):
+    """
+    创建 Basic Block + LearnableRelu 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic-stablepoly4-layer1block1')
-def resnet_basic_stablepoly4(num_classes=100):
+def resnet_basic_stablepoly4(num_classes=100, pretrained=False):
+    """
+    创建 Basic Block + StablePoly4 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic', StablePoly4, num_classes, first_block_factor=0.25)
 
 
 # ===== Basic Self-Gated Block Variants =====
 @register_model('resnet-basic_self_gated-relu-layer1block1')
-def resnet_basic_self_gated_relu(num_classes=100):
+def resnet_basic_self_gated_relu(num_classes=100, pretrained=False):
+    """
+    创建 Basic Self-Gated Block + ReLU 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic_self_gated', Relu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic_self_gated-learnableswish-layer1block1')
-def resnet_basic_self_gated_learnableswish(num_classes=100):
+def resnet_basic_self_gated_learnableswish(num_classes=100, pretrained=False):
+    """
+    创建 Basic Self-Gated Block + LearnableSwish 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic_self_gated', LearnableSwish, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic_self_gated-learnablerelu-layer1block1')
-def resnet_basic_self_gated_learnablerelu(num_classes=100):
+def resnet_basic_self_gated_learnablerelu(num_classes=100, pretrained=False):
+    """
+    创建 Basic Self-Gated Block + LearnableRelu 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic_self_gated', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic_self_gated-stablepoly4-layer1block1')
-def resnet_basic_self_gated_stablepoly4(num_classes=100):
+def resnet_basic_self_gated_stablepoly4(num_classes=100, pretrained=False):
+    """
+    创建 Basic Self-Gated Block + StablePoly4 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('basic_self_gated', StablePoly4, num_classes, first_block_factor=0.25)
 
 
 # ===== Bottleneck Block Variants =====
 @register_model('resnet-bottleneck-relu-layer1block1')
-def resnet_bottleneck_relu(num_classes=100):
+def resnet_bottleneck_relu(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Block + ReLU 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck', Relu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-bottleneck-learnableswish-layer1block1')
-def resnet_bottleneck_learnableswish(num_classes=100):
+def resnet_bottleneck_learnableswish(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Block + LearnableSwish 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck', LearnableSwish, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-bottleneck-learnablerelu-layer1block1')
-def resnet_bottleneck_learnablerelu(num_classes=100):
+def resnet_bottleneck_learnablerelu(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Block + LearnableRelu 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-bottleneck-stablepoly4-layer1block1')
-def resnet_bottleneck_stablepoly4(num_classes=100):
+def resnet_bottleneck_stablepoly4(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Block + StablePoly4 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck', StablePoly4, num_classes, first_block_factor=0.25)
 
 
 # ===== Bottleneck Self-Gated Block Variants =====
 @register_model('resnet-bottleneck_self_gated-relu-layer1block1')
-def resnet_bottleneck_self_gated_relu(num_classes=100):
+def resnet_bottleneck_self_gated_relu(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Self-Gated Block + ReLU 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck_self_gated', Relu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-bottleneck_self_gated-learnableswish-layer1block1')
-def resnet_bottleneck_self_gated_learnableswish(num_classes=100):
+def resnet_bottleneck_self_gated_learnableswish(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Self-Gated Block + LearnableSwish 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck_self_gated', LearnableSwish, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-bottleneck_self_gated-learnablerelu-layer1block1')
-def resnet_bottleneck_self_gated_learnablerelu(num_classes=100):
+def resnet_bottleneck_self_gated_learnablerelu(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Self-Gated Block + LearnableRelu 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck_self_gated', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-bottleneck_self_gated-stablepoly4-layer1block1')
-def resnet_bottleneck_self_gated_stablepoly4(num_classes=100):
+def resnet_bottleneck_self_gated_stablepoly4(num_classes=100, pretrained=False):
+    """
+    创建 Bottleneck Self-Gated Block + StablePoly4 的 ResNet 变体
+    
+    Args:
+        num_classes: 类别数量
+        pretrained: 预训练权重（自定义模型不支持此参数，保留用于兼容性）
+    
+    Returns:
+        model: ResNet模型
+    """
     return ResNet18Gate('bottleneck_self_gated', StablePoly4, num_classes, first_block_factor=0.25)

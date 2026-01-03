@@ -158,7 +158,13 @@ def quick_validate(args):
     print("\n[1/5] 加载配置文件...")
     try:
         config = load_config(args.config)
-        model_configs = get_model_configs(config)
+        
+        # 获取已注册的模型列表（用于正则匹配）
+        registered_models = list(MODEL_REGISTRY._registry.keys())
+        print(f"  已注册模型数量: {len(registered_models)}")
+        
+        # 使用已注册模型列表进行匹配
+        model_configs = get_model_configs(config, registered_models)
 
         # 过滤指定模型
         if args.models:
@@ -172,7 +178,8 @@ def quick_validate(args):
             print(f"  {i}. {m['name']}")
 
     except Exception as e:
-        print(f"❌ 配置加载失败: {e}"        return False
+        print(f"❌ 配置加载失败: {e}")
+        return False
 
     # 检查GPU
     print("\n[2/5] 检查GPU...")

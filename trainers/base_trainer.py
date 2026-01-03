@@ -113,10 +113,15 @@ class Trainer:
             # 反向传播
             if self.use_amp:
                 self.scaler.scale(loss).backward()
+                # 梯度裁剪 - 防止梯度爆炸（特别是对poly激活函数）
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss.backward()
+                # 梯度裁剪 - 防止梯度爆炸（特别是对poly激活函数）
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
             
             # 统计

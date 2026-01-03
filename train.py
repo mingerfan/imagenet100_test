@@ -8,6 +8,7 @@ import os
 import sys
 from trainers import MultiGPUManager
 from utils import load_config, get_model_configs
+from models import MODEL_REGISTRY
 
 
 def parse_args():
@@ -114,8 +115,14 @@ def main():
         print(f"\n加载配置文件: {args.config}")
         config = load_config(args.config)
     
-    # 获取模型配置
-    model_configs = get_model_configs(config)
+    # 获取已注册的模型列表（用于正则匹配）
+    registered_models = MODEL_REGISTRY.list_models()
+    print(f"\n已注册的模型: {len(registered_models)} 个")
+    for model_name in registered_models:
+        print(f"  - {model_name}")
+    
+    # 获取模型配置（传入已注册模型列表以支持正则匹配）
+    model_configs = get_model_configs(config, registered_models)
     
     # 过滤特定模型（如果指定）
     if args.models:

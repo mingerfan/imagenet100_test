@@ -1,5 +1,5 @@
 # 模型训练配置列表
-# 每个模型可以单独配置训练参数
+# 支持显式指定和正则匹配两种方式
 
 # 全局设置
 global:
@@ -9,7 +9,7 @@ global:
   default_learning_rate: 0.001
   default_num_workers: 16
 
-# 需要训练的模型列表
+# 需要训练的模型列表（显式指定）
 models:
   # ResNet18
   - name: "resnet18"
@@ -43,3 +43,30 @@ models:
     batch_size: 64
     learning_rate: 0.001
     num_workers: 16
+
+# 模型模式匹配（正则表达式）
+# 匹配的模型将自动使用指定的配置进行训练
+model_patterns:
+  # 示例1: 匹配所有以 "resnet-" 开头的模型（包括 gate_net.py 中的所有变体）
+  - pattern: "^resnet-.*"
+    description: "所有 ResNet 变体"
+    epochs: 60
+    batch_size: 64
+    learning_rate: 0.001
+    num_workers: 16
+    params:
+      num_classes: 100
+      pretrained: false
+  
+  # 示例2: 只匹配 basic_self_gated 类型的模型
+  # - pattern: "^resnet-basic_self_gated-.*"
+  #   description: "Basic Self-Gated 变体"
+  #   epochs: 50
+  #   batch_size: 128
+  #   learning_rate: 0.01
+  
+  # 示例3: 匹配使用 learnablerelu 的模型
+  # - pattern: ".*learnablerelu.*"
+  #   description: "使用 LearnableRelu 的模型"
+  #   epochs: 70
+  #   batch_size: 32
