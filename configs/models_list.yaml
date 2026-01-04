@@ -51,9 +51,9 @@ model_patterns:
   - pattern: "^resnet-.*"
     description: "所有 ResNet 变体"
     epochs: 60
-    batch_size: 64
+    batch_size: 256
     learning_rate: 0.001
-    num_workers: 16
+    num_workers: 4
     params:
       num_classes: 100
       pretrained: false

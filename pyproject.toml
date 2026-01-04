@@ -12,4 +12,5 @@ dependencies = [
     "numpy>=1.24.0",
     "psutil>=5.9.0",
     "pyyaml>=6.0.0",
+    "onnxscript>=0.5.7",
 ]

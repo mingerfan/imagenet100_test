@@ -31,7 +31,7 @@ class LearnableRelu(nn.Module):
         self.beta = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, x):
-        return x * torch.maximum(self.beta * x, torch.zeros_like(x))
+        return torch.maximum(self.beta * x, torch.zeros_like(x))
 
 class StablePoly4(nn.Module):
     """

@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+"py-bind",
+"rs-core"
+]
+
+[workspace.dependencies]
+anyhow = "^1.0"

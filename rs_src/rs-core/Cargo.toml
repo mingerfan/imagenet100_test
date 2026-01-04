@@ -1,0 +1,8 @@
+[package]
+name = "rs-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+onnx-ir = { git = "https://github.com/tracel-ai/burn.git", package = "onnx-ir" }
