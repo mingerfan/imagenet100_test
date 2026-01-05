@@ -82,6 +82,23 @@ class Trainer:
         # 最佳准确率
         self.best_acc = 0.0
         
+    def _set_epoch_for_model(self, epoch):
+        """
+        递归地为模型中所有需要 epoch 信息的模块设置 epoch
+        
+        这个方法会遍历模型的所有子模块，找到所有具有 set_epoch 方法的模块
+        （例如 StablePoly4 激活函数）并调用它们的 set_epoch 方法。
+        
+        Args:
+            epoch: 当前训练的 epoch 编号
+        """
+        # 使用 model.modules() 获取所有子模块（包括模型自身）
+        for module in self.model.modules():
+            # 检查模块是否有 set_epoch 方法
+            if hasattr(module, 'set_epoch') and callable(module.set_epoch):
+                # 调用 set_epoch 方法
+                module.set_epoch(epoch)
+    
     def train_one_epoch(self, epoch):
         """
         训练一个epoch
@@ -247,6 +264,9 @@ class Trainer:
         start_time = time.time()
         
         for epoch in range(1, self.epochs + 1):
+            # 为所有需要 epoch 信息的模块更新 epoch
+            self._set_epoch_for_model(epoch)
+            
             epoch_start = time.time()
             
             # 训练

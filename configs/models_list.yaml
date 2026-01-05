@@ -3,11 +3,11 @@
 
 # 全局设置
 global:
-  num_classes: 100
-  default_epochs: 60
-  default_batch_size: 128
-  default_learning_rate: 0.001
-  default_num_workers: 16
+    num_classes: 100
+    default_epochs: 60
+    default_batch_size: 128
+    default_learning_rate: 0.001
+    default_num_workers: 16
 
 # 需要训练的模型列表（显式指定）
 # models:
@@ -21,7 +21,7 @@ global:
 #     batch_size: 128
 #     learning_rate: 0.001
 #     num_workers: 16
-  
+
 #   # ResNet34
 #   - name: "resnet34"
 #     class: "resnet34"
@@ -32,7 +32,7 @@ global:
 #     batch_size: 64
 #     learning_rate: 0.001
 #     num_workers: 16
-  
+
 #   # ResNet50
 #   - name: "resnet50"
 #     class: "resnet50"
@@ -47,26 +47,26 @@ global:
 # 模型模式匹配（正则表达式）
 # 匹配的模型将自动使用指定的配置进行训练
 model_patterns:
-  # 示例1: 匹配所有以 "resnet-" 开头的模型（包括 gate_net.py 中的所有变体）
-  - pattern: "^resnet-.*"
-    description: "所有 ResNet 变体"
-    epochs: 60
-    batch_size: 256
-    learning_rate: 0.001
-    num_workers: 4
-    params:
-      num_classes: 100
-      pretrained: false
-  
-  # 示例2: 只匹配 basic_self_gated 类型的模型
-  # - pattern: "^resnet-basic_self_gated-.*"
-  #   description: "Basic Self-Gated 变体"
-  #   epochs: 50
-  #   batch_size: 128
-  #   learning_rate: 0.01
-  
-  # 示例3: 匹配使用 learnablerelu 的模型
-  # - pattern: ".*learnablerelu.*"
-  #   description: "使用 LearnableRelu 的模型"
-  #   epochs: 70
-  #   batch_size: 32
+    # 示例1: 匹配所有以 "resnet-" 开头的模型（包括 gate_net.py 中的所有变体）
+    - pattern: "^resnet-.*poly.*"
+      description: "所有 ResNet 变体"
+      epochs: 60
+      batch_size: 256
+      learning_rate: 0.001
+      num_workers: 4
+      params:
+          num_classes: 100
+          pretrained: false
+
+    # 示例2: 只匹配 basic_self_gated 类型的模型
+    # - pattern: "^resnet-basic_self_gated-.*"
+    #   description: "Basic Self-Gated 变体"
+    #   epochs: 50
+    #   batch_size: 128
+    #   learning_rate: 0.01
+
+    # 示例3: 匹配使用 learnablerelu 的模型
+    # - pattern: ".*learnablerelu.*"
+    #   description: "使用 LearnableRelu 的模型"
+    #   epochs: 70
+    #   batch_size: 32
