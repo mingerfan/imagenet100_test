@@ -1,6 +1,8 @@
 import operator
 import math
 import sys
+import os
+from datetime import datetime
 from collections import defaultdict
 from typing import Dict, Tuple, List, Optional
 
@@ -22,10 +24,57 @@ except ImportError:
     HAS_CUSTOM_MODULES = False
 
 
-def next_power_of_2_float(n):
-    if n <= 0:
-        return 1
-    return 2 ** math.ceil(math.log2(n))
+    def next_power_of_2_float(n):
+        if n <= 0:
+            return 1
+        return 2 ** math.ceil(math.log2(n))
+
+
+def get_script_dir():
+    """获取脚本所在目录的绝对路径"""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def ensure_dir_exists(dir_path: str):
+    """确保目录存在，如果不存在则创建"""
+    if dir_path and not os.path.exists(dir_path):
+        os.makedirs(dir_path, exist_ok=True)
+
+
+def generate_unique_filename(model_name: str, extension: str, folder_path: str | None = None) -> str:
+    """生成唯一的文件名
+    
+    Args:
+        model_name: 模型名称
+        extension: 文件扩展名（如 '.txt', '.png'）
+        folder_path: 文件夹路径，如果为 None 则使用脚本所在目录
+    
+    Returns:
+        完整的文件路径
+    """
+    # 确保扩展名以点开头
+    if not extension.startswith('.'):
+        extension = '.' + extension
+    
+    # 生成时间戳
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 生成文件名
+    filename = f"{model_name}_{timestamp}{extension}"
+    
+    # 确定文件夹路径
+    if folder_path is None:
+        folder_path = get_script_dir()
+    else:
+        # 如果是相对路径，转换为相对于脚本所在目录的绝对路径
+        if not os.path.isabs(folder_path):
+            folder_path = os.path.join(get_script_dir(), folder_path)
+    
+    # 确保目录存在
+    ensure_dir_exists(folder_path)
+    
+    # 返回完整路径
+    return os.path.join(folder_path, filename)
 
 
 class NodeMeta:
@@ -596,11 +645,16 @@ class FheInfo:
 
     # ========== 输出与可视化 ==========
 
-    def print_statistics(self, output_file: Optional[str] = None):
-        """打印统计结果"""
+    def print_statistics(self, output_folder: Optional[str] = None):
+        """打印统计结果并保存到文件
+        
+        Args:
+            output_folder: 输出文件夹路径（如果为None则不保存到文件）
+        """
         lines = []
+        model_name = type(self.model).__name__
         lines.append("=" * 110)
-        lines.append(f"FHE Statistics for {type(self.model).__name__}")
+        lines.append(f"FHE Statistics for {model_name}")
         lines.append("=" * 110)
 
         total_with_boot = self.total_latency + self.total_boot_latency
@@ -634,13 +688,20 @@ class FheInfo:
         output = "\n".join(lines)
         print(output)
 
-        if output_file:
+        if output_folder:
+            # 生成唯一文件名
+            output_file = generate_unique_filename(model_name, "txt", output_folder)
             with open(output_file, "w") as f:
                 f.write(output)
             print(f"\nResults saved to {output_file}")
 
-    def plot_statistics(self, save_path: Optional[str] = None, show: bool = True):
-        """绘制统计结果"""
+    def plot_statistics(self, plot_folder: Optional[str] = None, show: bool = True):
+        """绘制统计结果并保存到文件
+        
+        Args:
+            plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
+            show: 是否显示图表
+        """
         try:
             import matplotlib.pyplot as plt
         except ImportError:
@@ -687,7 +748,10 @@ class FheInfo:
 
         plt.tight_layout()
 
-        if save_path:
+        if plot_folder:
+            # 生成唯一文件名
+            model_name = type(self.model).__name__
+            save_path = generate_unique_filename(model_name, "png", plot_folder)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Plot saved to {save_path}")
 
@@ -755,16 +819,16 @@ def exp_statistics(model: nn.Module):
             print(f"Node op: {node.op}")
 
 
-def analyze_model(model: nn.Module, model_name: str = None,
-                  output_file: str = None, plot_file: str = None,
+def analyze_model(model: nn.Module, model_name: str | None = None,
+                  output_folder: str | None = None, plot_folder: str | None = None,
                   input_shape: Tuple[int, ...] = (1, 3, 224, 224)):
     """分析模型的FHE统计信息
 
     Args:
         model: 要分析的模型
         model_name: 模型名称（用于显示）
-        output_file: 统计结果输出文件路径
-        plot_file: 图表保存路径
+        output_folder: 统计结果输出文件夹路径（文件名将自动生成）
+        plot_folder: 图表保存文件夹路径（文件名将自动生成）
         input_shape: 输入张量形状
 
     Returns:
@@ -775,10 +839,10 @@ def analyze_model(model: nn.Module, model_name: str = None,
 
     fhe_info = FheInfo(model, input_shape)
     fhe_info.run_statistics()
-    fhe_info.print_statistics(output_file)
+    fhe_info.print_statistics(output_folder)
 
-    if plot_file:
-        fhe_info.plot_statistics(save_path=plot_file, show=False)
+    if plot_folder:
+        fhe_info.plot_statistics(plot_folder=plot_folder, show=False)
 
     return fhe_info
 
@@ -789,7 +853,7 @@ if __name__ == "__main__":
     print("Testing ResNet18")
     print("="*50)
     model = torchvision.models.resnet18()
-    fhe_info = analyze_model(model, "ResNet18")
+    fhe_info = analyze_model(model, "ResNet18", output_folder=".", plot_folder=".")
 
     # 测试更多模型
     models_to_test = [
@@ -811,6 +875,6 @@ if __name__ == "__main__":
         print("="*50)
         try:
             model = model_fn()
-            analyze_model(model, name, "./fhe_statistics.txt", "./to_plot")
+            analyze_model(model, name, output_folder="results", plot_folder="results")
         except Exception as e:
             print(f"Error analyzing {name}: {e}")

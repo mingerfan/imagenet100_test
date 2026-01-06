@@ -13,4 +13,5 @@ dependencies = [
     "psutil>=5.9.0",
     "pyyaml>=6.0.0",
     "onnxscript>=0.5.7",
+    "matplotlib>=3.10.8",
 ]
