@@ -1,7 +1,3 @@
-from networkx import in_degree_centrality
-from setuptools.tests.config.test_apply_pyprojecttoml import core_metadata
-from mpmath.tests.test_identify import ceil
-from sympy.tensor.array.expressions.array_expressions import get_shape
 import operator
 
 import torch
@@ -88,163 +84,159 @@ class FheInfo:
     def get_tensor_meta(self, node: Node) -> TensorMetadata:
         tensor_meta = node.meta["tensor_meta"]
         return tensor_meta
+
+    def _init_node_meta(self, node: Node, out_depth_delta: int = 0) -> Tuple[NodeMeta, torch.Size, torch.Size, int, int]:
+        """初始化NodeMeta并返回基础信息
+        
+        Args:
+            node: 目标节点
+            out_depth_delta: 输出深度相对于输入深度的增量
             
-
-    def conv_statistics(self, node: Node):
+        Returns:
+            Tuple[NodeMeta, in_shape, out_shape, in_ct, out_ct]
+        """
+        in_shape = self.get_in_shape(node)
         tensor_meta = self.get_tensor_meta(node)
-        output_shape = tensor_meta.shape
-        module = self.traced.get_submodule(str(node.target))
-        # in_channels = module.in_channels
-        out_channels = module.out_channels
-        kernel_size = module.kernel_size
+        out_shape = tensor_meta.shape
+        
+        in_ct = self.calc_ct(in_shape)
+        out_ct = self.calc_ct(out_shape)
+        
         node_meta = NodeMeta()
-
         in_depth = self.get_in_depth(node)
         node_meta.in_depth = in_depth
-        # 密文明文乘法消耗两个深度，一个是在卷积核的乘法上，一个是在输出结果的mask上
-        node_meta.out_depth = in_depth + 2
+        node_meta.out_depth = in_depth + out_depth_delta
+        
+        node_meta.in_ct = in_ct
+        node_meta.out_ct = out_ct
+        
+        return node_meta, in_shape, out_shape, in_ct, out_ct
 
-        # 我们假设密文能够被充分利用
-        in_shape = self.get_in_shape(node)
-        in_ct = self.calc_ct(in_shape)
-        out_ct = self.calc_ct(output_shape)
+    def _set_rescale(self, node_meta: NodeMeta, include_single: bool = False):
+        """计算rescale值
+        
+        Args:
+            node_meta: 节点元数据对象
+            include_single: 是否包含mul_single的计算
+        """
+        if include_single:
+            node_meta.rescale = node_meta.mul_both + node_meta.mul_single
+        else:
+            node_meta.rescale = node_meta.mul_both
+
+    def conv_statistics(self, node: Node):
+        module = self.traced.get_submodule(str(node.target))
+        out_channels = module.out_channels
+        kernel_size = module.kernel_size
+        
+        # 密文明文乘法消耗两个深度
+        node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=2)
         
         ch_per_ct = self.calc_channel_per_ct(in_shape)
-        out_ch_per_ct = self.calc_channel_per_ct(output_shape)
+        out_ch_per_ct = self.calc_channel_per_ct(out_shape)
 
-        # 卷积核与特征图相乘时采用优化的版本，会增加密文明文乘法数量 (gazelle卷积)
+        # 卷积核与特征图相乘时采用优化的版本 (gazelle卷积)
         kernel_ratio = kernel_size[0] * kernel_size[0]
-
-        # 每一个in_ct都要与优化的卷积核心乘ratio次，然后再相加，再旋转求和，重复out_channels次，最后这些都要合并到新的ct中
         node_meta.mul_single = out_channels * in_ct * kernel_ratio
 
         # 旋转相加通道求和+旋转相加得到输出的ct
         node_meta.rotation = math.ceil(math.log2(ch_per_ct)) + out_ch_per_ct * out_ct
-
         node_meta.mul_both = 0
 
-        node_meta.rescale = node_meta.mul_both + node_meta.mul_single # 每一个乘法后面都需要加rescale
-
-        node_meta.in_ct = in_ct
-        node_meta.out_ct = out_ct
-        
+        self._set_rescale(node_meta, include_single=True)
         self.node_meta_list[node] = node_meta
 
     def relu_statistics(self, node: Node):
-        # tensor_meta = self.get_tensor_meta(node)
-        # output_shape = tensor_meta.shape
-        # module = self.traced.get_submodule(str(node.target))
+        # BSGS优化
+        # sign默认14个乘法深度，乘x再多一个乘法深度
+        node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=15)
 
-        in_shape = self.get_in_shape(node)
-
-        in_ct = self.calc_ct(in_shape)
-        out_ct = in_ct
-
-        node_meta = NodeMeta()
-
-        node_meta.mul_both = in_ct * 15 # sign默认14个乘法深度，乘x再多一个乘法深度
-        node_meta.in_depth = self.get_in_depth(node)
-        node_meta.out_depth = self.get_in_depth(node)
-
-        node_meta.in_ct = in_ct
-        node_meta.out_ct = out_ct
+        # 445最多约消耗2^4 + 2^4 + 2^5次乘法，考虑到一般用不满所有项，因此除以2，等于32
+        # 再算上乘x，等于33
+        node_meta.mul_both = in_ct * 33
+        node_meta.mul_single = in_ct * 33 # 每一个非零多项式项都要跟一个系数
+        self._set_rescale(node_meta, include_single=True)
         
+        self.node_meta_list[node] = node_meta
+
+    def learnable_swish_statistics(self, node: Node):
+        # BSGS 优化
+        # x*sigmoid(beta*x)，sigmoid默认14个乘法深度，乘x和beta多两个乘法深度
+        node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=15)
+        
+        # 消耗次数与relu对齐，445+1
+        node_meta.mul_both = in_ct * 33
+        node_meta.mul_single = 33 # 原因同relu
+        self._set_rescale(node_meta, include_single=True)
+        
+        self.node_meta_list[node] = node_meta
+
+    def poly7_statistics(self, node: Node):
+        node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=3)
+
+        node_meta.mul_both = in_ct * 8 # 这个是全部用上了
+        node_meta.mul_single = in_ct * 8
+
+        self._set_rescale(node_meta, include_single=True)
+
         self.node_meta_list[node] = node_meta
 
     def maxpool_statistics(self, node: Node):
         # max的实现为(a+b)/2 + sign(a-b)/2
-        in_shape = self.get_in_shape(node)
-        tensor_meta = self.get_tensor_meta(node)
-        out_shape = tensor_meta.shape
-        node_meta = NodeMeta()
+        # 深度增加30：(14+1) + (14+1) = 30 (树状比较)
+        node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=30)
         
-        in_ct = self.calc_ct(in_shape)
-        out_ct = self.calc_ct(out_shape)
-
-        # 由于不同实现的旋转次数不一样，所以我们按照4合1的2次旋转估计
+        # 按照4合1的2次旋转估计
         node_meta.rotation = in_ct * 2
-
-        # abcd得到最大值最少需要比较2次，而且是树状的比较，因此深度为(14+1) + (14+1) = 30
-        in_depth = self.get_in_depth(node)
-        out_depth = in_depth + 30
-        node_meta.in_depth = in_depth
-        node_meta.out_depth = out_depth
-
-
-        # 由于所有通道都要max一下，所以我们认为最少需要这么多次
+        
+        # 由于所有通道都要max一下，最少需要28次密文-密文乘法+2次密文-明文乘法
         node_meta.mul_both = 28 * in_ct
-
         node_meta.mul_single = 2 * in_ct
-
-        node_meta.rescale = node_meta.mul_both + node_meta.mul_single
-
-        node_meta.in_ct = in_ct
-        node_meta.out_ct = out_ct
-
+        
+        self._set_rescale(node_meta, include_single=True)
         self.node_meta_list[node] = node_meta
 
     def avepool_statistics(self, node: Node):
-        in_shape = self.get_in_shape(node) 
-        tensor_meta = self.get_tensor_meta(node)
-        out_shape = tensor_meta.shape
-        node_meta = NodeMeta()
-
-        in_ct = self.calc_ct(in_shape)
-        out_ct = self.calc_ct(out_shape)
-
+        # 求和乘以0.25，深度增加1
+        node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=1)
+        
         node_meta.rotation = in_ct * 2
-
-        in_depth = self.get_in_depth(node)
-        # 求和乘以0.25
-        out_depth = in_depth + 1
-
-        node_meta.in_depth = in_depth
-        node_meta.out_depth = out_depth
-
-        node_meta.mul_single = 1 * in_ct
-
-        node_meta.rescale = node_meta.mul_single
-
-        node_meta.in_ct = in_ct
-        node_meta.out_ct = out_ct
-
+        node_meta.mul_single = in_ct
+        
+        self._set_rescale(node_meta, include_single=False)
         self.node_meta_list[node] = node_meta
 
     def adaptiveavepool2d_statistcs(self, node: Node):
         in_shape = self.get_in_shape(node)
-        in_channel = in_shape[1]
-        tensor_meta = self.get_tensor_meta(node)
-        out_shape = tensor_meta.shape
-        
-        in_shape  = self.get_in_shape(node)
         in_ct = self.calc_ct(in_shape)
-        out_ct = 1
+        
+        # 输出为1个ct
+        node_meta = NodeMeta()
+        in_depth = self.get_in_depth(node)
+        node_meta.in_depth = in_depth
+        node_meta.out_depth = in_depth + 1
+        
+        node_meta.in_ct = in_ct
+        node_meta.out_ct = 1
         
         feature_map_size = in_shape[2] * in_shape[3]
-
-        log2_map_size =  math.log2(feature_map_size)
+        log2_map_size = math.log2(feature_map_size)
         
-        node_meta = NodeMeta()
-
         # 旋转求和，重复in_ct次，添加一个0.5*channel_size作为重整化的旋转补偿
         node_meta.rotation = log2_map_size * in_ct + int(0.5 * in_shape[1])
         
-        # 需要乘mask，所以需要消耗1个乘法深度
-        in_depth = self.get_in_depth(node)
-        out_depth = in_depth + 1
-
-        node_meta.in_depth = in_depth
-        node_meta.out_depth = out_depth
-
+        # 需要乘mask
         node_meta.mul_single = 1
         node_meta.mul_both = 0
-        node_meta.rescale = node_meta.mul_single
-
-        node_meta.in_ct = in_ct
-        node_meta.out_ct = out_ct
+        self._set_rescale(node_meta, include_single=False)
+        
+        self.node_meta_list[node] = node_meta
+    
 
 def exp_statistics(model: nn.Module):
+    model = model.eval()
     traced = fx.symbolic_trace(model)
+    
     dummy_input = torch.randn(1, 3, 224, 224)
     ShapeProp(traced).propagate(dummy_input)
 
