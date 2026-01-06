@@ -1,5 +1,5 @@
 """
-测试 StablePoly4 的 set_epoch 方法是否被正确调用
+测试 StablePoly7 的 set_epoch 方法是否被正确调用
 """
 
 import torch
@@ -12,11 +12,11 @@ def test_set_epoch_fix():
     """测试 set_epoch 是否被正确调用"""
     
     print("=" * 60)
-    print("测试 StablePoly4 set_epoch 修复")
+    print("测试 StablePoly7 set_epoch 修复")
     print("=" * 60)
     
-    # 创建一个使用 StablePoly4 的模型
-    model_name = 'resnet-basic-stablepoly4-layer1block1'
+    # 创建一个使用 StablePoly7 的模型
+    model_name = 'resnet-basic-stablepoly7-layer1block1'
     print(f"\n创建模型: {model_name}")
     
     try:
@@ -26,16 +26,16 @@ def test_set_epoch_fix():
         print(f"✗ 模型创建失败: {e}")
         return False
     
-    # 统计 StablePoly4 实例数量
+    # 统计 StablePoly7 实例数量
     stablepoly_count = 0
     for module in model.modules():
-        if module.__class__.__name__ == 'StablePoly4':
+        if module.__class__.__name__ == 'StablePoly7':
             stablepoly_count += 1
     
-    print(f"✓ 找到 {stablepoly_count} 个 StablePoly4 实例")
+    print(f"✓ 找到 {stablepoly_count} 个 StablePoly7 实例")
     
     if stablepoly_count == 0:
-        print("✗ 警告：没有找到 StablePoly4 实例")
+        print("✗ 警告：没有找到 StablePoly7 实例")
         return False
     
     # 创建一个简化的 Trainer 对象（不需要真实的数据加载器）
@@ -55,10 +55,10 @@ def test_set_epoch_fix():
         # 调用 _set_epoch_for_model
         trainer._set_epoch_for_model(epoch)
         
-        # 检查所有 StablePoly4 实例的 current_epoch
+        # 检查所有 StablePoly7 实例的 current_epoch
         all_match = True
         for module in model.modules():
-            if module.__class__.__name__ == 'StablePoly4':
+            if module.__class__.__name__ == 'StablePoly7':
                 if module.current_epoch != epoch:
                     all_match = False
                     print(f"  ✗ Epoch {epoch}: 某些模块的 current_epoch 未正确更新")
@@ -70,9 +70,9 @@ def test_set_epoch_fix():
             # 31-40 个 epoch: alpha 逐渐从 0 到 1 (过渡)
             # 40+ 个 epoch: alpha = 1.0 (使用多项式)
             
-            # 测试一个 StablePoly4 实例的 forward 行为
+            # 测试一个 StablePoly7 实例的 forward 行为
             for module in model.modules():
-                if module.__class__.__name__ == 'StablePoly4':
+                if module.__class__.__name__ == 'StablePoly7':
                     x = torch.tensor([[1.0]])
                     with torch.no_grad():
                         output = module(x)

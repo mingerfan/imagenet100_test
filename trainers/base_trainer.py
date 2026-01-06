@@ -87,7 +87,7 @@ class Trainer:
         递归地为模型中所有需要 epoch 信息的模块设置 epoch
         
         这个方法会遍历模型的所有子模块，找到所有具有 set_epoch 方法的模块
-        （例如 StablePoly4 激活函数）并调用它们的 set_epoch 方法。
+        （例如 StablePoly7 激活函数）并调用它们的 set_epoch 方法。
         
         Args:
             epoch: 当前训练的 epoch 编号

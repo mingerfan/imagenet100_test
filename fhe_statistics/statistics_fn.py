@@ -1,3 +1,4 @@
+from networkx import in_degree_centrality
 from setuptools.tests.config.test_apply_pyprojecttoml import core_metadata
 from mpmath.tests.test_identify import ceil
 from sympy.tensor.array.expressions.array_expressions import get_shape
@@ -191,8 +192,56 @@ class FheInfo:
         in_ct = self.calc_ct(in_shape)
         out_ct = self.calc_ct(out_shape)
 
-        node_meta.rotation = 
+        node_meta.rotation = in_ct * 2
+
+        in_depth = self.get_in_depth(node)
+        # 求和乘以0.25
+        out_depth = in_depth + 1
+
+        node_meta.in_depth = in_depth
+        node_meta.out_depth = out_depth
+
+        node_meta.mul_single = 1 * in_ct
+
+        node_meta.rescale = node_meta.mul_single
+
+        node_meta.in_ct = in_ct
+        node_meta.out_ct = out_ct
+
+        self.node_meta_list[node] = node_meta
+
+    def adaptiveavepool2d_statistcs(self, node: Node):
+        in_shape = self.get_in_shape(node)
+        in_channel = in_shape[1]
+        tensor_meta = self.get_tensor_meta(node)
+        out_shape = tensor_meta.shape
         
+        in_shape  = self.get_in_shape(node)
+        in_ct = self.calc_ct(in_shape)
+        out_ct = 1
+        
+        feature_map_size = in_shape[2] * in_shape[3]
+
+        log2_map_size =  math.log2(feature_map_size)
+        
+        node_meta = NodeMeta()
+
+        # 旋转求和，重复in_ct次，添加一个0.5*channel_size作为重整化的旋转补偿
+        node_meta.rotation = log2_map_size * in_ct + int(0.5 * in_shape[1])
+        
+        # 需要乘mask，所以需要消耗1个乘法深度
+        in_depth = self.get_in_depth(node)
+        out_depth = in_depth + 1
+
+        node_meta.in_depth = in_depth
+        node_meta.out_depth = out_depth
+
+        node_meta.mul_single = 1
+        node_meta.mul_both = 0
+        node_meta.rescale = node_meta.mul_single
+
+        node_meta.in_ct = in_ct
+        node_meta.out_ct = out_ct
 
 def exp_statistics(model: nn.Module):
     traced = fx.symbolic_trace(model)

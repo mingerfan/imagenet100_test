@@ -10,7 +10,7 @@ from .gate_net_cmp.block_def import (
     Relu,
     LearnableSwish,
     LearnableRelu,
-    StablePoly4,
+    StablePoly7,
 )
 
 
@@ -112,7 +112,7 @@ class ResNet18Gate(nn.Module):
 
 # ============ 生成 16 个变体 ============
 # Block types: basic, basic_self_gated, bottleneck, bottleneck_self_gated
-# Activations: Relu, LearnableSwish, LearnableRelu, StablePoly4
+# Activations: Relu, LearnableSwish, LearnableRelu, StablePoly7
 
 # ===== Basic Block Variants =====
 @register_model('resnet-basic-relu-layer1block1')
@@ -160,10 +160,10 @@ def resnet_basic_learnablerelu(num_classes=100, pretrained=False):
     return ResNet18Gate('basic', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
-@register_model('resnet-basic-stablepoly4-layer1block1')
-def resnet_basic_stablepoly4(num_classes=100, pretrained=False):
+@register_model('resnet-basic-stablepoly7-layer1block1')
+def resnet_basic_stablepoly7(num_classes=100, pretrained=False):
     """
-    创建 Basic Block + StablePoly4 的 ResNet 变体
+    创建 Basic Block + StablePoly7 的 ResNet 变体
     
     Args:
         num_classes: 类别数量
@@ -172,7 +172,7 @@ def resnet_basic_stablepoly4(num_classes=100, pretrained=False):
     Returns:
         model: ResNet模型
     """
-    return ResNet18Gate('basic', StablePoly4, num_classes, first_block_factor=0.25)
+    return ResNet18Gate('basic', StablePoly7, num_classes, first_block_factor=0.25)
 
 
 # ===== Basic Self-Gated Block Variants =====
@@ -221,10 +221,10 @@ def resnet_basic_self_gated_learnablerelu(num_classes=100, pretrained=False):
     return ResNet18Gate('basic_self_gated', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
-@register_model('resnet-basic_self_gated-stablepoly4-layer1block1')
-def resnet_basic_self_gated_stablepoly4(num_classes=100, pretrained=False):
+@register_model('resnet-basic_self_gated-stablepoly7-layer1block1')
+def resnet_basic_self_gated_stablepoly7(num_classes=100, pretrained=False):
     """
-    创建 Basic Self-Gated Block + StablePoly4 的 ResNet 变体
+    创建 Basic Self-Gated Block + StablePoly7 的 ResNet 变体
     
     Args:
         num_classes: 类别数量
@@ -233,7 +233,7 @@ def resnet_basic_self_gated_stablepoly4(num_classes=100, pretrained=False):
     Returns:
         model: ResNet模型
     """
-    return ResNet18Gate('basic_self_gated', StablePoly4, num_classes, first_block_factor=0.25)
+    return ResNet18Gate('basic_self_gated', StablePoly7, num_classes, first_block_factor=0.25)
 
 
 # ===== Bottleneck Block Variants =====
@@ -282,10 +282,10 @@ def resnet_bottleneck_learnablerelu(num_classes=100, pretrained=False):
     return ResNet18Gate('bottleneck', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
-@register_model('resnet-bottleneck-stablepoly4-layer1block1')
-def resnet_bottleneck_stablepoly4(num_classes=100, pretrained=False):
+@register_model('resnet-bottleneck-stablepoly7-layer1block1')
+def resnet_bottleneck_stablepoly7(num_classes=100, pretrained=False):
     """
-    创建 Bottleneck Block + StablePoly4 的 ResNet 变体
+    创建 Bottleneck Block + StablePoly7 的 ResNet 变体
     
     Args:
         num_classes: 类别数量
@@ -294,7 +294,7 @@ def resnet_bottleneck_stablepoly4(num_classes=100, pretrained=False):
     Returns:
         model: ResNet模型
     """
-    return ResNet18Gate('bottleneck', StablePoly4, num_classes, first_block_factor=0.25)
+    return ResNet18Gate('bottleneck', StablePoly7, num_classes, first_block_factor=0.25)
 
 
 # ===== Bottleneck Self-Gated Block Variants =====
@@ -343,10 +343,10 @@ def resnet_bottleneck_self_gated_learnablerelu(num_classes=100, pretrained=False
     return ResNet18Gate('bottleneck_self_gated', LearnableRelu, num_classes, first_block_factor=0.25)
 
 
-@register_model('resnet-bottleneck_self_gated-stablepoly4-layer1block1')
-def resnet_bottleneck_self_gated_stablepoly4(num_classes=100, pretrained=False):
+@register_model('resnet-bottleneck_self_gated-stablepoly7-layer1block1')
+def resnet_bottleneck_self_gated_stablepoly7(num_classes=100, pretrained=False):
     """
-    创建 Bottleneck Self-Gated Block + StablePoly4 的 ResNet 变体
+    创建 Bottleneck Self-Gated Block + StablePoly7 的 ResNet 变体
     
     Args:
         num_classes: 类别数量
@@ -355,4 +355,4 @@ def resnet_bottleneck_self_gated_stablepoly4(num_classes=100, pretrained=False):
     Returns:
         model: ResNet模型
     """
-    return ResNet18Gate('bottleneck_self_gated', StablePoly4, num_classes, first_block_factor=0.25)
+    return ResNet18Gate('bottleneck_self_gated', StablePoly7, num_classes, first_block_factor=0.25)
