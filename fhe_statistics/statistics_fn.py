@@ -12,6 +12,12 @@ from torch import fx, nn
 from torch.fx.node import Node
 from torch.fx.passes.shape_prop import ShapeProp, TensorMetadata
 
+def next_power_of_2_float(n):
+    if n <= 0:
+        return 1
+    return 2 ** math.ceil(math.log2(n))
+
+
 # 尝试导入自定义模块
 try:
     sys.path.insert(0, '..')
@@ -22,12 +28,6 @@ try:
     HAS_CUSTOM_MODULES = True
 except ImportError:
     HAS_CUSTOM_MODULES = False
-
-
-    def next_power_of_2_float(n):
-        if n <= 0:
-            return 1
-        return 2 ** math.ceil(math.log2(n))
 
 
 def get_script_dir():
@@ -695,13 +695,38 @@ class FheInfo:
                 f.write(output)
             print(f"\nResults saved to {output_file}")
 
-    def plot_statistics(self, plot_folder: Optional[str] = None, show: bool = True):
+    def plot_statistics(self, plot_folder: Optional[str] = None, show: bool = True, 
+                       plot_types: Optional[List[str]] = None):
         """绘制统计结果并保存到文件
         
         Args:
             plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
             show: 是否显示图表
+            plot_types: 要绘制的图表类型列表，可选值：
+                - 'basic': 基础图表（饼图和柱状图）
+                - 'operator_stack': 算子堆栈图
+                - 'depth_histogram': 深度直方图
+                - 'all': 所有图表（默认）
         """
+        if plot_types is None:
+            plot_types = ['all']
+        
+        # 如果是'all'，绘制所有图表
+        if 'all' in plot_types:
+            self.plot_operator_stack(plot_folder=plot_folder, show=show)
+            self.plot_depth_histogram(bin_size=10, plot_folder=plot_folder, show=show)
+            self._plot_basic_statistics(plot_folder=plot_folder, show=show)
+        else:
+            # 根据指定类型绘制图表
+            if 'basic' in plot_types:
+                self._plot_basic_statistics(plot_folder=plot_folder, show=show)
+            if 'operator_stack' in plot_types:
+                self.plot_operator_stack(plot_folder=plot_folder, show=show)
+            if 'depth_histogram' in plot_types:
+                self.plot_depth_histogram(bin_size=10, plot_folder=plot_folder, show=show)
+
+    def _plot_basic_statistics(self, plot_folder: Optional[str] = None, show: bool = True):
+        """绘制基础统计图表（饼图和柱状图）"""
         try:
             import matplotlib.pyplot as plt
         except ImportError:
@@ -751,12 +776,14 @@ class FheInfo:
         if plot_folder:
             # 生成唯一文件名
             model_name = type(self.model).__name__
-            save_path = generate_unique_filename(model_name, "png", plot_folder)
+            save_path = generate_unique_filename(f"{model_name}_basic", "png", plot_folder)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Plot saved to {save_path}")
+            print(f"Basic statistics plot saved to {save_path}")
 
         if show:
             plt.show()
+        else:
+            plt.close()
 
     def get_per_node_boot_info(self) -> List[Dict]:
         """获取每个节点的boot信息"""
@@ -774,6 +801,390 @@ class FheInfo:
                 "boot_latency": meta.boot_latency,
             })
         return result
+
+    # ========== 数据准备函数 ==========
+
+    def get_operator_breakdown_data(self) -> Dict[str, Dict[str, float]]:
+        """获取每个算子类型的操作分解数据（用于算子堆栈图）
+        
+        Returns:
+            Dict结构: {
+                "conv": {
+                    "rotation": 1000.0,
+                    "mul_single": 2000.0,
+                    "mul_both": 500.0,
+                    "rescale": 2500.0,
+                    "total_latency": 6000.0,
+                    "total_boot_latency": 1000.0,
+                    "boot_by_source": {
+                        "conv": 800.0,
+                        "relu": 200.0,
+                        ...
+                    }
+                },
+                ...
+            }
+        """
+        result = {}
+        
+        for op_type, stats in self.op_stats.items():
+            # 获取该算子类型所有节点的详细数据
+            rotation_total = stats["rotation"]
+            mul_single_total = stats["mul_single"]
+            mul_both_total = stats["mul_both"]
+            rescale_total = stats["rescale"]
+            total_latency = stats["latency"]
+            total_boot = stats["boot_latency"]
+            
+            # 统计boot按来源算子类型
+            boot_by_source = defaultdict(float)
+            for node, meta in self.node_meta_list.items():
+                if meta.op_type == op_type and not meta.is_fused:
+                    if meta.boot_latency > 0:
+                        boot_by_source[meta.op_type] += meta.boot_latency
+            
+            result[op_type] = {
+                "rotation": rotation_total,
+                "mul_single": mul_single_total,
+                "mul_both": mul_both_total,
+                "rescale": rescale_total,
+                "total_latency": total_latency,
+                "total_boot_latency": total_boot,
+                "boot_by_source": dict(boot_by_source)
+            }
+        
+        return result
+
+    def get_depth_histogram_data(self, bin_size: int = 10) -> Dict:
+        """获取按深度范围聚合的数据（用于深度直方图）
+        
+        Args:
+            bin_size: 深度分箱大小（默认为10，对应level）
+        
+        Returns:
+            Dict结构: {
+                "bins": ["0-10", "10-20", "20-30", ...],
+                "op_data": {
+                    "conv": [100.0, 200.0, 300.0, ...],
+                    "relu": [50.0, 100.0, 150.0, ...],
+                    ...
+                },
+                "boot": [10.0, 20.0, 30.0, ...]  # boot单独列出
+            }
+        """
+        # 收集所有节点的深度信息
+        depth_data = defaultdict(lambda: defaultdict(float))
+        boot_data = defaultdict(float)
+        all_depths = []
+        
+        for node, meta in self.node_meta_list.items():
+            if meta.is_fused:
+                continue
+            
+            # 使用out_depth作为该节点的深度
+            depth = meta.out_depth
+            
+            # 计算该节点的总耗时（不含boot）
+            node_latency = meta.latency
+            
+            # 记录数据
+            depth_data[depth][meta.op_type] += node_latency
+            boot_data[depth] += meta.boot_latency
+            all_depths.append(depth)
+        
+        if not all_depths:
+            return {
+                "bins": [],
+                "op_data": {},
+                "boot": []
+            }
+        
+        # 确定深度分箱
+        min_depth = 0
+        max_depth = max(all_depths)
+        num_bins = math.ceil(max_depth / bin_size) + 1
+        
+        # 创建bins
+        bins = [f"{i*bin_size}-{(i+1)*bin_size}" for i in range(num_bins)]
+        
+        # 初始化结果结构
+        op_types = set()
+        for depth_dict in depth_data.values():
+            op_types.update(depth_dict.keys())
+        op_types = sorted(op_types)
+        
+        op_data = {op: [0.0] * num_bins for op in op_types}
+        boot = [0.0] * num_bins
+        
+        # 按bin聚合数据
+        for node, meta in self.node_meta_list.items():
+            if meta.is_fused:
+                continue
+            
+            depth = meta.out_depth
+            bin_idx = depth // bin_size
+            if bin_idx >= num_bins:
+                bin_idx = num_bins - 1
+            
+            op_data[meta.op_type][bin_idx] += meta.latency
+            boot[bin_idx] += meta.boot_latency
+        
+        return {
+            "bins": bins,
+            "op_data": op_data,
+            "boot": boot
+        }
+
+    def get_network_comparison_data(self) -> Dict[str, float]:
+        """获取网络汇总数据（用于网络横向比较图）
+        
+        Returns:
+            Dict结构: {
+                "conv": 7000.0,  # latency + boot_latency
+                "relu": 3000.0,
+                "maxpool": 2000.0,
+                ...
+            }
+        """
+        result = {}
+        
+        for op_type, stats in self.op_stats.items():
+            # 总耗时 = 操作耗时 + boot耗时
+            result[op_type] = stats["latency"] + stats["boot_latency"]
+        
+        return result
+
+    # ========== 可视化函数 ==========
+
+    def plot_operator_stack(self, plot_folder: Optional[str] = None, show: bool = True):
+        """绘制算子堆栈图：每个算子类型内部操作的堆叠 + boot按来源堆叠
+        
+        Args:
+            plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
+            show: 是否显示图表
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not installed, skipping plot")
+            return
+
+        data = self.get_operator_breakdown_data()
+        
+        if not data:
+            print("No data to plot")
+            return
+
+        # 按总耗时排序
+        sorted_ops = sorted(data.items(), key=lambda x: x[1]["total_latency"], reverse=True)
+        
+        # 准备数据
+        op_types = [op for op, _ in sorted_ops]
+        rotation = [data[op]["rotation"] for op in op_types]
+        mul_single = [data[op]["mul_single"] for op in op_types]
+        mul_both = [data[op]["mul_both"] for op in op_types]
+        rescale = [data[op]["rescale"] for op in op_types]
+        boot_total = [data[op]["total_boot_latency"] for op in op_types]
+        
+        # 收集所有可能的boot来源
+        all_boot_sources = set()
+        for op, op_data in data.items():
+            all_boot_sources.update(op_data["boot_by_source"].keys())
+        all_boot_sources = sorted(all_boot_sources)
+        
+        # 创建子图
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
+        
+        # 左图：操作堆叠图
+        x = range(len(op_types))
+        width = 0.6
+        
+        # 堆叠操作类型
+        bottom1 = [0] * len(op_types)
+        for op_data, color, label in [
+            (rotation, 'lightblue', 'Rotation'),
+            (mul_single, 'steelblue', 'Mul Single'),
+            (mul_both, 'navy', 'Mul Both'),
+            (rescale, 'darkred', 'Rescale'),
+        ]:
+            ax1.bar(x, op_data, width, bottom=bottom1, label=label, color=color)
+            bottom1 = [b + o for b, o in zip(bottom1, op_data)]
+        
+        ax1.set_xlabel('Operator Type')
+        ax1.set_ylabel('Latency')
+        ax1.set_title('Operator Internal Operation Stack')
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(op_types, rotation=45, ha='right')
+        ax1.legend()
+        
+        # 右图：Boot按来源堆叠图
+        bottom2 = [0] * len(op_types)
+        boot_colors = plt.cm.Set3(range(len(all_boot_sources)))
+        
+        for source, color in zip(all_boot_sources, boot_colors):
+            boot_values = [data[op].get("boot_by_source", {}).get(source, 0) for op in op_types]
+            ax2.bar(x, boot_values, width, bottom=bottom2, label=f'Boot from {source}', color=color)
+            bottom2 = [b + o for b, o in zip(bottom2, boot_values)]
+        
+        ax2.set_xlabel('Operator Type')
+        ax2.set_ylabel('Boot Latency')
+        ax2.set_title('Boot Latency by Source')
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(op_types, rotation=45, ha='right')
+        ax2.legend()
+        
+        plt.suptitle(f'{type(self.model).__name__} - Operator Breakdown', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        if plot_folder:
+            model_name = type(self.model).__name__
+            save_path = generate_unique_filename(f"{model_name}_operator_stack", "png", plot_folder)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Operator stack plot saved to {save_path}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    def plot_depth_histogram(self, bin_size: int = 10, plot_folder: Optional[str] = None, show: bool = True):
+        """绘制深度直方图：横坐标为深度范围，纵坐标为堆叠的算子耗时 + boot单独列出
+        
+        Args:
+            bin_size: 深度分箱大小（默认为10）
+            plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
+            show: 是否显示图表
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not installed, skipping plot")
+            return
+
+        data = self.get_depth_histogram_data(bin_size)
+        
+        if not data["bins"]:
+            print("No data to plot")
+            return
+
+        bins = data["bins"]
+        op_data = data["op_data"]
+        boot_data = data["boot"]
+        
+        # 获取所有算子类型并按总耗时排序
+        op_totals = {}
+        for op_type, values in op_data.items():
+            op_totals[op_type] = sum(values)
+        sorted_ops = sorted(op_totals.items(), key=lambda x: x[1], reverse=True)
+        op_types = [op for op, _ in sorted_ops]
+        
+        # 创建子图
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+        
+        x = range(len(bins))
+        width = 0.8
+        
+        # 堆叠各算子类型
+        bottom = [0] * len(bins)
+        colors = plt.cm.tab20(range(len(op_types)))
+        
+        for op_type, color in zip(op_types, colors):
+            values = op_data[op_type]
+            ax.bar(x, values, width, bottom=bottom, label=op_type, color=color)
+            bottom = [b + v for b, v in zip(bottom, values)]
+        
+        # 添加boot（单独显示，不堆叠在算子中）
+        # 为了更清晰，我们在每个bin上叠加显示boot
+        boot_bars = ax.bar(x, boot_data, width, bottom=bottom, label='Boot', color='black', alpha=0.5, hatch='//')
+        
+        ax.set_xlabel(f'Depth Range (bin_size={bin_size})')
+        ax.set_ylabel('Latency')
+        ax.set_title(f'{type(self.model).__name__} - Latency by Depth Range')
+        ax.set_xticks(x)
+        ax.set_xticklabels(bins, rotation=45, ha='right')
+        ax.legend(loc='upper right', bbox_to_anchor=(1.15, 1))
+        
+        plt.tight_layout()
+
+        if plot_folder:
+            model_name = type(self.model).__name__
+            save_path = generate_unique_filename(f"{model_name}_depth_histogram", "png", plot_folder)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Depth histogram plot saved to {save_path}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    @staticmethod
+    def plot_network_comparison(network_data: Dict[str, Dict[str, float]], plot_folder: Optional[str] = None, show: bool = True):
+        """绘制网络横向比较图：横坐标为不同网络，纵坐标为堆叠的算子耗时
+        
+        Args:
+            network_data: 字典，结构为 {network_name: {op_type: latency, ...}}
+            plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
+            show: 是否显示图表
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            print("matplotlib not installed, skipping plot")
+            return
+
+        if not network_data:
+            print("No data to plot")
+            return
+
+        # 获取所有网络名称和算子类型
+        network_names = list(network_data.keys())
+        
+        # 收集所有算子类型
+        all_op_types = set()
+        for net_data in network_data.values():
+            all_op_types.update(net_data.keys())
+        all_op_types = sorted(all_op_types)
+        
+        # 计算每个算子类型的总耗时（所有网络），用于排序
+        op_totals = {}
+        for op_type in all_op_types:
+            op_totals[op_type] = sum(net_data.get(op_type, 0) for net_data in network_data.values())
+        sorted_ops = sorted(op_totals.items(), key=lambda x: x[1], reverse=True)
+        op_types = [op for op, _ in sorted_ops]
+        
+        # 创建图表
+        fig, ax = plt.subplots(1, 1, figsize=(14, 8))
+        
+        x = range(len(network_names))
+        width = 0.8
+        
+        # 堆叠各算子类型
+        bottom = [0] * len(network_names)
+        colors = plt.cm.tab20(range(len(op_types)))
+        
+        for op_type, color in zip(op_types, colors):
+            values = [network_data[net_name].get(op_type, 0) for net_name in network_names]
+            ax.bar(x, values, width, bottom=bottom, label=op_type, color=color)
+            bottom = [b + v for b, v in zip(bottom, values)]
+        
+        ax.set_xlabel('Network')
+        ax.set_ylabel('Latency')
+        ax.set_title('Network Comparison - Latency by Operator Type')
+        ax.set_xticks(x)
+        ax.set_xticklabels(network_names, rotation=45, ha='right')
+        ax.legend(loc='upper right', bbox_to_anchor=(1.15, 1))
+        
+        plt.tight_layout()
+
+        if plot_folder:
+            save_path = generate_unique_filename("network_comparison", "png", plot_folder)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Network comparison plot saved to {save_path}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close()
 
 
 def exp_statistics(model: nn.Module):
@@ -845,6 +1256,43 @@ def analyze_model(model: nn.Module, model_name: str | None = None,
         fhe_info.plot_statistics(plot_folder=plot_folder, show=False)
 
     return fhe_info
+
+
+def compare_networks(models: List[Tuple[str, nn.Module]], plot_folder: str | None = None,
+                     input_shape: Tuple[int, ...] = (1, 3, 224, 224)):
+    """比较多个网络的FHE统计信息并绘制横向比较图
+    
+    Args:
+        models: 模型列表，每个元素为 (model_name, model) 元组
+        plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
+        input_shape: 输入张量形状
+    
+    Returns:
+        Dict: 包含所有网络比较数据的字典
+    """
+    network_data = {}
+    
+    for model_name, model in models:
+        print(f"\n{'='*50}")
+        print(f"Analyzing {model_name}")
+        print(f"{'='*50}")
+        
+        fhe_info = FheInfo(model, input_shape)
+        fhe_info.run_statistics()
+        
+        # 打印该网络的统计信息
+        fhe_info.print_statistics()
+        
+        # 获取该网络的汇总数据
+        network_data[model_name] = fhe_info.get_network_comparison_data()
+    
+    # 绘制网络横向比较图
+    if plot_folder:
+        FheInfo.plot_network_comparison(network_data, plot_folder=plot_folder, show=False)
+    else:
+        FheInfo.plot_network_comparison(network_data, plot_folder=None, show=True)
+    
+    return network_data
 
 
 if __name__ == "__main__":
