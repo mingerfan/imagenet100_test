@@ -40,6 +40,10 @@ def test_single_model():
     fhe_info.plot_depth_histogram(bin_size=10, plot_folder=".", show=False)
     print("✓ 深度直方图生成成功")
     
+    # 测试带max_bins的深度直方图
+    fhe_info.plot_depth_histogram(bin_size=10, max_bins=30, plot_folder=".", show=False)
+    print("✓ 深度直方图（限制30个区间）生成成功")
+    
     fhe_info._plot_basic_statistics(plot_folder=".", show=False)
     print("✓ 基础统计图生成成功")
     

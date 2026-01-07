@@ -97,10 +97,10 @@ class NodeMeta:
 
 
 class FheInfo:
-    def __init__(self, model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224)):
+    def __init__(self, model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224), model_name: Optional[str] = None):
         # 成本参数
-        self.rotation_cost = 200
-        self.rescale_cost = 50
+        self.rotation_cost = 180
+        self.rescale_cost = 40
         self.mul_single_cost = 9.5
         self.mul_double_cost = 253
         self.boot_cost = 98136
@@ -110,6 +110,7 @@ class FheInfo:
         self.input_shape = input_shape
 
         self.model = model.eval()
+        self.model_name = model_name if model_name else type(model).__name__
         self.traced = fx.symbolic_trace(model)
         dummy_input = torch.randn(*input_shape)
         ShapeProp(self.traced).propagate(dummy_input)
@@ -207,9 +208,7 @@ class FheInfo:
 
     def _calc_boot(self, node_meta: NodeMeta):
         """计算该节点触发的boot次数和耗时"""
-        in_boots = math.ceil(node_meta.in_depth / self.level) if node_meta.in_depth > 0 else 0
-        out_boots = math.ceil(node_meta.out_depth / self.level) if node_meta.out_depth > 0 else 0
-        boot_triggered = max(0, out_boots - in_boots)
+        boot_triggered = max(0, (node_meta.out_depth - node_meta.in_depth)//self.level)
         node_meta.boot_count = boot_triggered
         node_meta.boot_latency = boot_triggered * node_meta.out_ct * self.boot_cost
 
@@ -262,7 +261,9 @@ class FheInfo:
     def conv_statistics(self, node: Node):
         module = self.traced.get_submodule(str(node.target))
         out_channels = module.out_channels
+        in_channels = module.in_channels
         kernel_size = module.kernel_size
+        groups = module.groups # 需要区分深度卷积，否则对MobileNet不公平
 
         node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=2)
 
@@ -276,9 +277,17 @@ class FheInfo:
             out_ch_per_ct = 1
 
         kernel_ratio = kernel_size[0] * kernel_size[1]
-        node_meta.mul_single = out_channels * in_ct * kernel_ratio
-        node_meta.rotation = math.ceil(math.log2(max(1, ch_per_ct))) + out_ch_per_ct * out_ct
-        node_meta.mul_both = 0
+        if groups == 1:
+            node_meta.mul_single = out_channels * in_ct * kernel_ratio
+            node_meta.rotation = math.ceil(math.log2(max(1, ch_per_ct))) + min(out_ch_per_ct, out_channels) * out_ct
+            node_meta.mul_both = 0
+        elif groups == in_channels:
+            # 深度卷积
+            node_meta.mul_single = in_ct * kernel_ratio
+            node_meta.rotation = 0 # 深度卷积没旋转
+            node_meta.mul_both = 0
+        else:
+            raise ValueError("groups 参数不正确")
 
         self._set_rescale(node_meta, include_single=True)
         self._finalize_node(node, node_meta, "conv")
@@ -309,7 +318,7 @@ class FheInfo:
         node_meta.mul_both = in_ct * 32
         node_meta.mul_single = in_ct * 32
         self._set_rescale(node_meta, include_single=True)
-        self._finalize_node(node, node_meta, "learnable_swish")
+        self._finalize_node(node, node_meta, "swish")
 
     def learnable_relu_statistics(self, node: Node):
         """LearnableRelu: maximum(beta*x, 0) 使用sign实现，与relu类似"""
@@ -324,7 +333,7 @@ class FheInfo:
         node_meta.mul_both = in_ct * 31
         node_meta.mul_single = in_ct * 31
         self._set_rescale(node_meta, include_single=True)
-        self._finalize_node(node, node_meta, "learnable_relu")
+        self._finalize_node(node, node_meta, "sigmoid")
 
 
     def poly7_statistics(self, node: Node):
@@ -652,7 +661,7 @@ class FheInfo:
             output_folder: 输出文件夹路径（如果为None则不保存到文件）
         """
         lines = []
-        model_name = type(self.model).__name__
+        model_name = self.model_name
         lines.append("=" * 110)
         lines.append(f"FHE Statistics for {model_name}")
         lines.append("=" * 110)
@@ -694,6 +703,104 @@ class FheInfo:
             with open(output_file, "w") as f:
                 f.write(output)
             print(f"\nResults saved to {output_file}")
+    
+    def print_detailed_statistics(self, output_folder: Optional[str] = None):
+        """打印详细的逐个算子统计信息（包括拓扑排序和每个算子的详细耗时）
+        
+        Args:
+            output_folder: 输出文件夹路径（如果为None则不保存到文件）
+        """
+        lines = []
+        model_name = self.model_name
+        lines.append("=" * 130)
+        lines.append(f"Detailed FHE Statistics for {model_name}")
+        lines.append("=" * 130)
+        
+        # 第一部分：拓扑排序
+        lines.append("\n" + "=" * 130)
+        lines.append("TOPOLOGICAL ORDER")
+        lines.append("=" * 130)
+        topo_header = f"{'Topo Order':>10} {'Node ID':>15} {'Node Name':<30} {'Op Type':<20} {'In Depth':>10} {'Out Depth':>10} {'In CT':>8} {'Out CT':>8}"
+        lines.append(topo_header)
+        lines.append("-" * 130)
+        
+        # 获取拓扑排序（按traced.graph.nodes的顺序）
+        topo_order = 0
+        for node in self.traced.graph.nodes:
+            if node not in self.node_meta_list:
+                continue
+            meta = self.node_meta_list[node]
+            node_id = id(node)
+            node_name = node.name
+            op_type = meta.op_type
+            in_depth = meta.in_depth
+            out_depth = meta.out_depth
+            in_ct = meta.in_ct
+            out_ct = meta.out_ct
+            
+            line = f"{topo_order:>10} {node_id:>15} {node_name:<30} {op_type:<20} {in_depth:>10} {out_depth:>10} {in_ct:>8} {out_ct:>8}"
+            lines.append(line)
+            topo_order += 1
+        
+        # 第二部分：每个算子的详细统计
+        lines.append("\n" + "=" * 130)
+        lines.append("DETAILED OPERATOR STATISTICS")
+        lines.append("=" * 130)
+        detail_header = f"{'Topo Order':>10} {'Node Name':<30} {'Op Type':<20} {'Rotation':>10} {'MulSingle':>10} {'MulBoth':>10} {'Rescale':>10} {'Latency':>12} {'Boot Count':>10} {'Boot Latency':>12} {'Total':>12}"
+        lines.append(detail_header)
+        lines.append("-" * 130)
+        
+        # 获取拓扑排序
+        topo_order = 0
+        total_latency = 0
+        total_boot = 0
+        
+        for node in self.traced.graph.nodes:
+            if node not in self.node_meta_list:
+                continue
+            meta = self.node_meta_list[node]
+            
+            # 跳过fused算子
+            if meta.is_fused:
+                topo_order += 1
+                continue
+            
+            node_name = node.name
+            op_type = meta.op_type
+            rotation = meta.rotation
+            mul_single = meta.mul_single
+            mul_both = meta.mul_both
+            rescale = meta.rescale
+            latency = meta.latency
+            boot_count = meta.boot_count
+            boot_latency = meta.boot_latency
+            total = latency + boot_latency
+            
+            total_latency += latency
+            total_boot += boot_latency
+            
+            line = f"{topo_order:>10} {node_name:<30} {op_type:<20} {rotation:>10} {mul_single:>10} {mul_both:>10} {rescale:>10} {latency:>12.2f} {boot_count:>10} {boot_latency:>12.2f} {total:>12.2f}"
+            lines.append(line)
+            topo_order += 1
+        
+        # 第三部分：汇总统计
+        lines.append("\n" + "=" * 130)
+        lines.append("SUMMARY")
+        lines.append("=" * 130)
+        lines.append(f"Total Operation Latency (without boot): {total_latency:.2f}")
+        lines.append(f"Total Boot Latency: {total_boot:.2f}")
+        lines.append(f"Total Latency (with boot): {total_latency + total_boot:.2f}")
+        lines.append("=" * 130)
+
+        output = "\n".join(lines)
+        print(output)
+
+        if output_folder:
+            # 生成唯一文件名
+            output_file = generate_unique_filename(f"{model_name}_detailed", "txt", output_folder)
+            with open(output_file, "w") as f:
+                f.write(output)
+            print(f"\nDetailed results saved to {output_file}")
 
     def plot_statistics(self, plot_folder: Optional[str] = None, show: bool = True, 
                        plot_types: Optional[List[str]] = None):
@@ -703,10 +810,11 @@ class FheInfo:
             plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
             show: 是否显示图表
             plot_types: 要绘制的图表类型列表，可选值：
-                - 'basic': 基础图表（饼图和柱状图）
+                - 'basic': 基础图表（柱状图）
                 - 'operator_stack': 算子堆栈图
                 - 'depth_histogram': 深度直方图
-                - 'all': 所有图表（默认）
+                - 'network_comparison': 网络横向比较图（需要传入network_data）
+                - 'all': 所有基础图表（默认）
         """
         if plot_types is None:
             plot_types = ['all']
@@ -726,7 +834,7 @@ class FheInfo:
                 self.plot_depth_histogram(bin_size=10, plot_folder=plot_folder, show=show)
 
     def _plot_basic_statistics(self, plot_folder: Optional[str] = None, show: bool = True):
-        """绘制基础统计图表（饼图和柱状图）"""
+        """绘制基础统计图表（柱状图）"""
         try:
             import matplotlib.pyplot as plt
         except ImportError:
@@ -748,34 +856,25 @@ class FheInfo:
             latencies.append(stats["latency"])
             boot_latencies.append(stats["boot_latency"])
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-        # 饼图：各算子占比（含boot）
-        ax1 = axes[0]
-        sizes = [stats["latency"] + stats["boot_latency"] for stats in self.op_stats.values()]
-        labels = list(self.op_stats.keys())
-        # 添加单独的boot占比
-        ax1.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
-        ax1.set_title("Latency Distribution by Operator (including boot)")
+        fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
         # 柱状图：各算子耗时（分开显示操作和boot）
-        ax2 = axes[1]
         x = range(len(op_types))
         width = 0.35
-        bars1 = ax2.bar([i - width/2 for i in x], latencies, width, label='Operation', color='steelblue')
-        bars2 = ax2.bar([i + width/2 for i in x], boot_latencies, width, label='Boot', color='coral')
-        ax2.set_xlabel('Operator Type')
-        ax2.set_ylabel('Latency')
-        ax2.set_title('Latency by Operator Type')
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(op_types, rotation=45, ha='right')
-        ax2.legend()
+        bars1 = ax.bar([i - width/2 for i in x], latencies, width, label='Operation', color='steelblue')
+        bars2 = ax.bar([i + width/2 for i in x], boot_latencies, width, label='Boot', color='coral')
+        ax.set_xlabel('Operator Type')
+        ax.set_ylabel('Latency')
+        ax.set_title('Latency by Operator Type')
+        ax.set_xticks(x)
+        ax.set_xticklabels(op_types, rotation=45, ha='right')
+        ax.legend()
 
         plt.tight_layout()
 
         if plot_folder:
             # 生成唯一文件名
-            model_name = type(self.model).__name__
+            model_name = self.model_name
             save_path = generate_unique_filename(f"{model_name}_basic", "png", plot_folder)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Basic statistics plot saved to {save_path}")
@@ -855,11 +954,12 @@ class FheInfo:
         
         return result
 
-    def get_depth_histogram_data(self, bin_size: int = 10) -> Dict:
+    def get_depth_histogram_data(self, bin_size: int = 10, max_bins: Optional[int] = None) -> Dict:
         """获取按深度范围聚合的数据（用于深度直方图）
         
         Args:
             bin_size: 深度分箱大小（默认为10，对应level）
+            max_bins: 最大bin数量（可选），如果深度太大，会自动调整bin_size以控制bin数量
         
         Returns:
             Dict结构: {
@@ -902,6 +1002,13 @@ class FheInfo:
         # 确定深度分箱
         min_depth = 0
         max_depth = max(all_depths)
+        
+        # 如果指定了max_bins，调整bin_size
+        if max_bins is not None:
+            estimated_bins = math.ceil(max_depth / bin_size) + 1
+            if estimated_bins > max_bins:
+                bin_size = math.ceil(max_depth / max_bins)
+        
         num_bins = math.ceil(max_depth / bin_size) + 1
         
         # 创建bins
@@ -1033,11 +1140,11 @@ class FheInfo:
         ax2.set_xticklabels(op_types, rotation=45, ha='right')
         ax2.legend()
         
-        plt.suptitle(f'{type(self.model).__name__} - Operator Breakdown', fontsize=14, fontweight='bold')
+        plt.suptitle(f'{self.model_name} - Operator Breakdown', fontsize=14, fontweight='bold')
         plt.tight_layout()
 
         if plot_folder:
-            model_name = type(self.model).__name__
+            model_name = self.model_name
             save_path = generate_unique_filename(f"{model_name}_operator_stack", "png", plot_folder)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Operator stack plot saved to {save_path}")
@@ -1047,11 +1154,12 @@ class FheInfo:
         else:
             plt.close()
 
-    def plot_depth_histogram(self, bin_size: int = 10, plot_folder: Optional[str] = None, show: bool = True):
+    def plot_depth_histogram(self, bin_size: int = 10, max_bins: Optional[int] = 30, plot_folder: Optional[str] = None, show: bool = True):
         """绘制深度直方图：横坐标为深度范围，纵坐标为堆叠的算子耗时 + boot单独列出
         
         Args:
             bin_size: 深度分箱大小（默认为10）
+            max_bins: 最大bin数量（默认为30），如果深度太大，会自动调整bin_size以控制bin数量
             plot_folder: 图表保存文件夹路径（如果为None则不保存到文件）
             show: 是否显示图表
         """
@@ -1061,7 +1169,7 @@ class FheInfo:
             print("matplotlib not installed, skipping plot")
             return
 
-        data = self.get_depth_histogram_data(bin_size)
+        data = self.get_depth_histogram_data(bin_size, max_bins)
         
         if not data["bins"]:
             print("No data to plot")
@@ -1099,7 +1207,7 @@ class FheInfo:
         
         ax.set_xlabel(f'Depth Range (bin_size={bin_size})')
         ax.set_ylabel('Latency')
-        ax.set_title(f'{type(self.model).__name__} - Latency by Depth Range')
+        ax.set_title(f'{self.model_name} - Latency by Depth Range')
         ax.set_xticks(x)
         ax.set_xticklabels(bins, rotation=45, ha='right')
         ax.legend(loc='upper right', bbox_to_anchor=(1.15, 1))
@@ -1107,7 +1215,7 @@ class FheInfo:
         plt.tight_layout()
 
         if plot_folder:
-            model_name = type(self.model).__name__
+            model_name = self.model_name
             save_path = generate_unique_filename(f"{model_name}_depth_histogram", "png", plot_folder)
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
             print(f"Depth histogram plot saved to {save_path}")
@@ -1232,15 +1340,17 @@ def exp_statistics(model: nn.Module):
 
 def analyze_model(model: nn.Module, model_name: str | None = None,
                   output_folder: str | None = None, plot_folder: str | None = None,
-                  input_shape: Tuple[int, ...] = (1, 3, 224, 224)):
+                  input_shape: Tuple[int, ...] = (1, 3, 224, 224),
+                  print_detailed: bool = True):
     """分析模型的FHE统计信息
 
     Args:
         model: 要分析的模型
-        model_name: 模型名称（用于显示）
+        model_name: 模型名称（用于显示和文件命名）
         output_folder: 统计结果输出文件夹路径（文件名将自动生成）
         plot_folder: 图表保存文件夹路径（文件名将自动生成）
         input_shape: 输入张量形状
+        print_detailed: 是否打印详细统计信息（包括拓扑排序和每个算子的详细耗时）
 
     Returns:
         FheInfo: 统计信息对象
@@ -1248,9 +1358,17 @@ def analyze_model(model: nn.Module, model_name: str | None = None,
     if model_name:
         print(f"\nAnalyzing model: {model_name}")
 
-    fhe_info = FheInfo(model, input_shape)
+    fhe_info = FheInfo(model, input_shape, model_name)
     fhe_info.run_statistics()
+    
+    # 打印汇总统计
     fhe_info.print_statistics(output_folder)
+    
+    # 打印详细统计（包括拓扑排序和每个算子的详细耗时）
+    if print_detailed and output_folder:
+        fhe_info.print_detailed_statistics(output_folder)
+    elif print_detailed:
+        fhe_info.print_detailed_statistics(None)
 
     if plot_folder:
         fhe_info.plot_statistics(plot_folder=plot_folder, show=False)
@@ -1277,7 +1395,7 @@ def compare_networks(models: List[Tuple[str, nn.Module]], plot_folder: str | Non
         print(f"Analyzing {model_name}")
         print(f"{'='*50}")
         
-        fhe_info = FheInfo(model, input_shape)
+        fhe_info = FheInfo(model, input_shape, model_name)
         fhe_info.run_statistics()
         
         # 打印该网络的统计信息
@@ -1296,15 +1414,9 @@ def compare_networks(models: List[Tuple[str, nn.Module]], plot_folder: str | Non
 
 
 if __name__ == "__main__":
-    # 测试 ResNet18
-    print("\n" + "="*50)
-    print("Testing ResNet18")
-    print("="*50)
-    model = torchvision.models.resnet18()
-    fhe_info = analyze_model(model, "ResNet18", output_folder=".", plot_folder=".")
-
     # 测试更多模型
     models_to_test = [
+        ("ResNet18", torchvision.models.resnet18),
         ("ResNet34", torchvision.models.resnet34),
         ("ResNet50", torchvision.models.resnet50),
         ("VGG16", torchvision.models.vgg16),
@@ -1317,6 +1429,8 @@ if __name__ == "__main__":
     except AttributeError:
         print("EfficientNet not available in this torchvision version")
 
+    # 第一步：独立分析每个模型
+    models_for_comparison = []
     for name, model_fn in models_to_test:
         print("\n" + "="*50)
         print(f"Testing {name}")
@@ -1324,5 +1438,26 @@ if __name__ == "__main__":
         try:
             model = model_fn()
             analyze_model(model, name, output_folder="results", plot_folder="results")
+            # 将模型加入比较列表
+            models_for_comparison.append((name, model))
         except Exception as e:
             print(f"Error analyzing {name}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # 第二步：生成网络横向比较图
+    if models_for_comparison:
+        print("\n" + "="*50)
+        print("Generating Network Comparison")
+        print("="*50)
+        try:
+            compare_networks(models_for_comparison, plot_folder="results")
+            print("\n" + "="*50)
+            print("All analysis completed!")
+            print("="*50)
+        except Exception as e:
+            print(f"Error generating comparison: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("\nNo models successfully analyzed for comparison.")
