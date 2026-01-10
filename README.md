@@ -4,6 +4,15 @@
 
 **新增特性：** ✨ 支持内存文件系统（/dev/shm）加速数据加载，内存占用降低75%！
 
+## 📚 文档导航
+
+- **[完整文档索引](docs/INDEX.md)** - 查看所有文档
+- **[测试文档](test/README.md)** - 测试脚本使用指南
+- **[FHE 统计](fhe_statistics/README.md)** - FHE 统计模块文档
+- **[项目总结](docs/PROJECT_SUMMARY.md)** - 项目架构和重构历史
+- **[优化器改进](docs/OPTIMIZER_IMPROVEMENTS.md)** - 优化器配置指南
+- **[正则匹配](docs/REGEX_MATCHING_GUIDE.md)** - 正则表达式匹配模型
+
 ## 项目结构
 
 ```

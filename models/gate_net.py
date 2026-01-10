@@ -1,7 +1,6 @@
 """
 自定义 ResNet-18 变体，用于实验不同 block 类型和激活函数
 """
-
 import torch
 import torch.nn as nn
 from .registry import register_model
@@ -11,6 +10,7 @@ from .gate_net_cmp.block_def import (
     LearnableSwish,
     LearnableRelu,
     StablePoly7,
+    Swish
 )
 
 
@@ -144,6 +144,10 @@ def resnet_basic_learnableswish(num_classes=100, pretrained=False):
     """
     return ResNet18Gate('basic', LearnableSwish, num_classes, first_block_factor=0.25)
 
+@register_model('resnet-basic-swish-layer1block1')
+def resnet_basic_swish(num_classes=100, pretrained=False):
+    return ResNet18Gate('basic', Swish, num_classes, first_block_factor=0.25)
+
 
 @register_model('resnet-basic-learnablerelu-layer1block1')
 def resnet_basic_learnablerelu(num_classes=100, pretrained=False):
@@ -204,6 +208,10 @@ def resnet_basic_self_gated_learnableswish(num_classes=100, pretrained=False):
         model: ResNet模型
     """
     return ResNet18Gate('basic_self_gated', LearnableSwish, num_classes, first_block_factor=0.25)
+
+@register_model('resnet-basic_self_gated-swish-layer1block1')
+def resnet_basic_self_gated_swish(num_classes=100, pretrained=False):
+    return ResNet18Gate('basic_self_gated', Swish, num_classes, first_block_factor=0.25)
 
 
 @register_model('resnet-basic_self_gated-learnablerelu-layer1block1')

@@ -48,7 +48,7 @@ global:
 # 匹配的模型将自动使用指定的配置进行训练
 model_patterns:
     # 示例1: 匹配所有以 "resnet-" 开头的模型（包括 gate_net.py 中的所有变体）
-    - pattern: "^resnet-.*poly.*"
+    - pattern: "^resnet-.*-swish-.*"
       description: "所有 ResNet 变体"
       epochs: 60
       batch_size: 256

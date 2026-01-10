@@ -40,7 +40,7 @@ IMAGENET1K_ACCURACY = {
 try:
     sys.path.insert(0, '..')
     from models.gate_net_cmp.block_def import (
-        LearnableSwish, LearnableRelu, StablePoly7, Relu,
+        LearnableSwish, LearnableRelu, StablePoly7, Relu, Swish,
         SelfGated, BasicBlock, BottleneckBlock, BasicSelfGatedBlock, BottleneckSelfGatedBlock
     )
     HAS_CUSTOM_MODULES = True
@@ -48,10 +48,10 @@ except ImportError:
     HAS_CUSTOM_MODULES = False
 
 # 导入重构后的辅助模块
-from activation_configs import ACTIVATION_CONFIGS, get_activation_config
-from flops_calculator import FLOPsCalculator
-from depth_binning import DepthBinner, DepthMetricsCollector
-from operation_registry import OperationHandlerRegistry
+from .activation_configs import ACTIVATION_CONFIGS, get_activation_config
+from .flops_calculator import FLOPsCalculator
+from .depth_binning import DepthBinner, DepthMetricsCollector
+from .operation_registry import OperationHandlerRegistry
 
 
 def get_script_dir():
@@ -135,7 +135,23 @@ class FheInfo:
 
         self.model = model.eval()
         self.model_name = model_name if model_name else type(model).__name__
-        self.traced = fx.symbolic_trace(model)
+
+        # 使用自定义 Tracer 防止激活函数被拆分
+        if HAS_CUSTOM_MODULES:
+            # 定义自定义 tracer，将激活函数视为叶子模块
+            class CustomTracer(fx.Tracer):
+                def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
+                    # 将自定义激活函数视为叶子模块，不进入内部trace
+                    if isinstance(m, (LearnableSwish, LearnableRelu, StablePoly7, Relu, Swish)):
+                        return True
+                    return super().is_leaf_module(m, module_qualified_name)
+
+            tracer = CustomTracer()
+            graph = tracer.trace(self.model)
+            self.traced = fx.GraphModule(self.model, graph)
+        else:
+            self.traced = fx.symbolic_trace(model)
+
         dummy_input = torch.randn(*input_shape)
         ShapeProp(self.traced).propagate(dummy_input)
 
@@ -150,6 +166,7 @@ class FheInfo:
             self.op_registry.register_module(LearnableRelu, 'learnable_relu_statistics')
             self.op_registry.register_module(StablePoly7, 'poly7_statistics')
             self.op_registry.register_module(Relu, 'relu_statistics')
+            self.op_registry.register_module(Swish, 'swish_statistics')
 
         # 统计汇总
         self.op_stats: Dict[str, Dict] = defaultdict(lambda: {
@@ -241,8 +258,18 @@ class FheInfo:
             node_meta.rescale = node_meta.mul_both
 
     def _calc_boot(self, node_meta: NodeMeta):
-        """计算该节点触发的boot次数和耗时"""
-        boot_triggered = max(0, (node_meta.out_depth - node_meta.in_depth)//self.level)
+        """计算该节点触发的boot次数和耗时
+
+        Boot节点位于每个level的整数倍位置（level, 2*level, 3*level, ...）
+        计算从in_depth到out_depth之间跨越了多少个boot节点
+        """
+        # 计算in_depth之前经过的boot节点数量
+        boots_before_in = node_meta.in_depth // self.level
+        # 计算out_depth之前经过的boot节点数量
+        boots_before_out = node_meta.out_depth // self.level
+        # 跨越的boot节点数量 = 两者之差
+        boot_triggered = max(0, boots_before_out - boots_before_in)
+
         node_meta.boot_count = boot_triggered
         node_meta.boot_latency = boot_triggered * node_meta.out_ct * self.boot_cost
 

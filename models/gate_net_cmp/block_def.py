@@ -24,6 +24,14 @@ class LearnableSwish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(self.beta * x)
 
+class Swish(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.swish = nn.SiLU()
+
+    def forward(self, x):
+        return self.swish(x)
+
 
 class LearnableRelu(nn.Module):
     def __init__(self):
