@@ -5,6 +5,7 @@
 ## 目录
 
 - [快速开始](#快速开始)
+- [批量分析工具](#批量分析工具) ⭐ **新增**
 - [模块概览](#模块概览)
 - [开发者指南](#开发者指南)
 - [重构说明](#重构说明)
@@ -39,6 +40,237 @@ fhe_info.plot_statistics(plot_folder="results", show=False)
 - ✅ **深度分析**: 追踪密文深度，分析深度分布
 - ✅ **可视化**: 生成算子堆栈图、深度直方图、网络对比图等
 - ✅ **自定义激活函数**: 支持自定义激活函数（不会被拆分）
+- ✅ **批量分析**: 配置驱动的批量网络分析工具 ⭐ **新增**
+
+---
+
+## 批量分析工具
+
+### 概述
+
+批量分析工具（`batch_analyzer.py`）可以根据配置文件批量分析多个神经网络，支持：
+- ✅ TorchVision预训练模型
+- ✅ 自定义模型（从 `gate_net.py` 等加载）
+- ✅ 从checkpoint加载的模型
+- ✅ 不同输入分辨率的对比
+- ✅ 自动生成综合比较报告
+
+### 快速使用
+
+#### 1. 列出所有可分析的模型
+
+```bash
+python fhe_statistics/batch_analyzer.py --list
+```
+
+#### 2. 分析所有启用的模型
+
+```bash
+python fhe_statistics/batch_analyzer.py
+```
+
+#### 3. 只分析特定模型
+
+```bash
+python fhe_statistics/batch_analyzer.py --models ResNet18 ResNet34 MobileNetV2
+```
+
+#### 4. 使用自定义配置文件
+
+```bash
+python fhe_statistics/batch_analyzer.py --config my_config.yaml
+```
+
+### 配置文件说明
+
+配置文件位于 `fhe_statistics/batch_analysis_config.yaml`。
+
+#### 全局设置
+
+```yaml
+global:
+    output_folder: "fhe_statistics/results"  # 统计结果目录
+    plot_folder: "fhe_statistics/plots"      # 图表输出目录
+    default_input_shape: [1, 3, 224, 224]    # 默认输入形状
+    print_detailed: true                     # 打印详细统计
+    generate_plots: true                     # 生成图表
+    generate_comparison: true                # 生成综合比较图
+```
+
+#### 添加模型
+
+支持三种模型来源：
+
+**方式1: TorchVision预训练模型**
+
+```yaml
+- name: "ResNet18"
+  source: "torchvision"
+  model_class: "resnet18"
+  input_shape: [1, 3, 224, 224]
+  enabled: true
+```
+
+**方式2: 自定义模型**
+
+```yaml
+- name: "ResNet18-SelfGated-Swish"
+  source: "custom"
+  module_path: "models.gate_net"
+  model_class: "resnet18"
+  params:
+      block_type: "self_gated"
+      activation_type: "swish"
+      num_classes: 100
+  input_shape: [1, 3, 224, 224]
+  enabled: true
+```
+
+**方式3: 从checkpoint加载**
+
+```yaml
+- name: "MyModel-Trained"
+  source: "checkpoint"
+  module_path: "models.gate_net"
+  model_class: "resnet18"
+  checkpoint_path: "checkpoints/model.pth"
+  params:
+      num_classes: 100
+  input_shape: [1, 3, 224, 224]
+  enabled: true
+```
+
+### 使用场景
+
+#### 场景1: 比较不同分辨率的影响
+
+在配置文件中添加：
+
+```yaml
+models:
+    - name: "ResNet18-96x96"
+      source: "torchvision"
+      model_class: "resnet18"
+      input_shape: [1, 3, 96, 96]
+      enabled: true
+
+    - name: "ResNet18-128x128"
+      source: "torchvision"
+      model_class: "resnet18"
+      input_shape: [1, 3, 128, 128]
+      enabled: true
+
+    - name: "ResNet18-224x224"
+      source: "torchvision"
+      model_class: "resnet18"
+      input_shape: [1, 3, 224, 224]
+      enabled: true
+```
+
+运行分析：
+
+```bash
+python fhe_statistics/batch_analyzer.py
+```
+
+#### 场景2: 横向比较多个预训练网络
+
+在配置文件中启用多个模型：
+
+```yaml
+models:
+    - name: "ResNet18"
+      source: "torchvision"
+      model_class: "resnet18"
+      enabled: true
+
+    - name: "ResNet50"
+      source: "torchvision"
+      model_class: "resnet50"
+      enabled: true
+
+    - name: "MobileNetV2"
+      source: "torchvision"
+      model_class: "mobilenet_v2"
+      enabled: true
+
+    - name: "EfficientNet_B0"
+      source: "torchvision"
+      model_class: "efficientnet_b0"
+      enabled: true
+      optional: true  # 如果加载失败不中断
+```
+
+#### 场景3: 比较训练前后的FHE性能
+
+```yaml
+models:
+    - name: "ResNet18-Pretrained"
+      source: "torchvision"
+      model_class: "resnet18"
+      input_shape: [1, 3, 224, 224]
+      enabled: true
+
+    - name: "ResNet18-MyTraining"
+      source: "checkpoint"
+      module_path: "models.gate_net"
+      model_class: "resnet18"
+      checkpoint_path: "checkpoints/my_trained_model.pth"
+      params:
+          num_classes: 100
+      input_shape: [1, 3, 224, 224]
+      enabled: true
+```
+
+### 输出说明
+
+#### 1. 统计结果文件（`results/`）
+
+- `{model_name}_{timestamp}.txt` - 汇总统计
+- `{model_name}_detailed_{timestamp}.txt` - 详细统计（拓扑排序）
+- `summary_report_{timestamp}.txt` - 所有模型汇总
+
+#### 2. 可视化图表（`plots/`）
+
+**单个模型图表**：
+- `{model_name}_basic_{timestamp}.png` - 基础柱状图
+- `{model_name}_operator_stack_{timestamp}.png` - 算子堆栈图
+- `{model_name}_depth_histogram_{timestamp}.png` - 深度直方图
+
+**多模型比较图表**：
+- `network_comparison_{timestamp}.png` - 网络横向比较
+- `network_comprehensive_comparison_{timestamp}.png` - 综合比较（6个子图）
+- `network_grouped_comparison_{timestamp}.png` - 分组比较（归一化）
+
+### 高级用法
+
+#### 自定义FHE参数
+
+在配置文件中覆盖默认参数：
+
+```yaml
+fhe_params:
+    rotation_cost: 200
+    rescale_cost: 50
+    mul_single_cost: 10
+    mul_double_cost: 300
+    boot_cost: 100000
+    level: 12
+    slots_num: 32768
+```
+
+#### 自定义比较图
+
+```yaml
+comparison:
+    plot_types:
+        - "network_comparison"
+        - "comprehensive_comparison"
+        - "grouped_comparison"
+    shallow_threshold: 0.2      # 浅层定义（前20%深度）
+    depth_bin_size: 10          # 深度分箱大小
+    max_depth_bins: 30          # 最大分箱数
+```
 
 ---
 
