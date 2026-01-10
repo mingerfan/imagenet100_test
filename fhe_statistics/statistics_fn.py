@@ -52,6 +52,7 @@ from .activation_configs import ACTIVATION_CONFIGS, get_activation_config
 from .flops_calculator import FLOPsCalculator
 from .depth_binning import DepthBinner, DepthMetricsCollector
 from .operation_registry import OperationHandlerRegistry
+from .boot_optimizer import BootOptimizer, NodeInfo as BootNodeInfo
 
 
 def get_script_dir():
@@ -121,7 +122,7 @@ class NodeMeta:
 
 
 class FheInfo:
-    def __init__(self, model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224), model_name: Optional[str] = None):
+    def __init__(self, model: nn.Module, input_shape: Tuple[int, ...] = (1, 3, 224, 224), model_name: Optional[str] = None, optimize_boot: bool = True):
         # 成本参数
         self.rotation_cost = 180
         self.rescale_cost = 40
@@ -132,6 +133,7 @@ class FheInfo:
 
         self.slots_num = 32768
         self.input_shape = input_shape
+        self.optimize_boot = optimize_boot  # 是否使用boot优化
 
         self.model = model.eval()
         self.model_name = model_name if model_name else type(model).__name__
@@ -570,6 +572,10 @@ class FheInfo:
                 # 未知OP，记录为未知操作
                 self.pass_through_statistics(node, f"unknown_{node.op}")
 
+        # 如果启用boot优化，使用动态规划优化boot插入位置
+        if self.optimize_boot:
+            self._optimize_boot_insertion()
+
         # 汇总统计
         self._aggregate_stats()
 
@@ -630,6 +636,62 @@ class FheInfo:
         else:
             # 方法未注册，记录为未知
             self.pass_through_statistics(node, f"unknown_method_{method_name}")
+
+    def _optimize_boot_insertion(self):
+        """使用动态规划优化boot插入位置
+
+        在初始统计后，根据所有节点的深度和ct信息，重新计算最优的boot插入位置。
+        这会覆盖之前在_calc_boot中计算的boot信息。
+        """
+        # 收集所有节点信息（按拓扑序，排除fused节点）
+        boot_nodes = []
+        node_to_idx = {}  # 映射节点到boot_nodes中的索引
+
+        for idx, node in enumerate(self.traced.graph.nodes):
+            if node not in self.node_meta_list:
+                continue
+
+            meta = self.node_meta_list[node]
+            if meta.is_fused:
+                continue
+
+            # 计算该节点的深度增量
+            depth_delta = meta.out_depth - meta.in_depth
+
+            boot_node_info = BootNodeInfo(
+                index=len(boot_nodes),
+                name=node.name,
+                depth_delta=depth_delta,
+                ct_num=meta.out_ct,
+                op_type=meta.op_type
+            )
+            boot_nodes.append(boot_node_info)
+            node_to_idx[node] = len(boot_nodes) - 1
+
+        if not boot_nodes:
+            return
+
+        # 运行boot优化器
+        optimizer = BootOptimizer(self.level, self.boot_cost)
+        boot_plan, optimal_cost = optimizer.optimize(boot_nodes)
+
+        # 清空所有节点的boot信息
+        for node, meta in self.node_meta_list.items():
+            meta.boot_count = 0
+            meta.boot_latency = 0
+
+        # 根据优化结果更新boot信息
+        active_node_list = []
+        for node in self.traced.graph.nodes:
+            if node in node_to_idx:
+                active_node_list.append(node)
+
+        for boot_idx, boot_count in boot_plan.items():
+            if boot_idx < len(active_node_list):
+                node = active_node_list[boot_idx]
+                meta = self.node_meta_list[node]
+                meta.boot_count = boot_count
+                meta.boot_latency = boot_count * meta.out_ct * self.boot_cost
 
     def _aggregate_stats(self):
         """汇总统计结果"""
@@ -2172,7 +2234,7 @@ def exp_statistics(model: nn.Module):
 def analyze_model(model: nn.Module, model_name: str | None = None,
                   output_folder: str | None = None, plot_folder: str | None = None,
                   input_shape: Tuple[int, ...] = (1, 3, 224, 224),
-                  print_detailed: bool = True):
+                  print_detailed: bool = True, optimize_boot: bool = True):
     """分析模型的FHE统计信息
 
     Args:
@@ -2182,6 +2244,7 @@ def analyze_model(model: nn.Module, model_name: str | None = None,
         plot_folder: 图表保存文件夹路径（文件名将自动生成）
         input_shape: 输入张量形状
         print_detailed: 是否打印详细统计信息（包括拓扑排序和每个算子的详细耗时）
+        optimize_boot: 是否使用动态规划优化boot插入位置
 
     Returns:
         FheInfo: 统计信息对象
@@ -2189,7 +2252,7 @@ def analyze_model(model: nn.Module, model_name: str | None = None,
     if model_name:
         print(f"\nAnalyzing model: {model_name}")
 
-    fhe_info = FheInfo(model, input_shape, model_name)
+    fhe_info = FheInfo(model, input_shape, model_name, optimize_boot)
     fhe_info.run_statistics()
     
     # 打印汇总统计
