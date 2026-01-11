@@ -12,14 +12,14 @@
   - 验证激活函数是否正确保留（未被拆分）
 
 - **test_activation_trace.py** - 测试自定义激活函数在 FX trace 中是否保持完整粒度
-  - 验证 LearnableSwish, Swish, LearnableRelu, StablePoly7, Relu 不被拆分
+  - 验证 LearnableSwish, Swish, LearnableRelu, StablePoly4, Relu 不被拆分
 
 - **test_new_statistics.py** - 测试新的 FHE 统计系统
 
 ### 特定功能测试
 - **test_flops_fix.py** - 测试 FLOPs 计算修复
 - **test_epoch_fix.py** - 测试 epoch 相关修复
-- **test_stablepoly7_fix.py** - 测试 StablePoly7 激活函数修复
+- **test_stablepoly4_fix.py** - 测试 StablePoly4 激活函数修复
 - **test_pretrained_fix.py** - 测试预训练模型加载修复
 - **test_resnet_comparison.py** - ResNet 网络横向对比测试
 
@@ -81,26 +81,26 @@ uv run test/test_activation_trace.py
 - resnet-basic-swish-layer1block1
 - resnet-basic-learnableswish-layer1block1
 - resnet-basic-learnablerelu-layer1block1
-- resnet-basic-stablepoly7-layer1block1
+- resnet-basic-stablepoly4-layer1block1
 
 ### Basic Self-Gated Block 系列
 - resnet-basic_self_gated-relu-layer1block1
 - resnet-basic_self_gated-swish-layer1block1
 - resnet-basic_self_gated-learnableswish-layer1block1
 - resnet-basic_self_gated-learnablerelu-layer1block1
-- resnet-basic_self_gated-stablepoly7-layer1block1
+- resnet-basic_self_gated-stablepoly4-layer1block1
 
 ### Bottleneck Block 系列
 - resnet-bottleneck-relu-layer1block1
 - resnet-bottleneck-learnableswish-layer1block1
 - resnet-bottleneck-learnablerelu-layer1block1
-- resnet-bottleneck-stablepoly7-layer1block1
+- resnet-bottleneck-stablepoly4-layer1block1
 
 ### Bottleneck Self-Gated Block 系列
 - resnet-bottleneck_self_gated-relu-layer1block1
 - resnet-bottleneck_self_gated-learnableswish-layer1block1
 - resnet-bottleneck_self_gated-learnablerelu-layer1block1
-- resnet-bottleneck_self_gated-stablepoly7-layer1block1
+- resnet-bottleneck_self_gated-stablepoly4-layer1block1
 
 ## 注意事项
 

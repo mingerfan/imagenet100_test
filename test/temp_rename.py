@@ -1,14 +1,15 @@
 import os
+from pathlib import Path
 
 # 配置
-SEARCH_TEXT = 'StablePoly4'
-REPLACE_TEXT = 'StablePoly7'
+SEARCH_TEXT = 'poly7'
+REPLACE_TEXT = 'poly4'
 EXTENSIONS = {'.py', '.md', '.yaml', '.json'} # 只修改这些后缀的文件
 
 def update_source_code(root_dir):
     for root, dirs, files in os.walk(root_dir):
         for file in files:
-            if any(file.endswith(ext) for ext in EXTENSIONS):
+            if any(file.endswith(ext) for ext in EXTENSIONS) and Path(file).stem != "temp_rename":
                 file_path = os.path.join(root, file)
                 
                 with open(file_path, 'r', encoding='utf-8') as f:

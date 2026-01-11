@@ -16,9 +16,9 @@ ACTIVATION_CONFIGS: Dict[str, Dict[str, Any]] = {
         'mul_single_factor': 33,
     },
     'learnable_swish': {
-        'depth_delta': 15,
-        'mul_both_factor': 33,
-        'mul_single_factor': 33,
+        'depth_delta': 8,
+        'mul_both_factor': 16,
+        'mul_single_factor': 16,
     },
     'swish': {
         'depth_delta': 7,
@@ -31,11 +31,11 @@ ACTIVATION_CONFIGS: Dict[str, Dict[str, Any]] = {
         'mul_single_factor': 33,
     },
     'sigmoid': {
-        'depth_delta': 15,
-        'mul_both_factor': 31,
-        'mul_single_factor': 31,
+        'depth_delta': 7,
+        'mul_both_factor': 15,
+        'mul_single_factor': 15,
     },
-    'poly7': {
+    'poly4': {
         'depth_delta': 3,
         'mul_both_factor': 8,
         'mul_single_factor': 8,

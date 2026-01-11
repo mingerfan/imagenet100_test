@@ -147,7 +147,7 @@ def test_activation_preservation():
         'resnet-basic-swish-layer1block1',
         'resnet-basic-learnableswish-layer1block1',
         'resnet-basic-learnablerelu-layer1block1',
-        'resnet-basic-stablepoly7-layer1block1',
+        'resnet-basic-stablepoly4-layer1block1',
     ]
 
     for model_name in test_models:
@@ -170,7 +170,7 @@ def test_activation_preservation():
                 module_type = type(module).__name__
 
                 # 记录激活函数类型
-                if module_type in ['LearnableSwish', 'Swish', 'LearnableRelu', 'StablePoly7', 'Relu']:
+                if module_type in ['LearnableSwish', 'Swish', 'LearnableRelu', 'StablePoly4', 'Relu']:
                     activation_types.add(module_type)
 
             elif node.op == "call_function":
@@ -201,7 +201,7 @@ def quick_test():
         'resnet-basic-relu-layer1block1',
         'resnet-basic-swish-layer1block1',
         'resnet-basic_self_gated-learnableswish-layer1block1',
-        'resnet-bottleneck-stablepoly7-layer1block1',
+        'resnet-bottleneck-stablepoly4-layer1block1',
         'resnet-bottleneck_self_gated-relu-layer1block1',
     ]
 

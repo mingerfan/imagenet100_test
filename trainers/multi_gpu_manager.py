@@ -35,7 +35,7 @@ def create_smart_optimizer(model, lr=0.001):
         # 必须先匹配beta，因为'.act.beta'包含'.act.b'
         if name.endswith('.beta'):
             beta_params.append(param)
-        # StablePoly7的多项式系数 (如: .act.a, .act.b, .act.c, .act.d, .act.e) - 强约束防止爆炸
+        # StablePoly4的多项式系数 (如: .act.a, .act.b, .act.c, .act.d, .act.e) - 强约束防止爆炸
         # 使用更精确的匹配，确保只匹配单个字母作为参数名
         elif any(name.endswith(f'.act.{p}') for p in ['a', 'b', 'c', 'd', 'e']):
             poly_params.append(param)
@@ -177,10 +177,10 @@ class MultiGPUManager:
         print(f"开始训练模型: {model_name} (GPU: {gpu_id})")
         print(f"{'=' * 60}")
         
-        # 检测是否使用 StablePoly7 激活函数
+        # 检测是否使用 StablePoly4 激活函数
         uses_stablepoly = 'stablepoly' in model_name.lower()
         if uses_stablepoly:
-            print("⚠ 检测到 StablePoly7 激活函数，将使用更严格的梯度裁剪")
+            print("⚠ 检测到 StablePoly4 激活函数，将使用更严格的梯度裁剪")
         
         # 设置设备
         device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None else 'cpu')
@@ -231,7 +231,7 @@ class MultiGPUManager:
         model_result_dir = f"{self.result_dir}/{model_name}"
         
         # 创建训练器
-        # 对于 StablePoly7 模型，使用更严格的梯度裁剪
+        # 对于 StablePoly4 模型，使用更严格的梯度裁剪
         grad_clip_max_norm = 0.5 if uses_stablepoly else 1.0
         
         trainer = Trainer(

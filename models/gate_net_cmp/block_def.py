@@ -42,7 +42,7 @@ class LearnableRelu(nn.Module):
         return torch.maximum(self.beta * x, torch.zeros_like(x))
 
 
-class StablePoly7(nn.Module):
+class StablePoly4(nn.Module):
     """
     FHE友好激活函数 (多项式激活)
     f(x) = scale * (ax^4 + bx^3 + cx^2 + dx + e)

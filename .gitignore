@@ -43,3 +43,5 @@ temp/
 *.tmp
 
 target/
+*.png
+*.txt

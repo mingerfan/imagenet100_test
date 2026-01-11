@@ -15,7 +15,7 @@
 - **普通参数**（卷积层、线性层、BatchNorm等）：`weight_decay=1e-4`
   - 标准正则化，防止过拟合
   
-- **Poly参数**（StablePoly7的系数 a, b, c, d, e）：`weight_decay=0.1`
+- **Poly参数**（StablePoly4的系数 a, b, c, d, e）：`weight_decay=0.1`
   - 强约束防止参数爆炸
   - 避免多项式激活函数在训练过程中失控
   
@@ -36,7 +36,7 @@
   参数组 1 (Poly参数, weight_decay=0.1): 0 个
   参数组 2 (Beta参数, weight_decay=0.0): 8 个 ✓
 
-模型: resnet-basic-stablepoly7-layer1block1
+模型: resnet-basic-stablepoly4-layer1block1
   参数组 0 (正常参数, weight_decay=1e-4): 81 个
   参数组 1 (Poly参数, weight_decay=0.1): 40 个 ✓
   参数组 2 (Beta参数, weight_decay=0.0): 0 个
@@ -76,7 +76,7 @@ scheduler = CosineAnnealingLR(
 
 通过测试确认了模型的实际参数命名：
 
-### StablePoly7激活函数
+### StablePoly4激活函数
 ```
 special_resnet.layers.0.act.a
 special_resnet.layers.0.act.b

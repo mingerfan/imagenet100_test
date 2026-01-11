@@ -8,7 +8,7 @@ import torch.nn as nn
 sys.path.insert(0, 'fhe_statistics')
 sys.path.insert(0, 'models')
 
-from models.gate_net_cmp.block_def import LearnableSwish, LearnableRelu, StablePoly7, Relu, Swish
+from models.gate_net_cmp.block_def import LearnableSwish, LearnableRelu, StablePoly4, Relu, Swish
 from fhe_statistics.statistics_fn import FheInfo
 
 
@@ -26,7 +26,7 @@ class SimpleModelWithActivations(nn.Module):
         self.act3 = LearnableRelu()
 
         self.conv4 = nn.Conv2d(64, 128, 3, padding=1)
-        self.act4 = StablePoly7()
+        self.act4 = StablePoly4()
 
         self.conv5 = nn.Conv2d(128, 256, 3, padding=1)
         self.act5 = Relu()
@@ -80,7 +80,7 @@ def test_activation_tracing():
         'LearnableSwish': 0,
         'Swish': 0,
         'LearnableRelu': 0,
-        'StablePoly7': 0,
+        'StablePoly4': 0,
         'Relu': 0
     }
 

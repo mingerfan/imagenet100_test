@@ -59,7 +59,7 @@ model_patterns:
 
 #### 匹配特定激活函数的模型
 ```yaml
-- pattern: ".*stablepoly7.*"
+- pattern: ".*stablepoly4.*"
 ```
 
 ### 3. 多个模式组合
@@ -128,7 +128,7 @@ model_patterns:
 - `resnet-bottleneck-*-layer1block1` (4个)
 - `resnet-bottleneck_self_gated-*-layer1block1` (4个)
 
-其中 `*` 可以是：`relu`, `learnableswish`, `learnablerelu`, `stablepoly7`
+其中 `*` 可以是：`relu`, `learnableswish`, `learnablerelu`, `stablepoly4`
 
 默认配置已经设置为匹配所有这些模型（`^resnet-.*`），你无需逐个添加！
 

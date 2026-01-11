@@ -40,7 +40,7 @@ IMAGENET1K_ACCURACY = {
 try:
     sys.path.insert(0, '..')
     from models.gate_net_cmp.block_def import (
-        LearnableSwish, LearnableRelu, StablePoly7, Relu, Swish,
+        LearnableSwish, LearnableRelu, StablePoly4, Relu, Swish,
         SelfGated, BasicBlock, BottleneckBlock, BasicSelfGatedBlock, BottleneckSelfGatedBlock
     )
     HAS_CUSTOM_MODULES = True
@@ -144,7 +144,7 @@ class FheInfo:
             class CustomTracer(fx.Tracer):
                 def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
                     # 将自定义激活函数视为叶子模块，不进入内部trace
-                    if isinstance(m, (LearnableSwish, LearnableRelu, StablePoly7, Relu, Swish)):
+                    if isinstance(m, (LearnableSwish, LearnableRelu, StablePoly4, Relu, Swish)):
                         return True
                     return super().is_leaf_module(m, module_qualified_name)
 
@@ -166,7 +166,7 @@ class FheInfo:
         if HAS_CUSTOM_MODULES:
             self.op_registry.register_module(LearnableSwish, 'learnable_swish_statistics')
             self.op_registry.register_module(LearnableRelu, 'learnable_relu_statistics')
-            self.op_registry.register_module(StablePoly7, 'poly7_statistics')
+            self.op_registry.register_module(StablePoly4, 'poly4_statistics')
             self.op_registry.register_module(Relu, 'relu_statistics')
             self.op_registry.register_module(Swish, 'swish_statistics')
 
@@ -391,9 +391,9 @@ class FheInfo:
     def sigmoid_statistics(self, node: Node):
         self.activation_statistics(node, 'sigmoid')
 
-    def poly7_statistics(self, node: Node):
-        """StablePoly7: 4次多项式，深度3"""
-        self.activation_statistics(node, 'poly7')
+    def poly4_statistics(self, node: Node):
+        """StablePoly4: 4次多项式，深度3"""
+        self.activation_statistics(node, 'poly4')
 
     def maxpool_statistics(self, node: Node):
         node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=30)
