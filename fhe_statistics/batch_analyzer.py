@@ -453,7 +453,7 @@ class BatchAnalyzer:
 def main():
     parser = argparse.ArgumentParser(description='Batch FHE Statistics Analyzer')
     parser.add_argument('--config', type=str,
-                       default='fhe_statistics/batch_analysis_config.yaml',
+                       default='batch_analysis_config.yaml',
                        help='Path to configuration file')
     parser.add_argument('--list', action='store_true',
                        help='List all models in configuration file')
@@ -462,8 +462,34 @@ def main():
 
     args = parser.parse_args()
 
+    # 自动检测配置文件位置
+    config_path = args.config
+
+    # 如果配置文件不存在，尝试几个常见位置
+    if not os.path.exists(config_path):
+        possible_paths = [
+            config_path,  # 原始路径
+            os.path.join('fhe_statistics', config_path),  # 从项目根目录
+            os.path.join(os.path.dirname(__file__), config_path),  # 从脚本所在目录
+            os.path.join(os.path.dirname(__file__), 'batch_analysis_config.yaml'),  # 默认文件名
+        ]
+
+        for path in possible_paths:
+            if os.path.exists(path):
+                config_path = path
+                break
+        else:
+            print(f"错误: 找不到配置文件!")
+            print(f"尝试过的路径:")
+            for path in possible_paths:
+                print(f"  - {path}")
+            print(f"\n请使用 --config 参数指定配置文件路径")
+            sys.exit(1)
+
+    print(f"使用配置文件: {config_path}\n")
+
     # 创建分析器
-    analyzer = BatchAnalyzer(args.config)
+    analyzer = BatchAnalyzer(config_path)
 
     # 如果是列出模型模式
     if args.list:
