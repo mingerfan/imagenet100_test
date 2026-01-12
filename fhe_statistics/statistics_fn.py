@@ -49,7 +49,6 @@ except ImportError:
 
 # 导入重构后的辅助模块
 from .activation_configs import ACTIVATION_CONFIGS, get_activation_config
-from .flops_calculator import FLOPsCalculator
 from .depth_binning import DepthBinner, DepthMetricsCollector
 from .operation_registry import OperationHandlerRegistry
 from .boot_optimizer import BootOptimizer, NodeInfo as BootNodeInfo

@@ -1,0 +1,62 @@
+# CIFAR-10配置文件 (32x32输入)
+# 针对小分辨率图像的特殊配置：
+# - 禁用激进的stem层
+# - 禁用第二次降分辨率
+# - 前两个block（position 0和1）不降分辨率
+# - 总共只降2次分辨率 (32->16->8)
+
+name: "cifar10_32"
+description: "CIFAR-10 with 32x32 input - less aggressive downsampling for small images"
+
+# 数据集配置
+dataset:
+  name: "cifar10"
+  num_classes: 10
+  input_size: 32
+
+# 搜索空间配置
+search_space:
+  # CT相关配置
+  ct_slots: 32768           # 每个CT的槽位数 (2^15)
+  initial_ct_count: 1       # 初始CT数量
+
+  # Stem层配置
+  # CIFAR-10使用32x32的小图像，不需要激进的降分辨率
+  stem:
+    enabled: false          # 禁用标准stem层（标准stem会从224降到56）
+    allowed_codes: null     # 后续实现中可以添加简单的初始层
+
+  # 第二次降分辨率配置
+  # 小分辨率图像不需要第二次降采样
+  second_downsample:
+    enabled: false          # 禁用第二次降分辨率
+    allowed_codes: null
+
+  # Block配置
+  # 注意：这里的position指的是网络中第几个block，不是block内部的层
+  blocks:
+    allowed_block_ids: null              # 允许所有24种block类型
+    first_layers_constraints:            # 对前几个block的约束
+      - position: 0                      # 网络的第1个block
+        stride: 1                        # 强制stride=1，保持分辨率32x32
+        allowed_block_ids: null          # 允许所有block类型
+      - position: 1                      # 网络的第2个block
+        stride: 1                        # 强制stride=1，保持分辨率32x32
+        allowed_block_ids: null          # 允许所有block类型
+      # 从第3个block开始，才允许降分辨率
+      # 例如8个block的网络: 32,32,32,16,16,16,8,8 (在position 2和5降分辨率)
+
+  # Stride配置
+  stride:
+    allowed_block_counts: [6, 8, 10, 12]  # CIFAR适合较少的block
+    num_strides: 2                        # 只降2次分辨率（从第3个block开始）
+                                          # 32x32 -> 16x16 -> 8x8
+
+  # CT策略配置
+  ct_policies:
+    allowed: ["keep", "half"]             # 允许的CT策略
+
+# 输出配置
+output:
+  base_dir: "generated_networks/cifar10_32"  # 输出目录
+  save_format: "json"                        # 保存格式

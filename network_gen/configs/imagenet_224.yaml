@@ -1,0 +1,55 @@
+# ImageNet-100配置文件 (224x224输入)
+# 标准配置，允许所有的搜索空间选项
+
+name: "imagenet_224"
+description: "ImageNet-100 with 224x224 input - standard configuration with full search space"
+
+# 数据集配置
+dataset:
+  name: "imagenet"
+  num_classes: 100
+  input_size: 224
+
+# 搜索空间配置
+search_space:
+  # CT相关配置
+  ct_slots: 32768           # 每个CT的槽位数 (2^15)
+  initial_ct_count: 1       # 初始CT数量
+
+  # Stem层配置
+  # Stem结构: Conv(7x7, stride=2) + BN + Act + MaxPool(3x3, stride=2)
+  # 输入 224x224 -> 输出 56x56
+  stem:
+    enabled: true           # 启用标准stem层
+    allowed_codes: null     # null表示允许所有配置 [0-3]
+                           # 0: NoSG + poly4
+                           # 1: NoSG + swish
+                           # 2: SG + poly4
+                           # 3: SG + swish
+
+  # 第二次降分辨率配置
+  # 可以是AvgPool或Conv降采样
+  second_downsample:
+    enabled: true           # 启用第二次降分辨率
+    allowed_codes: null     # null表示允许所有配置 [0-4]
+                           # 0: AvgPool
+                           # 1-4: Conv with different configurations
+
+  # Block配置
+  blocks:
+    allowed_block_ids: null              # null表示允许所有24种block
+    first_layers_constraints: null       # 前几层没有特殊约束
+
+  # Stride配置
+  stride:
+    allowed_block_counts: null           # null表示允许所有: [4, 6, 8, 10, 12, 14, 16]
+    num_strides: 3                       # Body部分固定3次降分辨率 (56->28->14->7)
+
+  # CT策略配置
+  ct_policies:
+    allowed: ["keep", "half"]            # 允许的CT策略
+
+# 输出配置
+output:
+  base_dir: "generated_networks/imagenet_224"  # 输出目录
+  save_format: "json"                          # 保存格式
