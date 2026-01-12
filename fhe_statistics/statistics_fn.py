@@ -1393,10 +1393,10 @@ class FheInfo:
                 flops = N * out_features * in_features
                 module_type = "linear"
             
-            elif isinstance(module, nn.BatchNorm2d):
-                # BatchNorm2d FLOPs
-                flops = N * C_out * output_size * 2
-                module_type = "batchnorm"
+            # elif isinstance(module, nn.BatchNorm2d):
+            #     # BatchNorm2d FLOPs
+            #     flops = N * C_out * output_size * 2
+            #     module_type = "batchnorm"
             
             if module_type is not None and flops > 0:
                 depth_flops_data[module_depth][module_type] += flops

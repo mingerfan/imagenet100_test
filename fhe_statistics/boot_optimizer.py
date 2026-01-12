@@ -153,7 +153,7 @@ def test_boot_optimizer():
     boot_plan, total_cost = optimizer.optimize(nodes)
 
     print("=== 动态规划最优解 ===")
-    print(f"Boot插入方案:")
+    print("Boot插入方案:")
     for node_idx, boot_count in sorted(boot_plan.items()):
         node = nodes[node_idx]
         print(f"  在节点 {node.name} (index={node_idx}, ct={node.ct_num}) 后插入 {boot_count} 次boot")
@@ -175,7 +175,7 @@ def test_boot_optimizer():
         print(f"  在节点 {name} (index={node_idx}, ct={ct}) 后boot")
     print(f"简单策略总成本: {simple_cost:.2f}")
 
-    print(f"\n=== 优化效果 ===")
+    print("\n=== 优化效果 ===")
     if simple_cost > 0:
         saving = (1 - total_cost / simple_cost) * 100
         print(f"成本节省: {saving:.1f}%")
