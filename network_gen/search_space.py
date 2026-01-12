@@ -481,13 +481,9 @@ class SearchSpace:
     1. stem_code: [0-3] Stem层配置
     2. second_ds_code: [0-4] 第二次降分辨率配置
     3. stride_code: [0-1343] Body部分的block数量和stride位置
-    4. block_types: 每个block的类型
-    5. activations: 每个block的激活函数
-    6. ct_policies: 每次stride=2时的CT策略（keep/half）
+    4. block_ids: 每个block的类型（统一block ID: 0-23）
+    5. ct_policies: 每次stride=2时的CT策略（keep/half）
     """
-
-    # Block类型选项
-    block_types: List[str] = field(default_factory=lambda: list(BLOCK_TYPES.keys()))
 
     # 激活函数选项
     activation_types: List[str] = field(default_factory=lambda: ["poly4", "swish"])
@@ -532,10 +528,6 @@ class SearchSpace:
     def get_second_ds_config(self, code: int) -> SecondDownsampleConfig:
         """获取第二次降分辨率配置"""
         return SECOND_DOWNSAMPLE_CONFIGS[code]
-
-    def get_block_spec(self, block_type: str) -> BlockSpec:
-        """获取block规格"""
-        return BLOCK_TYPES[block_type]
 
     def get_activation_class(self, activation_type: str) -> Type:
         """获取激活函数类"""
