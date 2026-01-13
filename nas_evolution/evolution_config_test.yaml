@@ -1,0 +1,42 @@
+# Mini Evolution Configuration for Testing
+# Small population and few generations for quick testing
+
+# Search Configuration
+search:
+  population_size: 10            # Small population for testing
+  num_generations: 5             # Few generations for quick test
+  sample_size: 5                 # Smaller tournament
+  mutation_rate: 1.0
+
+# Network Generation
+network_config: "network_gen/configs/imagenet_224.yaml"
+
+# Evaluation Settings
+evaluation:
+  resolution: 224
+  batch_size: 16                 # Smaller batch for testing
+  gpu: 0
+  use_dataloader: false
+
+# Fitness Function
+fitness:
+  type: "aznas_ranking"
+  epsilon: 1.0e-10
+
+# Logging
+logging:
+  checkpoint_interval: 2         # Save more frequently for testing
+  log_interval: 1
+  save_history: true
+  output_dir: "nas_results/test_run"
+
+# Reproducibility
+seed: 42
+
+# Mutation Probabilities
+mutation_probs:
+  block: 0.5
+  stem: 0.15
+  stride: 0.15
+  ct_policy: 0.1
+  downsample: 0.1

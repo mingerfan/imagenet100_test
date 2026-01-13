@@ -47,3 +47,4 @@ target/
 *.txt
 
 generated_networks/
+nas_results

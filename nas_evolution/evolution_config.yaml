@@ -1,0 +1,44 @@
+# Evolution Configuration for NAS
+# Regularized Evolution with AZ-NAS proxies and FHE latency
+
+# Search Configuration
+search:
+  population_size: 200           # Size of population (FIFO queue)
+  num_generations: 100           # Number of evolution generations
+  sample_size: 25                # Tournament selection sample size
+  mutation_rate: 1.0             # Probability of mutation per offspring (always mutate)
+
+# Network Generation
+# Reuses network_gen constraints for architecture search space
+network_config: "network_gen/configs/imagenet_224.yaml"
+
+# Evaluation Settings
+evaluation:
+  resolution: 224                # Input image resolution
+  batch_size: 64                 # Batch size for evaluation
+  gpu: 0                         # GPU device ID
+  use_dataloader: false          # Use random input instead of dataloader
+
+# Fitness Function
+fitness:
+  type: "aznas_ranking"          # AZ-NAS non-linear ranking aggregation
+  epsilon: 1.0e-10               # Numerical stability for log
+
+# Logging
+logging:
+  checkpoint_interval: 10        # Save checkpoint every N generations
+  log_interval: 1                # Log progress every N generations
+  save_history: true             # Save full evolution history
+  output_dir: "nas_results"      # Output directory
+
+# Reproducibility
+seed: 42                         # Random seed for reproducibility
+
+# Mutation Probabilities
+# These control which type of mutation is applied
+mutation_probs:
+  block: 0.5                     # Mutate block type (most important)
+  stem: 0.15                     # Mutate stem configuration
+  stride: 0.15                   # Mutate stride pattern
+  ct_policy: 0.1                 # Mutate CT (ciphertext) policy
+  downsample: 0.1                # Mutate downsample method
