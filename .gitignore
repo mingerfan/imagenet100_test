@@ -45,3 +45,5 @@ temp/
 target/
 *.png
 *.txt
+
+generated_networks/

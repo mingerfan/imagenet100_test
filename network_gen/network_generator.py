@@ -31,9 +31,9 @@ from .generator_config import GeneratorConfig
 
 from models.gate_net_cmp.block_def import (
     BasicBlock,
-    BottleneckBlock,
     BasicSelfGatedBlock,
-    BottleneckSelfGatedBlock,
+    FullGatedBasicBlock,
+    MBConvBlock,
     SelfGated,
 )
 
@@ -49,7 +49,7 @@ class HierarchicalBlockSelector:
 
     NUM_INDIVIDUAL = 4  # 前4个单独选择
     GROUP_SIZE = 2       # 后面每2个一组
-    NUM_BLOCK_TYPES = 24  # 24种统一Block
+    NUM_BLOCK_TYPES = 22  # 22种统一Block
 
     def __init__(self):
         pass
@@ -173,7 +173,7 @@ class RandomNetworkGenerator:
 
         Args:
             stem_code: 指定stem配置 [0-3]，默认随机（受约束）
-            second_ds_code: 指定第二次降分辨率配置 [0-4]，默认随机（受约束）
+            second_ds_code: 指定第二次降分辨率配置 [0-5]，默认随机（受约束）
             stride_code: 指定stride编码 [0-1343]，默认随机（受约束）
             block_choices: 分层Block选择，默认随机（受约束）
             ct_policies: CT策略列表，默认随机（受约束）
@@ -384,7 +384,7 @@ class RandomNetworkGenerator:
         num_choices = self.block_selector.compute_num_choices(num_blocks)
 
         if self.config is None:
-            # 无约束，使用全部24种block
+            # 无约束，使用全部22种block
             return [random.randint(0, self.block_selector.NUM_BLOCK_TYPES - 1) for _ in range(num_choices)]
 
         # 应用全局block约束
@@ -486,6 +486,9 @@ class NetworkBuilder:
 
         if ds_cfg.type == "avepool":
             return nn.AvgPool2d(kernel_size=2, stride=2)
+        elif ds_cfg.type == "none":
+            # 不使用第二次降分辨率层（像EfficientNet B0）
+            return nn.Identity()
         else:
             activation_class = ds_cfg.get_activation_class()
             layers = []
@@ -511,14 +514,16 @@ class NetworkBuilder:
         block_class = spec.block_class
         activation_class = spec.activation_class
 
-        if spec.is_bottleneck():
-            # Bottleneck类型
+        if spec.is_mbconv():
+            # MBConv类型（包含MBConv和GatedMBConv）
             return block_class(
                 in_channels=block_cfg.in_channels,
                 out_channels=block_cfg.out_channels,
                 stride=block_cfg.stride,
-                factor=spec.factor,
+                expansion_factor=spec.expansion,
                 activation=activation_class,
+                use_se=spec.use_se,
+                use_gated_dw=spec.use_gated_dw,
             )
         elif block_class == BasicSelfGatedBlock:
             # BasicSelfGatedBlock
@@ -528,6 +533,14 @@ class NetworkBuilder:
                 stride=block_cfg.stride,
                 activation=activation_class,
                 full_gated=False,
+            )
+        elif block_class == FullGatedBasicBlock:
+            # FullGatedBasicBlock（新增）
+            return block_class(
+                in_channels=block_cfg.in_channels,
+                out_channels=block_cfg.out_channels,
+                stride=block_cfg.stride,
+                activation=activation_class,
             )
         else:
             # BasicBlock

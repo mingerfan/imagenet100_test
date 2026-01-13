@@ -81,7 +81,7 @@ class NetworkConfig:
     # Stem层配置编码 [0-3]
     stem_code: int
 
-    # 第二次降分辨率配置编码 [0-4]
+    # 第二次降分辨率配置编码 [0-5]
     second_ds_code: int
 
     # Body stride编码 [0-1343]

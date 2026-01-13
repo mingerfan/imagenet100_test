@@ -277,13 +277,30 @@ class GeneratorConfig:
         blocks_data = data.get("blocks", {})
         first_layers_constraints = None
         if "first_layers_constraints" in blocks_data and blocks_data["first_layers_constraints"]:
-            first_layers_constraints = [
-                LayerConstraint(**constraint)
-                for constraint in blocks_data["first_layers_constraints"]
-            ]
+            # 导入parse_block_ids用于解析block名称
+            from .search_space import parse_block_ids
+
+            first_layers_constraints = []
+            for constraint in blocks_data["first_layers_constraints"]:
+                # 解析allowed_block_ids（可能包含名称）
+                allowed_block_ids = constraint.get("allowed_block_ids")
+                if allowed_block_ids is not None:
+                    allowed_block_ids = parse_block_ids(allowed_block_ids)
+
+                first_layers_constraints.append(LayerConstraint(
+                    position=constraint["position"],
+                    allowed_block_ids=allowed_block_ids,
+                    stride=constraint.get("stride"),
+                ))
+
+        # 解析全局allowed_block_ids（支持名称）
+        from .search_space import parse_block_ids
+        allowed_block_ids = blocks_data.get("allowed_block_ids")
+        if allowed_block_ids is not None:
+            allowed_block_ids = parse_block_ids(allowed_block_ids)
 
         blocks = BlockConstraints(
-            allowed_block_ids=blocks_data.get("allowed_block_ids"),
+            allowed_block_ids=allowed_block_ids,
             first_layers_constraints=first_layers_constraints,
         )
 
@@ -385,16 +402,16 @@ class GeneratorConfig:
             f"描述: {self.description}",
             "=" * 60,
             f"\n数据集: {self.dataset}",
-            f"\n搜索空间:",
+            "\n搜索空间:",
             f"  CT槽位数: {self.search_space.ct_slots}",
             f"  初始CT数量: {self.search_space.initial_ct_count}",
-            f"\nStem层:",
+            "\nStem层:",
             f"  启用: {self.search_space.stem.enabled}",
             f"  允许的配置: {self.search_space.stem.allowed_codes or 'All'}",
-            f"\n第二次降分辨率:",
+            "\n第二次降分辨率:",
             f"  启用: {self.search_space.second_downsample.enabled}",
             f"  允许的配置: {self.search_space.second_downsample.allowed_codes or 'All'}",
-            f"\nBlock约束:",
+            "\nBlock约束:",
             f"  允许的Block ID: {self.search_space.blocks.allowed_block_ids or 'All'}",
         ]
 
@@ -404,12 +421,12 @@ class GeneratorConfig:
                 lines.append(f"    - {c}")
 
         lines.extend([
-            f"\nStride约束:",
+            "\nStride约束:",
             f"  允许的Block数量: {self.search_space.stride.allowed_block_counts or 'All'}",
             f"  降分辨率次数: {self.search_space.stride.num_strides}",
-            f"\nCT策略:",
+            "\nCT策略:",
             f"  允许的策略: {self.search_space.ct_policies.allowed}",
-            f"\n输出:",
+            "\n输出:",
             f"  目录: {self.output.base_dir}",
             f"  格式: {self.output.save_format}",
             "=" * 60,

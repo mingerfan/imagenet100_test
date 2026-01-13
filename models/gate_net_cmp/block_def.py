@@ -353,3 +353,283 @@ class BasicSelfGatedBlock(nn.Module):
         x += self.shortcut(shortcut_input)
 
         return x
+
+
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation注意力模块
+
+    通过全局池化捕获通道间的相关性，生成通道注意力权重。
+
+    Args:
+        channels: 输入通道数
+        reduction: 降维比例，默认为4
+    """
+
+    def __init__(self, channels: int, reduction: int = 4):
+        super().__init__()
+        reduced_channels = max(1, channels // reduction)
+
+        self.squeeze = nn.AdaptiveAvgPool2d(1)
+        self.excitation = nn.Sequential(
+            nn.Conv2d(channels, reduced_channels, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(reduced_channels, channels, 1, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        scale = self.squeeze(x)
+        scale = self.excitation(scale)
+        return x * scale
+
+
+class GatedDepthwiseConv(nn.Module):
+    """门控深度可分离卷积
+
+    关键优化：
+    - 输入通道数已经减半（在MBConv的扩展层）
+    - 通过拼接恢复到完整通道数
+    - 减少通过激活函数的CT数量（FHE优化）
+
+    结构：
+    - 主分支：3x3深度卷积 + BN
+    - 门控分支：5x5深度卷积 + 激活函数
+    - 输出：cat([主分支, 主分支 * gate])
+
+    Args:
+        channels: 减半后的通道数
+        stride: 步长
+        activation: 激活函数类
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        stride: int,
+        activation: Activation
+    ):
+        super().__init__()
+
+        # 主分支：3x3深度卷积
+        self.dw_conv = nn.Conv2d(
+            channels, channels,
+            kernel_size=3, stride=stride, padding=1,
+            groups=channels, bias=False
+        )
+        self.bn = nn.BatchNorm2d(channels)
+
+        # 门控分支：5x5深度卷积
+        self.gate_conv = nn.Conv2d(
+            channels, channels,
+            kernel_size=5, stride=1, padding=2,
+            groups=channels, bias=False
+        )
+        self.activation = activation()
+
+    def forward(self, x):
+        # 主分支特征
+        feat_intrinsic = self.dw_conv(x)
+        feat_intrinsic = self.bn(feat_intrinsic)
+
+        # 门控分支
+        gate = self.gate_conv(feat_intrinsic)
+        gate = self.activation(gate)
+
+        # 生成门控特征
+        feat_gated = feat_intrinsic * gate
+
+        # 拼接恢复通道数（类似SelfGated）
+        out = torch.cat([feat_intrinsic, feat_gated], dim=1)
+        return out  # 输出通道数是输入的2倍
+
+
+class MBConvBlock(nn.Module):
+    """Mobile Inverted Bottleneck Block (MBConv)
+
+    关键优化（GatedMBConv模式）：
+    - 扩展层输出减半（expanded_channels // 2）
+    - GatedDWConv通过拼接恢复通道数
+    - 减少通过激活函数的CT数量
+
+    结构：
+    [1x1 expansion → BN → Act]
+    → 3x3 DWConv (或 GatedDWConv) → BN → Act
+    → [SE] (可选)
+    → 1x1 projection → BN
+    → [+shortcut] (stride=1 && in_ch==out_ch时)
+
+    Args:
+        in_channels: 输入通道数
+        out_channels: 输出通道数
+        stride: 步长
+        expansion_factor: 扩展因子（1.0或4.0）
+        activation: 激活函数类
+        use_se: 是否使用SE注意力
+        use_gated_dw: 是否使用门控深度卷积
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: int,
+        expansion_factor: float,
+        activation: Activation,
+        use_se: bool = False,
+        use_gated_dw: bool = False
+    ):
+        super().__init__()
+
+        self.use_se = use_se
+        self.use_gated_dw = use_gated_dw
+
+        # 计算扩展后的通道数
+        expanded_channels = int(in_channels * expansion_factor)
+
+        # 1x1扩展层（expansion=1时跳过）
+        self.use_expansion = (expansion_factor != 1.0)
+
+        # 关键优化：GatedDWConv模式下，只有当有expansion层时才减半
+        # 如果expansion=1（无expansion层），则不减半
+        if use_gated_dw and self.use_expansion:
+            expansion_out_channels = expanded_channels // 2
+        else:
+            expansion_out_channels = expanded_channels
+
+        if self.use_expansion:
+            self.expand_conv = nn.Conv2d(
+                in_channels, expansion_out_channels,
+                kernel_size=1, bias=False
+            )
+            self.bn1 = nn.BatchNorm2d(expansion_out_channels)
+
+        # 深度卷积
+        if use_gated_dw:
+            # GatedDWConv：输入expansion_out_channels，输出2*expansion_out_channels（通过拼接）
+            self.dw_conv = GatedDepthwiseConv(
+                expansion_out_channels, stride, activation
+            )
+            self.bn2 = nn.Identity()  # GatedDWConv内部已有BN
+            # 拼接后的通道数是输入的2倍
+            if self.use_expansion:
+                # 有expansion层：expansion_out_channels = expanded_channels // 2
+                # 拼接后恢复为 expanded_channels
+                self.dw_out_channels = expanded_channels
+            else:
+                # 无expansion层：expansion_out_channels = in_channels
+                # 拼接后变为 2 * in_channels
+                self.dw_out_channels = 2 * expansion_out_channels
+        else:
+            # 标准深度卷积
+            self.dw_conv = nn.Conv2d(
+                expansion_out_channels, expansion_out_channels,
+                kernel_size=3, stride=stride, padding=1,
+                groups=expansion_out_channels, bias=False
+            )
+            self.bn2 = nn.BatchNorm2d(expansion_out_channels)
+            self.dw_out_channels = expansion_out_channels
+
+        # SE模块（可选）
+        if use_se:
+            self.se = SEBlock(self.dw_out_channels)
+
+        # 1x1压缩层
+        self.project_conv = nn.Conv2d(
+            self.dw_out_channels, out_channels,
+            kernel_size=1, bias=False
+        )
+        self.bn3 = nn.BatchNorm2d(out_channels)
+
+        self.activation = activation()
+
+        # Shortcut连接
+        self.use_shortcut = (stride == 1 and in_channels == out_channels)
+
+    def forward(self, x):
+        identity = x
+
+        # 1. 扩展阶段
+        if self.use_expansion:
+            out = self.expand_conv(x)
+            out = self.bn1(out)
+            out = self.activation(out)
+        else:
+            out = x
+
+        # 2. 深度卷积阶段
+        out = self.dw_conv(out)
+        if not self.use_gated_dw:
+            out = self.bn2(out)
+            out = self.activation(out)
+        # GatedDWConv内部已经完成BN和激活+拼接
+
+        # 3. SE注意力（可选）
+        if self.use_se:
+            out = self.se(out)
+
+        # 4. 压缩阶段
+        out = self.project_conv(out)
+        out = self.bn3(out)
+
+        # 5. Shortcut连接
+        if self.use_shortcut:
+            out = out + identity
+
+        return out
+
+
+class FullGatedBasicBlock(nn.Module):
+    """两层都使用SelfGated的BasicBlock
+
+    结构：
+    SelfGated(stride) → SelfGated(1) → [+shortcut]
+
+    Args:
+        in_channels: 输入通道数
+        out_channels: 输出通道数
+        stride: 步长
+        activation: 激活函数类
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: int,
+        activation: Activation
+    ):
+        super().__init__()
+
+        self.activation = activation()
+
+        # 第一层：SelfGated with stride
+        self.conv1 = SelfGated(
+            in_channels, out_channels,
+            stride, activation
+        )
+
+        # 第二层：SelfGated without stride
+        self.conv2 = SelfGated(
+            out_channels, out_channels,
+            1, activation
+        )
+
+        # Shortcut
+        self.shortcut = nn.Identity()
+        if in_channels != out_channels or stride != 1:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(
+                    in_channels, out_channels,
+                    kernel_size=1, stride=stride, bias=False
+                ),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+
+        out = self.conv1(x)
+        out = self.conv2(out)
+
+        out = out + identity
+        return out

@@ -15,7 +15,25 @@
 
 ## 快速开始
 
-### 1. 命令行批量生成
+### 1. 查看可用的Block类型
+
+使用辅助脚本列出所有可用的block：
+
+```bash
+# 列出所有block
+python network_gen/list_blocks.py
+
+# 只显示门控block
+python network_gen/list_blocks.py --filter gated
+
+# 只显示MBConv相关
+python network_gen/list_blocks.py --filter mbconv
+
+# 只显示使用Poly4的block
+python network_gen/list_blocks.py --filter poly4
+```
+
+### 2. 命令行批量生成
 
 #### ImageNet-100 (224x224)
 ```bash
@@ -72,6 +90,7 @@ config_manager.save_batch(batch, overwrite=True)
 - **输入分辨率**: 32x32
 - **类别数**: 10
 - **Stem层**: 禁用
+- **第二次降分辨率**: 禁用（通过约束设置）
 - **前两层约束**: 强制stride=1（不降分辨率）
 - **降分辨率次数**: 2次
 - **Block数量**: 6, 8, 10, 12
@@ -106,7 +125,7 @@ search_space:
 
   # Block配置
   blocks:
-    allowed_block_ids: null  # 允许的block ID [0-23]
+    allowed_block_ids: null  # 允许的block ID [0-21]
     first_layers_constraints:  # 前几层的特殊约束
       - position: 0
         stride: 1
@@ -148,9 +167,30 @@ stride:
 
 #### 2. 只允许特定的block类型
 
+**使用数字ID：**
 ```yaml
 blocks:
-  allowed_block_ids: [0, 1, 4, 5, 6, 7, 8, 9]  # 只允许basic和部分bottleneck
+  allowed_block_ids: [0, 1, 4, 5, 6, 7, 8, 9]  # 只允许MBConv1和部分MBConv4
+```
+
+**使用block名称（推荐）：**
+```yaml
+blocks:
+  allowed_block_ids:
+    - mbconv1_poly4
+    - mbconv1_swish
+    - mbconv4_poly4
+    - mbconv4_swish
+    - mbconv4_poly4_se
+    - mbconv4_swish_se
+    - gated_mbconv1_poly4
+    - gated_mbconv1_swish
+```
+
+**混合使用（数字ID和名称）：**
+```yaml
+blocks:
+  allowed_block_ids: [0, 1, "basic_poly4", "basic_swish"]  # 可以混合
 ```
 
 #### 3. 禁用stem和第二次降分辨率
@@ -161,6 +201,23 @@ stem:
 
 second_downsample:
   enabled: false
+```
+
+**注意**: 除了通过约束禁用第二次降分辨率，还可以在生成过程中选择code 5（不使用）选项，这样可以像EfficientNet B0一样，stem后直接进入blocks。
+
+#### 4. 使用EfficientNet B0风格（不使用第二次降分辨率层）
+
+```yaml
+second_downsample:
+  enabled: true
+  allowed_codes: [5]  # 只允许"不使用"选项
+```
+
+或者允许所有选项（包括"不使用"）：
+```yaml
+second_downsample:
+  enabled: true
+  allowed_codes: null  # 包含0-5所有选项
 ```
 
 ---
@@ -191,19 +248,44 @@ python batch_generator.py [OPTIONS]
 
 ## Block类型参考
 
-系统支持24种预定义的block类型（ID 0-23）：
+系统支持22种预定义的block类型（ID 0-21）：
 
-### Basic Blocks (0-3)
-- **0-1**: BasicBlock (Poly4, Swish)
-- **2-3**: BasicSelfGatedBlock (Poly4, Swish)
+### MBConv Blocks (0-7)
+- **0-3**: MBConv1 (expansion=1.0)
+  - 0: `mbconv1_poly4` - Poly4
+  - 1: `mbconv1_swish` - Swish
+  - 2: `mbconv1_poly4_se` - Poly4 + SE
+  - 3: `mbconv1_swish_se` - Swish + SE
+- **4-7**: MBConv4 (expansion=4.0)
+  - 4: `mbconv4_poly4` - Poly4
+  - 5: `mbconv4_swish` - Swish
+  - 6: `mbconv4_poly4_se` - Poly4 + SE
+  - 7: `mbconv4_swish_se` - Swish + SE
 
-### Bottleneck Blocks (4-13)
-- **4-13**: BottleneckBlock (5种factor × 2种激活)
-  - Factor: 0.25, 0.5, 1.0, 1.5, 2.0
-  - Activation: Poly4, Swish
+### GatedMBConv Blocks (8-15)
+- **8-11**: GatedMBConv1 (expansion=1.0, Gated DWConv)
+  - 8: `gated_mbconv1_poly4` - Poly4
+  - 9: `gated_mbconv1_swish` - Swish
+  - 10: `gated_mbconv1_poly4_se` - Poly4 + SE
+  - 11: `gated_mbconv1_swish_se` - Swish + SE
+- **12-15**: GatedMBConv4 (expansion=4.0, Gated DWConv)
+  - 12: `gated_mbconv4_poly4` - Poly4
+  - 13: `gated_mbconv4_swish` - Swish
+  - 14: `gated_mbconv4_poly4_se` - Poly4 + SE
+  - 15: `gated_mbconv4_swish_se` - Swish + SE
 
-### Bottleneck Self-Gated Blocks (14-23)
-- **14-23**: BottleneckSelfGatedBlock (5种factor × 2种激活)
+### Basic Blocks (16-21)
+- **16-17**: BasicBlock
+  - 16: `basic_poly4` - Poly4
+  - 17: `basic_swish` - Swish
+- **18-19**: BasicSelfGatedBlock
+  - 18: `basic_sg_poly4` - Poly4
+  - 19: `basic_sg_swish` - Swish
+- **20-21**: FullGatedBasicBlock (两层都用SelfGated)
+  - 20: `basic_full_sg_poly4` - Poly4
+  - 21: `basic_full_sg_swish` - Swish
+
+**注意**: 在YAML配置文件中，你可以使用数字ID（如`0`）或字符串名称（如`"mbconv1_poly4"`），两者等价。
 
 详细信息见 `search_space.py` 中的 `UNIFIED_BLOCKS`。
 
@@ -232,9 +314,27 @@ python batch_generator.py [OPTIONS]
 ### Q5: 配置约束会影响搜索空间大小吗？
 
 **A**: 会。约束越多，搜索空间越小。示例：
-- **限制block类型**: 从24种减少到指定的几种
+- **限制block类型**: 从22种减少到指定的几种
 - **限制block数量**: 从7种减少到指定的几种
 - **前几层的stride约束**: 减少stride组合的可能性
+
+### Q6: 可以在YAML中使用block名称而不是数字ID吗？
+
+**A**: 可以！推荐使用block名称，更易读和维护。示例：
+
+```yaml
+blocks:
+  # 使用名称（推荐）
+  allowed_block_ids:
+    - mbconv1_poly4
+    - mbconv4_poly4
+    - basic_poly4
+
+  # 也可以混合使用
+  allowed_block_ids: [0, 1, "basic_poly4", "basic_swish"]
+```
+
+使用 `python network_gen/list_blocks.py` 查看所有可用的block名称。
 
 ---
 
@@ -249,6 +349,7 @@ network_gen/
 ├── network_config.py            网络配置数据结构
 ├── search_space.py              搜索空间定义
 ├── batch_generator.py           批量生成脚本
+├── list_blocks.py               列出所有可用block的辅助脚本
 └── __init__.py                  包初始化
 ```
 
@@ -257,7 +358,9 @@ network_gen/
 ```
 network_gen/configs/
 ├── imagenet_224.yaml            ImageNet-100配置
-└── cifar10_32.yaml              CIFAR-10配置
+├── cifar10_32.yaml              CIFAR-10配置
+├── efficientnet_style.yaml      EfficientNet B0风格
+└── test_block_names.yaml        Block名称使用示例
 ```
 
 ### 测试文件

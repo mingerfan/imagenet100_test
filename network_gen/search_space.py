@@ -7,7 +7,7 @@ FHE-NAS 搜索空间定义
 3. 通道数: 根据CT（密文槽位）和特征图大小反向计算
 4. Stem层: 2×2=4种选择（selfgate与否 × 激活函数）
 5. 第二次降分辨率: 5种选择（avepool 或 4种conv组合）
-6. 24种预定义Block: 将block类型、激活函数、factor组合成24种独立选择
+6. 22种预定义Block: 将MBConv/GatedMBConv/Basic blocks组合成22种独立选择
 7. 分层选择策略: 前4个block单独选，后面每2个block共享选择
 
 Stride编码（body部分）:
@@ -16,9 +16,9 @@ Stride编码（body部分）:
 - 总共 1344 种组合
 
 搜索空间大小估算:
-- Block选择: 24^(4+6) = 24^10 ≈ 6.3e+13
-- Stem × SecondDS × Stride × CT策略 = 4 × 5 × 1344 × 8 ≈ 2.2e+5
-- 总计: ~1.4e+19 (完整) 或 ~6.3e+13 (仅block选择)
+- Block选择: 22^(4+6) = 22^10 ≈ 2.6e+13
+- Stem × SecondDS × Stride × CT策略 = 4 × 6 × 1344 × 8 ≈ 2.6e+5
+- 总计: ~6.7e+18 (完整) 或 ~2.6e+13 (仅block选择)
 """
 
 from dataclasses import dataclass, field
@@ -33,9 +33,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.gate_net_cmp.block_def import (
     BasicBlock,
-    BottleneckBlock,
     BasicSelfGatedBlock,
-    BottleneckSelfGatedBlock,
+    FullGatedBasicBlock,
+    MBConvBlock,
+    SEBlock,
+    GatedDepthwiseConv,
     LearnableSwish,
     StablePoly4,
     Swish,
@@ -73,103 +75,297 @@ ACTIVATION_TYPES: Dict[str, ActivationSpec] = {
 }
 
 
-# ============ 24种预定义Block ============
+# ============ 22种预定义Block ============
 @dataclass
 class UnifiedBlockSpec:
     """
     统一的Block规格定义
 
-    将block类型、激活函数、factor组合成一个独立的选择单元
+    将block类型、激活函数、扩展因子、SE注意力、门控深度卷积组合成一个独立的选择单元
     """
-    id: int                  # 0-23的唯一ID
-    name: str                # 可读名称
-    block_class: Type        # Block类
-    activation_class: Type   # 激活函数类
-    factor: Optional[float]  # Bottleneck的factor（非bottleneck为None）
+    id: int                        # 0-21的唯一ID
+    name: str                      # 可读名称
+    block_class: Type              # Block类
+    activation_class: Type         # 激活函数类
+    expansion: Optional[float]     # MBConv的扩展因子（1.0或4.0），Basic为None
+    use_se: bool                   # 是否使用SE注意力
+    use_gated_dw: bool             # 是否使用门控深度卷积
     description: str = ""
 
-    def is_bottleneck(self) -> bool:
-        return self.factor is not None
+    def is_mbconv(self) -> bool:
+        """判断是否为MBConv类型"""
+        return self.block_class == MBConvBlock
+
+    def is_basic(self) -> bool:
+        """判断是否为Basic类型"""
+        return self.expansion is None
 
 
 def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
     """
-    创建24种预定义Block
+    创建22种预定义Block
 
     组合规则：
-    - basic × 2激活 = 2种
-    - basic_self_gated × 2激活 = 2种
-    - bottleneck × 2激活 × 5factor = 10种
-    - bottleneck_self_gated × 2激活 × 5factor = 10种
-    总计: 2 + 2 + 10 + 10 = 24种
+    - MBConv1 (exp=1.0) × 2激活 × 2SE选项 = 4种
+    - MBConv4 (exp=4.0) × 2激活 × 2SE选项 = 4种
+    - GatedMBConv1 (exp=1.0) × 2激活 × 2SE选项 = 4种
+    - GatedMBConv4 (exp=4.0) × 2激活 × 2SE选项 = 4种
+    - BasicBlock × 2激活 = 2种
+    - BasicSelfGatedBlock × 2激活 = 2种
+    - FullGatedBasicBlock × 2激活 = 2种
+    总计: 8 + 8 + 6 = 22种
     """
     blocks = {}
-    block_id = 0
 
-    activations = [
-        ("poly4", StablePoly4),
-        ("swish", Swish),
-    ]
+    # ========== 1. MBConv系列（8种）==========
+    # MBConv1（expansion=1.0）
+    blocks[0] = UnifiedBlockSpec(
+        id=0, name="mbconv1_poly4",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=1.0, use_se=False, use_gated_dw=False,
+        description="MBConv(exp=1.0) + Poly4"
+    )
+    blocks[1] = UnifiedBlockSpec(
+        id=1, name="mbconv1_swish",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=1.0, use_se=False, use_gated_dw=False,
+        description="MBConv(exp=1.0) + Swish"
+    )
+    blocks[2] = UnifiedBlockSpec(
+        id=2, name="mbconv1_poly4_se",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=1.0, use_se=True, use_gated_dw=False,
+        description="MBConv(exp=1.0) + Poly4 + SE"
+    )
+    blocks[3] = UnifiedBlockSpec(
+        id=3, name="mbconv1_swish_se",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=1.0, use_se=True, use_gated_dw=False,
+        description="MBConv(exp=1.0) + Swish + SE"
+    )
 
-    # Factor选项（5种，用于bottleneck）
-    factors = [0.25, 0.5, 1.0, 1.5, 2.0]
+    # MBConv4（expansion=4.0）
+    blocks[4] = UnifiedBlockSpec(
+        id=4, name="mbconv4_poly4",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=4.0, use_se=False, use_gated_dw=False,
+        description="MBConv(exp=4.0) + Poly4"
+    )
+    blocks[5] = UnifiedBlockSpec(
+        id=5, name="mbconv4_swish",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=4.0, use_se=False, use_gated_dw=False,
+        description="MBConv(exp=4.0) + Swish"
+    )
+    blocks[6] = UnifiedBlockSpec(
+        id=6, name="mbconv4_poly4_se",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=4.0, use_se=True, use_gated_dw=False,
+        description="MBConv(exp=4.0) + Poly4 + SE"
+    )
+    blocks[7] = UnifiedBlockSpec(
+        id=7, name="mbconv4_swish_se",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=4.0, use_se=True, use_gated_dw=False,
+        description="MBConv(exp=4.0) + Swish + SE"
+    )
 
-    # Basic blocks (2种)
-    for act_name, act_class in activations:
-        blocks[block_id] = UnifiedBlockSpec(
-            id=block_id,
-            name=f"basic_{act_name}",
-            block_class=BasicBlock,
-            activation_class=act_class,
-            factor=None,
-            description=f"BasicBlock + {act_name}"
-        )
-        block_id += 1
+    # ========== 2. GatedMBConv系列（8种）==========
+    # GatedMBConv1（expansion=1.0）
+    blocks[8] = UnifiedBlockSpec(
+        id=8, name="gated_mbconv1_poly4",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=1.0, use_se=False, use_gated_dw=True,
+        description="GatedMBConv(exp=1.0) + Poly4"
+    )
+    blocks[9] = UnifiedBlockSpec(
+        id=9, name="gated_mbconv1_swish",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=1.0, use_se=False, use_gated_dw=True,
+        description="GatedMBConv(exp=1.0) + Swish"
+    )
+    blocks[10] = UnifiedBlockSpec(
+        id=10, name="gated_mbconv1_poly4_se",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=1.0, use_se=True, use_gated_dw=True,
+        description="GatedMBConv(exp=1.0) + Poly4 + SE"
+    )
+    blocks[11] = UnifiedBlockSpec(
+        id=11, name="gated_mbconv1_swish_se",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=1.0, use_se=True, use_gated_dw=True,
+        description="GatedMBConv(exp=1.0) + Swish + SE"
+    )
 
-    # Basic Self-Gated blocks (2种)
-    for act_name, act_class in activations:
-        blocks[block_id] = UnifiedBlockSpec(
-            id=block_id,
-            name=f"basic_sg_{act_name}",
-            block_class=BasicSelfGatedBlock,
-            activation_class=act_class,
-            factor=None,
-            description=f"BasicSelfGated + {act_name}"
-        )
-        block_id += 1
+    # GatedMBConv4（expansion=4.0）
+    blocks[12] = UnifiedBlockSpec(
+        id=12, name="gated_mbconv4_poly4",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=4.0, use_se=False, use_gated_dw=True,
+        description="GatedMBConv(exp=4.0) + Poly4"
+    )
+    blocks[13] = UnifiedBlockSpec(
+        id=13, name="gated_mbconv4_swish",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=4.0, use_se=False, use_gated_dw=True,
+        description="GatedMBConv(exp=4.0) + Swish"
+    )
+    blocks[14] = UnifiedBlockSpec(
+        id=14, name="gated_mbconv4_poly4_se",
+        block_class=MBConvBlock,
+        activation_class=StablePoly4,
+        expansion=4.0, use_se=True, use_gated_dw=True,
+        description="GatedMBConv(exp=4.0) + Poly4 + SE"
+    )
+    blocks[15] = UnifiedBlockSpec(
+        id=15, name="gated_mbconv4_swish_se",
+        block_class=MBConvBlock,
+        activation_class=Swish,
+        expansion=4.0, use_se=True, use_gated_dw=True,
+        description="GatedMBConv(exp=4.0) + Swish + SE"
+    )
 
-    # Bottleneck blocks (10种)
-    for factor in factors:
-        for act_name, act_class in activations:
-            blocks[block_id] = UnifiedBlockSpec(
-                id=block_id,
-                name=f"btn_f{factor}_{act_name}",
-                block_class=BottleneckBlock,
-                activation_class=act_class,
-                factor=factor,
-                description=f"Bottleneck(f={factor}) + {act_name}"
-            )
-            block_id += 1
+    # ========== 3. Basic Block系列（6种）==========
+    # BasicBlock
+    blocks[16] = UnifiedBlockSpec(
+        id=16, name="basic_poly4",
+        block_class=BasicBlock,
+        activation_class=StablePoly4,
+        expansion=None, use_se=False, use_gated_dw=False,
+        description="BasicBlock + Poly4"
+    )
+    blocks[17] = UnifiedBlockSpec(
+        id=17, name="basic_swish",
+        block_class=BasicBlock,
+        activation_class=Swish,
+        expansion=None, use_se=False, use_gated_dw=False,
+        description="BasicBlock + Swish"
+    )
 
-    # Bottleneck Self-Gated blocks (10种)
-    for factor in factors:
-        for act_name, act_class in activations:
-            blocks[block_id] = UnifiedBlockSpec(
-                id=block_id,
-                name=f"btn_sg_f{factor}_{act_name}",
-                block_class=BottleneckSelfGatedBlock,
-                activation_class=act_class,
-                factor=factor,
-                description=f"BottleneckSelfGated(f={factor}) + {act_name}"
-            )
-            block_id += 1
+    # BasicSelfGatedBlock
+    blocks[18] = UnifiedBlockSpec(
+        id=18, name="basic_sg_poly4",
+        block_class=BasicSelfGatedBlock,
+        activation_class=StablePoly4,
+        expansion=None, use_se=False, use_gated_dw=False,
+        description="BasicSelfGatedBlock + Poly4"
+    )
+    blocks[19] = UnifiedBlockSpec(
+        id=19, name="basic_sg_swish",
+        block_class=BasicSelfGatedBlock,
+        activation_class=Swish,
+        expansion=None, use_se=False, use_gated_dw=False,
+        description="BasicSelfGatedBlock + Swish"
+    )
 
-    assert len(blocks) == 24, f"Expected 24 blocks, got {len(blocks)}"
+    # FullGatedBasicBlock（新增）
+    blocks[20] = UnifiedBlockSpec(
+        id=20, name="basic_full_sg_poly4",
+        block_class=FullGatedBasicBlock,
+        activation_class=StablePoly4,
+        expansion=None, use_se=False, use_gated_dw=False,
+        description="FullGatedBasicBlock + Poly4"
+    )
+    blocks[21] = UnifiedBlockSpec(
+        id=21, name="basic_full_sg_swish",
+        block_class=FullGatedBasicBlock,
+        activation_class=Swish,
+        expansion=None, use_se=False, use_gated_dw=False,
+        description="FullGatedBasicBlock + Swish"
+    )
+
+    assert len(blocks) == 22, f"Expected 22 blocks, got {len(blocks)}"
     return blocks
 
 
-# 全局的24种Block定义
+# 全局的22种Block定义
 UNIFIED_BLOCKS: Dict[int, UnifiedBlockSpec] = _create_unified_blocks()
+
+
+# Block名称到ID的映射（方便YAML配置）
+BLOCK_NAME_TO_ID: Dict[str, int] = {
+    spec.name: spec.id for spec in UNIFIED_BLOCKS.values()
+}
+
+
+def parse_block_id(block_identifier) -> int:
+    """
+    解析block标识符（支持数字ID或字符串名称）
+
+    Args:
+        block_identifier: 可以是整数ID（0-21）或字符串名称（如"mbconv1_poly4"）
+
+    Returns:
+        int: Block ID (0-21)
+
+    Raises:
+        ValueError: 如果标识符无效
+
+    Examples:
+        >>> parse_block_id(0)
+        0
+        >>> parse_block_id("mbconv1_poly4")
+        0
+        >>> parse_block_id("basic_poly4")
+        16
+    """
+    # 如果是整数，直接验证范围
+    if isinstance(block_identifier, int):
+        if 0 <= block_identifier < len(UNIFIED_BLOCKS):
+            return block_identifier
+        else:
+            raise ValueError(f"Block ID {block_identifier} out of range [0, {len(UNIFIED_BLOCKS)-1}]")
+
+    # 如果是字符串，查找对应的ID
+    elif isinstance(block_identifier, str):
+        if block_identifier in BLOCK_NAME_TO_ID:
+            return BLOCK_NAME_TO_ID[block_identifier]
+        else:
+            # 提供友好的错误信息，列出可用的名称
+            available_names = list(BLOCK_NAME_TO_ID.keys())
+            raise ValueError(
+                f"Unknown block name: '{block_identifier}'. "
+                f"Available names: {available_names[:5]}... (total {len(available_names)})"
+            )
+
+    else:
+        raise TypeError(f"Block identifier must be int or str, got {type(block_identifier)}")
+
+
+def parse_block_ids(block_identifiers) -> List[int]:
+    """
+    批量解析block标识符列表
+
+    Args:
+        block_identifiers: 整数ID或字符串名称的列表（可混合）
+
+    Returns:
+        List[int]: Block ID列表
+
+    Examples:
+        >>> parse_block_ids([0, "mbconv4_poly4", 16])
+        [0, 4, 16]
+        >>> parse_block_ids(["basic_poly4", "basic_swish"])
+        [16, 17]
+    """
+    if block_identifiers is None:
+        return None
+
+    return [parse_block_id(bid) for bid in block_identifiers]
 
 
 # 为了兼容性保留的旧定义
@@ -267,17 +463,20 @@ class SecondDownsampleConfig:
     def __repr__(self):
         if self.type == "avepool":
             return "SecondDS(AvgPool)"
+        elif self.type == "none":
+            return "SecondDS(None - 不使用)"
         sg = "SG" if self.use_selfgate else "NoSG"
         return f"SecondDS(Conv, {sg}, {self.activation})"
 
 
-# 所有可能的第二次降分辨率配置（编码0-4）
+# 所有可能的第二次降分辨率配置（编码0-5）
 SECOND_DOWNSAMPLE_CONFIGS = [
     SecondDownsampleConfig(type="avepool"),                                    # 0
     SecondDownsampleConfig(type="conv", use_selfgate=False, activation="poly4"),  # 1
     SecondDownsampleConfig(type="conv", use_selfgate=False, activation="swish"),  # 2
     SecondDownsampleConfig(type="conv", use_selfgate=True, activation="poly4"),   # 3
     SecondDownsampleConfig(type="conv", use_selfgate=True, activation="swish"),   # 4
+    SecondDownsampleConfig(type="none"),                                       # 5 (新增: 不使用)
 ]
 
 
@@ -479,9 +678,9 @@ class SearchSpace:
 
     编码维度：
     1. stem_code: [0-3] Stem层配置
-    2. second_ds_code: [0-4] 第二次降分辨率配置
+    2. second_ds_code: [0-5] 第二次降分辨率配置
     3. stride_code: [0-1343] Body部分的block数量和stride位置
-    4. block_ids: 每个block的类型（统一block ID: 0-23）
+    4. block_ids: 每个block的类型（统一block ID: 0-21）
     5. ct_policies: 每次stride=2时的CT策略（keep/half）
     """
 
@@ -538,26 +737,26 @@ class SearchSpace:
         估算搜索空间大小
 
         分层选择策略:
-        - 前4个block: 每个单独选择 (24种)
-        - 后面的block: 每2个共享选择 (24种)
+        - 前4个block: 每个单独选择 (22种)
+        - 后面的block: 每2个共享选择 (22种)
 
         对于平均10个block的网络:
-        - 前4个: 24^4
-        - 后6个 (3组): 24^3
-        - Block选择总数: 24^7
+        - 前4个: 22^4
+        - 后6个 (3组): 22^3
+        - Block选择总数: 22^7
 
         再乘以其他因素:
         - Stem: 4
-        - SecondDS: 5
+        - SecondDS: 6
         - Stride: 1344
         - CT策略: 8
         """
         stem_choices = self.num_stem_configs  # 4
-        second_ds_choices = self.num_second_ds_configs  # 5
+        second_ds_choices = self.num_second_ds_configs  # 6
         stride_choices = self.num_stride_configs  # 1344
         ct_policy_choices = len(self.ct_policy_options) ** 3  # 8
 
-        num_unified_blocks = 24
+        num_unified_blocks = 22
 
         # 分层选择: 前4个单独选 + 后面每2个一组
         # 假设平均10个block: 4 + ceil(6/2) = 4 + 3 = 7个选择位
@@ -586,7 +785,7 @@ class SearchSpace:
         Returns:
             block选择的组合数
         """
-        num_unified_blocks = 24
+        num_unified_blocks = 22
         individual_blocks = min(4, num_blocks)  # 前4个单独选
         remaining = max(0, num_blocks - 4)
         grouped_choices = (remaining + 1) // 2  # 每2个一组
@@ -611,14 +810,14 @@ class SearchSpace:
         lines.append("")
         lines.append(self.stride_encoder.summary())
 
-        lines.append("\n24种统一Block定义:")
-        for i in range(24):
+        lines.append("\n22种统一Block定义:")
+        for i in range(22):
             spec = UNIFIED_BLOCKS[i]
             lines.append(f"  [{i:2d}] {spec.name:25s} {spec.description}")
 
         lines.append("\n分层选择策略:")
-        lines.append("  - 前4个block: 每个单独选择 (24种/位置)")
-        lines.append("  - 后面block: 每2个共享选择 (24种/组)")
+        lines.append("  - 前4个block: 每个单独选择 (22种/位置)")
+        lines.append("  - 后面block: 每2个共享选择 (22种/组)")
 
         lines.append(f"\nCT策略选项: {self.ct_policy_options}")
         lines.append(f"CT槽位数: {self.ct_slots}")
@@ -627,8 +826,8 @@ class SearchSpace:
 
         # 详细的搜索空间计算
         lines.append("\n搜索空间估算 (平均10个block):")
-        lines.append(f"  Block选择: 24^(4+3) = 24^7 ≈ {24**7:.2e}")
-        lines.append("  × Stem(4) × SecondDS(5) × Stride(1344) × CT策略(8)")
+        lines.append(f"  Block选择: 22^(4+3) = 22^7 ≈ {22**7:.2e}")
+        lines.append("  × Stem(4) × SecondDS(6) × Stride(1344) × CT策略(8)")
         lines.append(f"  = {self.compute_search_space_size():.2e}")
         lines.append("=" * 60)
 

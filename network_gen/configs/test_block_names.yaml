@@ -1,0 +1,48 @@
+name: "test_block_names"
+description: "Test configuration using block names instead of IDs"
+
+dataset:
+  name: "imagenet"
+  num_classes: 100
+  input_size: 224
+
+search_space:
+  ct_slots: 32768
+  initial_ct_count: 1
+
+  stem:
+    enabled: true
+    allowed_codes: [0, 1]  # 只用Poly4和Swish的非门控stem
+
+  second_downsample:
+    enabled: true
+    allowed_codes: [5]  # 不使用第二次降分辨率
+
+  blocks:
+    # 使用block名称（更易读）
+    allowed_block_ids:
+      - mbconv1_poly4       # ID 0
+      - mbconv1_swish       # ID 1
+      - mbconv4_poly4       # ID 4
+      - mbconv4_swish       # ID 5
+      - basic_poly4         # ID 16
+      - basic_swish         # ID 17
+
+    first_layers_constraints:
+      - position: 0
+        stride: 1
+        # 第一层只允许basic blocks（使用名称）
+        allowed_block_ids:
+          - basic_poly4
+          - basic_swish
+
+  stride:
+    allowed_block_counts: [6, 8, 10]
+    num_strides: 3
+
+  ct_policies:
+    allowed: ["keep", "half"]
+
+output:
+  base_dir: "generated_networks/test_block_names"
+  save_format: "json"
