@@ -188,11 +188,11 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="GatedMBConv(exp=1.0) + Poly4"
     )
     blocks[9] = UnifiedBlockSpec(
-        id=9, name="gated_mbconv1_swish",
+        id=9, name="gated_mbconv1_lswish",
         block_class=MBConvBlock,
-        activation_class=Swish,
+        activation_class=LearnableSwish,
         expansion=1.0, use_se=False, use_gated_dw=True,
-        description="GatedMBConv(exp=1.0) + Swish"
+        description="GatedMBConv(exp=1.0) + LSwish"
     )
     blocks[10] = UnifiedBlockSpec(
         id=10, name="gated_mbconv1_poly4_se",
@@ -202,11 +202,11 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="GatedMBConv(exp=1.0) + Poly4 + SE"
     )
     blocks[11] = UnifiedBlockSpec(
-        id=11, name="gated_mbconv1_swish_se",
+        id=11, name="gated_mbconv1_lswish_se",
         block_class=MBConvBlock,
-        activation_class=Swish,
+        activation_class=LearnableSwish,
         expansion=1.0, use_se=True, use_gated_dw=True,
-        description="GatedMBConv(exp=1.0) + Swish + SE"
+        description="GatedMBConv(exp=1.0) + LSwish + SE"
     )
 
     # GatedMBConv4（expansion=4.0）
@@ -218,11 +218,11 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="GatedMBConv(exp=4.0) + Poly4"
     )
     blocks[13] = UnifiedBlockSpec(
-        id=13, name="gated_mbconv4_swish",
+        id=13, name="gated_mbconv4_lswish",
         block_class=MBConvBlock,
-        activation_class=Swish,
+        activation_class=LearnableSwish,
         expansion=4.0, use_se=False, use_gated_dw=True,
-        description="GatedMBConv(exp=4.0) + Swish"
+        description="GatedMBConv(exp=4.0) + LSwish"
     )
     blocks[14] = UnifiedBlockSpec(
         id=14, name="gated_mbconv4_poly4_se",
@@ -232,11 +232,11 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="GatedMBConv(exp=4.0) + Poly4 + SE"
     )
     blocks[15] = UnifiedBlockSpec(
-        id=15, name="gated_mbconv4_swish_se",
+        id=15, name="gated_mbconv4_lswish_se",
         block_class=MBConvBlock,
-        activation_class=Swish,
+        activation_class=LearnableSwish,
         expansion=4.0, use_se=True, use_gated_dw=True,
-        description="GatedMBConv(exp=4.0) + Swish + SE"
+        description="GatedMBConv(exp=4.0) + LSwish + SE"
     )
 
     # ========== 3. Basic Block系列（6种）==========
@@ -265,11 +265,11 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="BasicSelfGatedBlock + Poly4"
     )
     blocks[19] = UnifiedBlockSpec(
-        id=19, name="basic_sg_swish",
+        id=19, name="basic_sg_lswish",
         block_class=BasicSelfGatedBlock,
-        activation_class=Swish,
+        activation_class=LearnableSwish,
         expansion=None, use_se=False, use_gated_dw=False,
-        description="BasicSelfGatedBlock + Swish"
+        description="BasicSelfGatedBlock + LSwish"
     )
 
     # FullGatedBasicBlock（新增）
@@ -281,11 +281,11 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="FullGatedBasicBlock + Poly4"
     )
     blocks[21] = UnifiedBlockSpec(
-        id=21, name="basic_full_sg_swish",
+        id=21, name="basic_full_sg_lswish",
         block_class=FullGatedBasicBlock,
-        activation_class=Swish,
+        activation_class=LearnableSwish,
         expansion=None, use_se=False, use_gated_dw=False,
-        description="FullGatedBasicBlock + Swish"
+        description="FullGatedBasicBlock + LSwish"
     )
 
     assert len(blocks) == 22, f"Expected 22 blocks, got {len(blocks)}"

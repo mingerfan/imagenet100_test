@@ -16,7 +16,7 @@ import pathlib
 
 class Trainer:
     """基础训练器类"""
-    
+
     def __init__(
         self,
         model,
@@ -30,11 +30,12 @@ class Trainer:
         scheduler=None,
         use_amp=True,
         save_freq=10,
-        grad_clip_max_norm=1.0
+        grad_clip_max_norm=1.0,
+        poly4_warmup_ratio=0.5
     ):
         """
         初始化训练器
-        
+
         Args:
             model: 模型
             train_loader: 训练数据加载器
@@ -48,6 +49,7 @@ class Trainer:
             use_amp: 是否使用混合精度训练
             save_freq: 保存检查点的频率
             grad_clip_max_norm: 梯度裁剪的最大范数，用于防止梯度爆炸
+            poly4_warmup_ratio: StablePoly4的warmup比例（默认0.5，即50%的epoch用于warmup）
         """
         self.model = model
         self.train_loader = train_loader
@@ -61,13 +63,17 @@ class Trainer:
         self.use_amp = use_amp
         self.save_freq = save_freq
         self.grad_clip_max_norm = grad_clip_max_norm
-        
+        self.poly4_warmup_ratio = poly4_warmup_ratio
+
         # 创建结果目录
         os.makedirs(result_dir, exist_ok=True)
-        
+
+        # 自动调整StablePoly4的warmup_epochs
+        self._adjust_poly4_warmup()
+
         # 初始化scaler
         self.scaler = GradScaler() if use_amp else None
-        
+
         # 训练历史
         self.history = {
             'epoch': [],
@@ -78,10 +84,41 @@ class Trainer:
             'learning_rate': [],
             'epoch_time': []
         }
-        
+
         # 最佳准确率
         self.best_acc = 0.0
-        
+
+    def _adjust_poly4_warmup(self):
+        """
+        自动调整模型中所有StablePoly4的warmup_epochs
+
+        根据训练总epoch数和warmup_ratio，动态设置合适的warmup_epochs。
+        例如：训练25 epochs，ratio=0.5 → warmup_epochs=12
+              训练60 epochs，ratio=0.5 → warmup_epochs=30
+        """
+        # 计算目标warmup_epochs
+        target_warmup_epochs = int(self.epochs * self.poly4_warmup_ratio)
+
+        # 确保至少有几个epoch用于warmup（最少5个epoch）
+        target_warmup_epochs = max(5, target_warmup_epochs)
+
+        # 确保warmup不超过总epoch数的80%
+        target_warmup_epochs = min(target_warmup_epochs, int(self.epochs * 0.8))
+
+        poly4_count = 0
+        for module in self.model.modules():
+            # 检查是否是StablePoly4（通过检查是否有set_warmup_epochs方法）
+            if hasattr(module, 'set_warmup_epochs') and callable(module.set_warmup_epochs):
+                module.set_warmup_epochs(target_warmup_epochs)
+                poly4_count += 1
+
+        if poly4_count > 0:
+            print(f"✓ 自动调整 {poly4_count} 个StablePoly4模块:")
+            print(f"  - 训练总epoch: {self.epochs}")
+            print(f"  - Warmup比例: {self.poly4_warmup_ratio:.1%}")
+            print(f"  - Warmup epochs: {target_warmup_epochs}")
+            print(f"  - 多项式激活将在第 {target_warmup_epochs + 1} epoch开始生效")
+
     def _set_epoch_for_model(self, epoch):
         """
         递归地为模型中所有需要 epoch 信息的模块设置 epoch

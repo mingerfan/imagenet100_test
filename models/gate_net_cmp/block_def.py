@@ -81,6 +81,14 @@ class StablePoly4(nn.Module):
         """设置当前epoch，用于控制ReLU到多项式的过渡"""
         self.current_epoch.fill_(epoch)
 
+    def set_warmup_epochs(self, warmup_epochs):
+        """动态设置warmup epoch数量
+
+        Args:
+            warmup_epochs: 新的warmup epoch数量
+        """
+        self.warmup_epochs = warmup_epochs
+
     def forward(self, x):
         # 数值稳定性保护：限制输入范围
         x_clipped = torch.clamp(x, min=-10.0, max=10.0)

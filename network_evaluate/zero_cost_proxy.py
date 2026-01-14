@@ -390,9 +390,24 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
     info['progressivity'] = float(progressivity) if not np.isnan(progressivity) else -np.inf
     info['trainability'] = float(trainability) if not np.isnan(trainability) else -np.inf
 
-    # Compute FHE latency (replaces FLOPs complexity)
     # Get the underlying model if wrapped
     eval_model = model.model if isinstance(model, ModelWrapper) else model
+
+    # Compute FLOPs (for ranking in fitness function)
+    try:
+        if hasattr(eval_model, 'get_FLOPs'):
+            flops = eval_model.get_FLOPs(resolution)
+            info['flops'] = float(flops)
+        else:
+            # Fallback: use a rough estimation based on parameters
+            # This is just a placeholder - actual FLOPs should be computed properly
+            n_params = sum(p.numel() for p in eval_model.parameters())
+            info['flops'] = float(n_params * resolution * resolution)
+    except Exception as e:
+        print(f"Warning: Failed to compute FLOPs: {e}")
+        info['flops'] = 1e9  # Default high value if computation fails
+
+    # Compute FHE latency (for constraints in fitness function)
     fhe_metrics = compute_fhe_latency(eval_model, (batch_size, 3, resolution, resolution))
     info.update(fhe_metrics)
 
