@@ -43,10 +43,17 @@ class RegularizedEvolution:
         self.config = config
 
         # Initialize components
-        self.population = Population(max_size=config.search.population_size)
+        diversity_quota = getattr(config.search, 'diversity_quota', 0.01)
+        latency_baseline = getattr(config.fitness, 'latency_baseline', 22334905.50) if hasattr(config, 'fitness') else 22334905.50
+
+        self.population = Population(
+            max_size=config.search.population_size,
+            diversity_quota=diversity_quota,
+            latency_baseline=latency_baseline
+        )
         self.mutator = MutationOperator()
         self.evaluator = FitnessEvaluator(config)
-        self.fitness_fn = AZNASFitnessFunction()
+        self.fitness_fn = AZNASFitnessFunction(latency_baseline=latency_baseline)
 
         # Logging and checkpointing
         self.logger = EvolutionLogger(config.logging.output_dir)

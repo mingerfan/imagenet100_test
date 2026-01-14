@@ -34,6 +34,28 @@ def init_model(model, method='kaiming_norm_fanin'):
     return model
 
 
+def synflow_init(m):
+    """
+    SynFlow initialization: Initialize weights with mean=1.0
+
+    This initialization is used for the SynFlow zero-cost proxy.
+    """
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
+        nn.init.normal_(m.weight, mean=1.0, std=0.05)
+        if hasattr(m, 'bias') and m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+        if m.affine:
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
+
+def init_model_synflow(model):
+    """Initialize model for SynFlow evaluation"""
+    model.apply(synflow_init)
+    return model
+
+
 def prepare_poly4_for_evaluation(model):
     """Set all StablePoly4 activations to post-warmup mode for evaluation
 
@@ -413,3 +435,247 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
 
     return info
 
+
+def compute_synflow(model, gpu, resolution, batch_size, fp16=False):
+    """
+    Compute SynFlow zero-cost proxy score
+
+    SynFlow (Synthetic Flow) measures complexity and potential of a network
+    by computing the sum of absolute gradients of all parameters.
+
+    Reference: "Zero-Cost Proxies for Lightweight NAS" (Abdelfattah et al., 2021)
+
+    Args:
+        model: PyTorch model to evaluate
+        gpu: GPU device ID
+        resolution: Input image resolution
+        batch_size: Batch size for evaluation
+        fp16: Use FP16 precision
+
+    Returns:
+        dict with keys:
+            - 'synflow_score': SynFlow score (higher is better)
+            - 'synflow_grad_norm': L2 norm of gradients
+            - 'synflow_params': Number of parameters
+    """
+    model = model.model if isinstance(model, ModelWrapper) else model
+
+    model.train()
+    model.cuda()
+
+    if gpu is not None:
+        device = torch.device('cuda:{}'.format(gpu))
+    else:
+        device = torch.device('cpu')
+
+    if fp16:
+        dtype = torch.half
+    else:
+        dtype = torch.float32
+
+    # SynFlow initialization
+    init_model_synflow(model)
+
+    # Use all-ones input for SynFlow
+    input_ = torch.ones(size=[batch_size, 3, resolution, resolution], device=device, dtype=dtype)
+
+    # Forward pass
+    output = model(input_)
+
+    # Compute loss (output should be as large as possible, so we minimize negative output)
+    # For classification, we want to maximize output, so we minimize -output
+    loss = -output.mean()
+
+    # Backward pass
+    loss.backward()
+
+    # Compute SynFlow score: sum of absolute gradients for all parameters
+    synflow_score = 0.0
+    total_params = 0
+    grad_norm_sq = 0.0
+
+    for param in model.parameters():
+        if param.grad is not None:
+            synflow_score += param.grad.abs().sum().item()
+            grad_norm_sq += (param.grad ** 2).sum().item()
+            total_params += param.numel()
+
+    # Compute gradient norm
+    grad_norm = np.sqrt(grad_norm_sq)
+
+    # Clean up gradients
+    model.zero_grad()
+
+    return {
+        'synflow_score': float(synflow_score),
+        'synflow_grad_norm': float(grad_norm),
+        'synflow_params': int(total_params)
+    }
+
+
+def network_weight_gaussian_init(net: nn.Module):
+    """
+    Initialize network weights with Gaussian distribution
+
+    Args:
+        net: PyTorch model to initialize
+
+    Returns:
+        Initialized model
+    """
+    with torch.no_grad():
+        for m in net.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight)
+                if hasattr(m, 'bias') and m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            else:
+                continue
+    return net
+
+
+class ZENScoreWrapper(nn.Module):
+    """
+    Wrapper to extract features before the global average pooling layer
+    """
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        self.features = None
+        self.hook = None
+
+        # Register hook to capture features before GAP
+        self._register_hook()
+
+    def _register_hook(self):
+        """Find and hook into the layer before global average pooling"""
+        # Try to find common patterns for GAP/average pooling layers
+        for name, module in list(self.model.named_modules())[-30:]:  # Check last 30 modules
+            if isinstance(module, (nn.AdaptiveAvgPool2d, nn.AvgPool2d)):
+                # Found GAP layer, register hook on it to capture input
+                self._hook_before_module(module)
+                return  # Hook registered, exit
+
+        # If no GAP found, try to find a layer before classifier
+        # Look for the last Conv2d or Linear layer
+        for name, module in reversed(list(self.model.named_modules())):
+            if isinstance(module, nn.Conv2d):
+                # Register forward hook on this layer
+                def capture_features(module, input, output):
+                    self.features = output
+                self.hook = module.register_forward_hook(capture_features)
+                return
+
+    def _hook_before_module(self, target_module):
+        """Register hook on the module before the target"""
+        def find_prev_hook(module, input):
+            # Store the input to the GAP layer
+            if len(input) > 0:
+                self.features = input[0]
+
+        # Register forward pre-hook on GAP layer
+        self.hook = target_module.register_forward_pre_hook(find_prev_hook)
+
+    def forward_pre_GAP(self, x):
+        """Forward pass to get features before GAP"""
+        if self.features is not None:
+            self.features = None
+        self.model(x)
+        return self.features
+
+    def __del__(self):
+        if self.hook is not None:
+            self.hook.remove()
+
+
+def compute_zen_score(model, gpu, resolution, batch_size, repeat=32, mixup_gamma=1e-2, fp16=False):
+    """
+    Compute ZEN (Zero-Shot Evaluation of Networks) score
+
+    ZEN measures the network's expressiveness by evaluating how the network responds
+    to mixup perturbations.
+
+    Reference: "Zero-Shot Evaluation of Networks" (You et al., 2021)
+
+    Args:
+        model: PyTorch model to evaluate
+        gpu: GPU device ID
+        resolution: Input image resolution
+        batch_size: Batch size for evaluation
+        repeat: Number of repetitions for averaging
+        mixup_gamma: Mixup coefficient
+        fp16: Use FP16 precision
+
+    Returns:
+        dict with keys:
+            - 'zen_score': Average ZEN score
+            - 'std_zen_score': Standard deviation of ZEN scores
+            - 'zen_precision': 95% confidence interval precision
+    """
+    model = model.model if isinstance(model, ModelWrapper) else model
+
+    # Wrap model to get features before GAP
+    zen_model = ZENScoreWrapper(model)
+    zen_model.train()
+    zen_model.cuda()
+
+    if gpu is not None:
+        device = torch.device('cuda:{}'.format(gpu))
+    else:
+        device = torch.device('cpu')
+
+    if fp16:
+        dtype = torch.half
+    else:
+        dtype = torch.float32
+
+    zen_score_list = []
+
+    with torch.no_grad():
+        for repeat_count in range(repeat):
+            # Initialize weights with Gaussian distribution
+            network_weight_gaussian_init(zen_model)
+
+            # Generate two random inputs
+            input1 = torch.randn(size=[batch_size, 3, resolution, resolution], device=device, dtype=dtype)
+            input2 = torch.randn(size=[batch_size, 3, resolution, resolution], device=device, dtype=dtype)
+
+            # Create mixup input
+            mixup_input = input1 + mixup_gamma * input2
+
+            # Get features before GAP
+            output = zen_model.forward_pre_GAP(input1)
+            mixup_output = zen_model.forward_pre_GAP(mixup_input)
+
+            # Compute ZEN score
+            nas_score = torch.sum(torch.abs(output - mixup_output), dim=[1, 2, 3])
+            nas_score = torch.mean(nas_score)
+
+            # Compute BN scaling factor
+            log_bn_scaling_factor = 0.0
+            for m in zen_model.model.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    bn_scaling_factor = torch.sqrt(torch.mean(m.running_var))
+                    log_bn_scaling_factor += torch.log(bn_scaling_factor)
+
+            # Final ZEN score
+            nas_score = torch.log(nas_score) + log_bn_scaling_factor
+            zen_score_list.append(float(nas_score))
+
+    # Compute statistics
+    std_zen_score = np.std(zen_score_list)
+    avg_precision = 1.96 * std_zen_score / np.sqrt(len(zen_score_list))
+    avg_zen_score = np.mean(zen_score_list)
+
+    return {
+        'zen_score': float(avg_zen_score),
+        'std_zen_score': float(std_zen_score),
+        'zen_precision': float(avg_precision)
+    }

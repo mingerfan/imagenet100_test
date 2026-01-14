@@ -95,18 +95,23 @@ class Population:
         history: All evaluated individuals (for analysis)
     """
 
-    def __init__(self, max_size: int = 200):
+    def __init__(self, max_size: int = 200, diversity_quota: float = 0.01,
+                 latency_baseline: float = 22334905.50):
         """Initialize population
 
         Args:
             max_size: Maximum number of individuals in population
+            diversity_quota: Minimum fraction to preserve for each depth (default 1%)
+            latency_baseline: FHE latency baseline for hard constraint
         """
         self.max_size = max_size
+        self.diversity_quota = diversity_quota
+        self.latency_baseline = latency_baseline
         self.individuals: List[Individual] = []
         self.history: List[Individual] = []
 
     def add(self, network_config, scores: Dict, aznas_fitness: float, generation: int):
-        """Add individual to population, removing oldest if full
+        """Add individual to population with diversity-aware removal
 
         Args:
             network_config: NetworkConfig object
@@ -120,14 +125,89 @@ class Population:
         self.individuals.append(individual)
         self.history.append(individual)
 
-        # Age regularization: Remove oldest if over capacity
+        # ✅ Diversity-aware removal: Protect minority depths
         if len(self.individuals) > self.max_size:
-            removed = self.individuals.pop(0)
-            print(f"Removed individual {removed.id} (age={removed.age}, gen={removed.generation})")
+            self._remove_with_diversity_protection()
 
-        # Increment age of all individuals
-        for ind in self.individuals:
+        # ✅ FIX: Increment age of existing individuals only (exclude newly added)
+        # The newly added individual should start with age=0
+        for ind in self.individuals[:-1]:
             ind.increment_age()
+
+    def _get_depth_distribution(self) -> Dict[int, int]:
+        """Get distribution of network depths in current population
+
+        Returns:
+            Dict mapping depth (num_blocks) to count
+        """
+        depth_counts = {}
+        for ind in self.individuals:
+            depth = len(ind.config.blocks)
+            depth_counts[depth] = depth_counts.get(depth, 0) + 1
+        return depth_counts
+
+    def _remove_with_diversity_protection(self):
+        """Remove individual with diversity protection
+
+        Strategy:
+        1. Preserve minority groups (each depth gets minimum quota)
+        2. Latency violations are not protected (hard constraint)
+        3. Among removable candidates, remove oldest first (FIFO)
+
+        Priority for removal (highest to lowest):
+        - P1: Majority group + latency violation
+        - P2: Majority group + latency ok
+        - P3: Minority group + latency violation
+        - P4: Minority group + latency ok (protected)
+        """
+        if len(self.individuals) <= self.max_size:
+            return
+
+        # Calculate minimum quota per depth
+        min_quota = max(1, int(self.max_size * self.diversity_quota))
+
+        # Get depth distribution
+        depth_counts = self._get_depth_distribution()
+
+        # Try to find removable individual (oldest first)
+        for i in range(len(self.individuals)):
+            ind = self.individuals[i]
+            depth = len(ind.config.blocks)
+            is_minority = depth_counts[depth] <= min_quota
+            is_latency_violation = ind.scores.get('fhe_latency', float('inf')) > self.latency_baseline
+
+            # Priority 1: Majority + latency violation (remove immediately)
+            if not is_minority and is_latency_violation:
+                removed = self.individuals.pop(i)
+                print(f"Removed individual {removed.id} (depth={depth}, latency violation, age={removed.age})")
+                return
+
+        # Priority 2: Majority + latency ok
+        for i in range(len(self.individuals)):
+            ind = self.individuals[i]
+            depth = len(ind.config.blocks)
+            is_minority = depth_counts[depth] <= min_quota
+
+            if not is_minority:
+                removed = self.individuals.pop(i)
+                print(f"Removed individual {removed.id} (depth={depth}, majority group, age={removed.age})")
+                return
+
+        # Priority 3: Minority + latency violation
+        for i in range(len(self.individuals)):
+            ind = self.individuals[i]
+            is_latency_violation = ind.scores.get('fhe_latency', float('inf')) > self.latency_baseline
+
+            if is_latency_violation:
+                depth = len(ind.config.blocks)
+                removed = self.individuals.pop(i)
+                print(f"Removed individual {removed.id} (depth={depth}, latency violation, age={removed.age})")
+                return
+
+        # Priority 4: All protected - remove oldest anyway
+        removed = self.individuals.pop(0)
+        depth = len(removed.config.blocks)
+        print(f"Removed individual {removed.id} (depth={depth}, forced removal, age={removed.age})")
 
     def sample(self, k: int) -> List[Individual]:
         """Sample k individuals uniformly at random

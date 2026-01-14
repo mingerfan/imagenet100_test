@@ -7,6 +7,7 @@ search:
   num_generations: 100           # Number of evolution generations
   sample_size: 25                # Tournament selection sample size
   mutation_rate: 1.0             # Probability of mutation per offspring (always mutate)
+  diversity_quota: 0.01          # Minimum fraction to preserve per depth (1% = 2 individuals)
 
 # Network Generation
 # Reuses network_gen constraints for architecture search space

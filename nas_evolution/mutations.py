@@ -176,6 +176,9 @@ class MutationOperator:
 
         Only selects stride codes that maintain the same number of blocks
         to ensure the mutation is valid.
+
+        IMPORTANT: After changing strides, recalculates channels to maintain
+        FHE constraints (channels depend on feature map sizes).
         """
         # Build cache on first use
         self._build_stride_cache()
@@ -207,11 +210,20 @@ class MutationOperator:
 
             for i, block in enumerate(config.blocks):
                 block.stride = strides[i]
+
+            # ✅ FIX: Recalculate channels after stride change
+            # This ensures channel counts match the new feature map sizes
+            self._recalculate_channels(config)
+
         except ImportError:
             print("Warning: Could not import StrideEncoder, stride not updated")
 
     def _mutate_ct_policy(self, config):
-        """Mutate CT policy at random downsample step"""
+        """Mutate CT policy at random downsample step
+
+        IMPORTANT: After changing CT policy, recalculates channels to maintain
+        FHE constraints (channels depend on CT count which is affected by policy).
+        """
         if len(config.ct_policies) == 0:
             return
 
@@ -221,6 +233,10 @@ class MutationOperator:
         # Toggle between 'keep' and 'half'
         new_policy = 'half' if current_policy == 'keep' else 'keep'
         config.ct_policies[idx] = new_policy
+
+        # ✅ FIX: Recalculate channels after CT policy change
+        # CT policy affects CT count progression, which determines channel counts
+        self._recalculate_channels(config)
 
     def _mutate_downsample(self, config):
         """Mutate second downsample method (0-5)"""
@@ -232,6 +248,54 @@ class MutationOperator:
             new_ds = random.randint(0, 5)
 
         config.second_ds_code = new_ds
+
+    def _recalculate_channels(self, config):
+        """Recalculate all block channels after stride or CT policy mutation
+
+        This is critical for maintaining FHE constraints where channel counts
+        are derived from CT count and feature map sizes.
+
+        Args:
+            config: NetworkConfig to update
+        """
+        try:
+            from network_gen.search_space import ChannelCalculator
+
+            # Initialize calculator with same parameters as generator
+            calculator = ChannelCalculator(
+                ct_slots=32768,  # Standard FHE parameter
+                input_size=224,  # ImageNet input size
+                stem_downsample=4  # Stem does 2x downsampling twice
+            )
+
+            # Get current strides from blocks
+            strides = [block.stride for block in config.blocks]
+
+            # Recalculate channel sequence based on current strides and CT policies
+            channels, feature_sizes, ct_counts = calculator.compute_channels_sequence(
+                strides=strides,
+                ct_policies=config.ct_policies,
+                initial_ct_count=config.initial_ct_count
+            )
+
+            # Get stem output channels
+            stem_out_channels = calculator.get_initial_channels(config.initial_ct_count)
+
+            # Update each block's in_channels and out_channels
+            for i, block in enumerate(config.blocks):
+                if i == 0:
+                    block.in_channels = stem_out_channels
+                else:
+                    block.in_channels = config.blocks[i-1].out_channels
+                block.out_channels = channels[i]
+
+            # Update config's stem_out_channels
+            config.stem_out_channels = stem_out_channels
+
+        except ImportError as e:
+            print(f"Warning: Could not import ChannelCalculator: {e}")
+        except Exception as e:
+            print(f"Warning: Error recalculating channels: {e}")
 
 
 def test_mutation():
