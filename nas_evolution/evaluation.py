@@ -12,16 +12,16 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from typing import Dict
-from .fitness_function import AZNASFitnessFunction
+from .fitness_function import ZenNASFitnessFunction
 
 
 class FitnessEvaluator:
-    """Evaluates architecture fitness using modified zero_cost_proxy
+    """Evaluates architecture fitness using ZenNAS zero-cost proxy
 
     Integrates:
     - NetworkBuilder to construct models from NetworkConfig
-    - Modified compute_nas_score with FHE latency
-    - AZ-NAS fitness function for ranking aggregation
+    - ZenNAS compute_nas_score with FHE latency
+    - ZenNAS fitness function for ranking
     """
 
     def __init__(self, config):
@@ -37,7 +37,7 @@ class FitnessEvaluator:
         self.use_dataloader = config.evaluation.use_dataloader
 
         # Initialize fitness function
-        self.fitness_fn = AZNASFitnessFunction()
+        self.fitness_fn = ZenNASFitnessFunction()
 
         # Cache for evaluated architectures (avoid re-evaluation)
         self.eval_cache = {}
@@ -56,14 +56,13 @@ class FitnessEvaluator:
 
         Returns:
             Dict with evaluation scores:
-                - 'expressivity': float
-                - 'progressivity': float
-                - 'trainability': float
+                - 'zen_score': float (primary metric)
+                - 'std_zen_score': float
+                - 'params': int
+                - 'flops': float
                 - 'fhe_latency': float
                 - 'fhe_boot_count': int
                 - 'fhe_max_depth': int
-                - 'fhe_operation_latency': float
-                - 'fhe_boot_latency': float
         """
         # Check cache (hash by config dict)
         config_str = str(sorted(network_config.to_dict().items()))
@@ -84,11 +83,9 @@ class FitnessEvaluator:
             scores = compute_nas_score(
                 model=model,
                 gpu=self.gpu,
-                trainloader=None,  # Use random input for speed
+                trainloader=None,
                 resolution=self.resolution,
-                batch_size=self.batch_size,
-                init=True,  # Initialize weights
-                use_wrapper=True  # Wrap for feature extraction
+                batch_size=self.batch_size
             )
 
             # Cache result
@@ -103,9 +100,10 @@ class FitnessEvaluator:
 
             # Return invalid scores
             return {
-                'expressivity': float('-inf'),
-                'progressivity': float('-inf'),
-                'trainability': float('-inf'),
+                'zen_score': float('-inf'),
+                'std_zen_score': 0.0,
+                'params': 0,
+                'flops': 0.0,
                 'fhe_latency': float('inf'),
                 'fhe_boot_count': 0,
                 'fhe_max_depth': 0,
@@ -114,14 +112,14 @@ class FitnessEvaluator:
             }
 
     def evaluate_population(self, population):
-        """Evaluate multiple architectures and compute AZ-NAS fitness
+        """Evaluate multiple architectures and compute ZenNAS fitness
 
         Args:
             population: List of (network_config, existing_scores) tuples
                        If existing_scores is None, will evaluate
 
         Returns:
-            List of (scores_dict, aznas_fitness) tuples
+            List of (scores_dict, fitness) tuples
         """
         results = []
 
@@ -142,11 +140,11 @@ class FitnessEvaluator:
 
             results.append(scores)
 
-        # Compute AZ-NAS fitness for entire population
-        aznas_scores = self.fitness_fn.compute_fitness(results)
+        # Compute ZenNAS fitness for entire population
+        zen_scores = self.fitness_fn.compute_fitness(results)
 
-        # Return pairs of (scores, aznas_fitness)
-        return [(results[i], float(aznas_scores[i])) for i in range(len(results))]
+        # Return pairs of (scores, zen_fitness)
+        return [(results[i], float(zen_scores[i])) for i in range(len(results))]
 
     def clear_cache(self):
         """Clear evaluation cache"""
@@ -187,12 +185,11 @@ def test_evaluator():
     scores = evaluator.evaluate(network_config)
 
     print(f"\nResults:")
-    print(f"  Expressivity: {scores['expressivity']:.4f}")
-    print(f"  Progressivity: {scores['progressivity']:.4f}")
-    print(f"  Trainability: {scores['trainability']:.4f}")
+    print(f"  ZEN Score: {scores['zen_score']:.4f}")
+    print(f"  Params: {scores['params']}")
+    print(f"  FLOPs: {scores['flops']:.0f}")
     print(f"  FHE Latency: {scores['fhe_latency']:.0f}")
     print(f"  FHE Boot Count: {scores['fhe_boot_count']}")
-    print(f"  FHE Max Depth: {scores['fhe_max_depth']}")
 
 
 if __name__ == '__main__':

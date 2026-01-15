@@ -76,6 +76,57 @@ def prepare_poly4_for_evaluation(model):
         pass
 
 
+def replace_poly4_with_swish_for_zcp(model):
+    """Temporarily replace all StablePoly4 activations with Swish for ZCP evaluation
+
+    StablePoly4 requires training to achieve good performance. During zero-cost proxy
+    evaluation (before training), the polynomial parameters are randomly initialized
+    and may perform poorly. We use Swish as a substitute during ZCP evaluation.
+
+    Args:
+        model: PyTorch model potentially containing StablePoly4 activations
+
+    Returns:
+        replaced_modules: List of (parent, attr_name, original_module) tuples for restoration
+    """
+    replaced_modules = []
+
+    try:
+        from models.gate_net_cmp.block_def import StablePoly4, Swish
+
+        # Find and replace all StablePoly4 instances
+        for name, module in model.named_modules():
+            # Check each attribute of the module
+            for attr_name in dir(module):
+                if attr_name.startswith('_'):
+                    continue
+                try:
+                    attr = getattr(module, attr_name)
+                    if isinstance(attr, StablePoly4):
+                        # Replace with Swish
+                        swish = Swish()
+                        setattr(module, attr_name, swish)
+                        replaced_modules.append((module, attr_name, attr))
+                except (AttributeError, TypeError):
+                    continue
+
+    except ImportError:
+        # StablePoly4 not available, skip
+        pass
+
+    return replaced_modules
+
+
+def restore_poly4_activations(replaced_modules):
+    """Restore original StablePoly4 activations after ZCP evaluation
+
+    Args:
+        replaced_modules: List of (parent, attr_name, original_module) tuples from replace_poly4_with_swish_for_zcp
+    """
+    for parent, attr_name, original_module in replaced_modules:
+        setattr(parent, attr_name, original_module)
+
+
 class ModelWrapper(nn.Module):
     """Wraps models to provide layer feature extraction interface
 
@@ -291,149 +342,148 @@ def compute_fhe_latency(model: nn.Module, input_shape: Tuple[int, int, int, int]
 
 
 
-def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=False, init=True, use_wrapper=True):
-    """Compute NAS score using AZ-NAS zero-cost proxies and FHE latency
+def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=False,
+                       repeat=8, mixup_gamma=1e-2):
+    """Compute NAS score using ZenNAS zero-cost proxy and FHE latency
+
+    Uses ZEN score as the primary evaluation metric, which has been shown to have
+    strong correlation with actual network performance.
+
+    Reference: "Zen-NAS: A Zero-Shot NAS for High-Performance Deep Image Recognition"
+               (Lin et al., ICCV 2021)
 
     Args:
         model: PyTorch model to evaluate
         gpu: GPU device ID
-        trainloader: DataLoader for training data (None to use random input)
+        trainloader: DataLoader (unused, kept for API compatibility)
         resolution: Input image resolution
         batch_size: Batch size for evaluation
         fp16: Use FP16 precision
-        init: Whether to initialize model weights
-        use_wrapper: Whether to wrap model for feature extraction (True for most cases)
+        repeat: Number of repetitions for ZEN score averaging
+        mixup_gamma: Mixup coefficient for ZEN score
 
     Returns:
         dict with keys:
-            - 'expressivity': Expressivity score
-            - 'progressivity': Progressivity score
-            - 'trainability': Trainability score
+            - 'zen_score': ZEN score (primary metric, higher is better)
+            - 'std_zen_score': Standard deviation of ZEN scores
+            - 'params': Number of parameters
+            - 'flops': FLOPs count
             - 'fhe_latency': Total FHE latency
             - 'fhe_boot_count': Number of bootstrap operations
             - 'fhe_max_depth': Maximum circuit depth
             - 'fhe_operation_latency': Operation latency (excluding bootstrap)
             - 'fhe_boot_latency': Bootstrap latency only
     """
-    # Wrap model if not already wrapped (for feature extraction)
-    if use_wrapper and not isinstance(model, ModelWrapper):
-        model = ModelWrapper(model)
-
-    # Prepare polynomial activations for evaluation (set to post-warmup mode)
-    prepare_poly4_for_evaluation(model)
-
-    model.train()
-    model.cuda()
-    info = {}
-
-    if gpu is not None:
-        device = torch.device('cuda:{}'.format(gpu))
-    else:
-        device = torch.device('cpu')
-
-    if fp16:
-        dtype = torch.half
-    else:
-        dtype = torch.float32
-
-    if init:
-        init_model(model, 'kaiming_norm_fanin')
-
-    if trainloader == None:
-        input_ = torch.randn(size=[batch_size, 3, resolution, resolution], device=device, dtype=dtype)
-    else:
-        input_ = next(iter(trainloader))[0]
-    
-    if model.no_reslink:
-        layer_features = model.extract_layer_features_nores(input_)
-    else:
-        layer_features, output = model.extract_layer_features_and_logit(input_)
-
-    ################ expressivity & progressivity scores ################
-    expressivity_scores = []
-    for i in range(len(layer_features)):
-        feat = layer_features[i].detach().clone()
-        b,c,h,w = feat.size()
-        feat = feat.permute(0,2,3,1).contiguous().view(b*h*w,c)
-        m = feat.mean(dim=0, keepdim=True)
-        feat = feat - m
-        sigma = torch.mm(feat.transpose(1,0),feat) / (feat.size(0))
-        s = torch.linalg.eigvalsh(sigma) # faster version for computing eignevalues, can be adopted since sigma is symmetric
-        prob_s = s / s.sum()
-        score = (-prob_s)*torch.log(prob_s+1e-8)
-        score = score.sum().item()
-        expressivity_scores.append(score)
-    expressivity_scores = np.array(expressivity_scores)
-    progressivity = np.min(expressivity_scores[1:] - expressivity_scores[:-1])
-    expressivity = np.sum(expressivity_scores)
-    #####################################################################
-
-    ################ trainability score ##############
-    scores = []
-    for i in reversed(range(1, len(layer_features))):
-        f_out = layer_features[i]
-        f_in = layer_features[i-1]
-
-        # Note: f_out and f_in are intermediate features (non-leaf tensors)
-        # We don't need to check or zero their gradients as they are computed on-the-fly
-
-        g_out = torch.ones_like(f_out) * 0.5
-        g_out = (torch.bernoulli(g_out) - 0.5) * 2
-        g_in = torch.autograd.grad(outputs=f_out, inputs=f_in, grad_outputs=g_out, retain_graph=False)[0]
-        if g_out.size()==g_in.size() and torch.all(g_in == g_out):
-            scores.append(-np.inf)
-        else:
-            if g_out.size(2) != g_in.size(2) or g_out.size(3) != g_in.size(3):
-                bo,co,ho,wo = g_out.size()
-                bi,ci,hi,wi = g_in.size()
-                stride = int(hi/ho)
-                pixel_unshuffle = nn.PixelUnshuffle(stride)
-                g_in = pixel_unshuffle(g_in)
-            bo,co,ho,wo = g_out.size()
-            bi,ci,hi,wi = g_in.size()
-            ### straight-forward way
-            # g_out = g_out.permute(0,2,3,1).contiguous().view(bo*ho*wo,1,co)
-            # g_in = g_in.permute(0,2,3,1).contiguous().view(bi*hi*wi,ci,1)
-            # mat = torch.bmm(g_in,g_out).mean(dim=0)
-            ### efficient way # print(torch.allclose(mat, mat2, atol=1e-6))
-            g_out = g_out.permute(0,2,3,1).contiguous().view(bo*ho*wo,co)
-            g_in = g_in.permute(0,2,3,1).contiguous().view(bi*hi*wi,ci)
-            mat = torch.mm(g_in.transpose(1,0),g_out) / (bo*ho*wo)
-            ### make faster on cpu
-            if mat.size(0) < mat.size(1):
-                mat = mat.transpose(0,1)
-            ###
-            s = torch.linalg.svdvals(mat)
-            scores.append(-s.max().item() - 1/(s.max().item()+1e-6)+2)
-    trainability = np.mean(scores)
-    #################################################
-
-    info['expressivity'] = float(expressivity) if not np.isnan(expressivity) else -np.inf
-    info['progressivity'] = float(progressivity) if not np.isnan(progressivity) else -np.inf
-    info['trainability'] = float(trainability) if not np.isnan(trainability) else -np.inf
-
     # Get the underlying model if wrapped
     eval_model = model.model if isinstance(model, ModelWrapper) else model
 
-    # Compute FLOPs (for ranking in fitness function)
-    try:
-        if hasattr(eval_model, 'get_FLOPs'):
-            flops = eval_model.get_FLOPs(resolution)
-            info['flops'] = float(flops)
-        else:
-            # Fallback: use a rough estimation based on parameters
-            # This is just a placeholder - actual FLOPs should be computed properly
-            n_params = sum(p.numel() for p in eval_model.parameters())
-            info['flops'] = float(n_params * resolution * resolution)
-    except Exception as e:
-        print(f"Warning: Failed to compute FLOPs: {e}")
-        info['flops'] = 1e9  # Default high value if computation fails
+    # Replace Poly4 with Swish for ZCP evaluation (untrained Poly4 performs poorly)
+    replaced_modules = replace_poly4_with_swish_for_zcp(eval_model)
 
-    # Compute FHE latency (for constraints in fitness function)
-    fhe_metrics = compute_fhe_latency(eval_model, (batch_size, 3, resolution, resolution))
-    info.update(fhe_metrics)
+    info = {}
+
+    try:
+        # ============ 1. Compute ZEN Score (Primary Metric) ============
+        zen_results = compute_zen_score(
+            eval_model, gpu, resolution, batch_size,
+            repeat=repeat, mixup_gamma=mixup_gamma, fp16=fp16
+        )
+        info['zen_score'] = zen_results['zen_score']
+        info['std_zen_score'] = zen_results['std_zen_score']
+
+        # ============ 2. Compute Model Statistics ============
+        # Parameter count
+        n_params = sum(p.numel() for p in eval_model.parameters())
+        info['params'] = int(n_params)
+
+        # FLOPs calculation
+        flops = compute_flops(eval_model, resolution)
+        info['flops'] = float(flops)
+
+        # ============ 3. Compute FHE Latency (for constraints) ============
+        fhe_metrics = compute_fhe_latency(eval_model, (batch_size, 3, resolution, resolution))
+        info.update(fhe_metrics)
+
+    finally:
+        # Always restore original Poly4 activations
+        restore_poly4_activations(replaced_modules)
 
     return info
+
+
+def compute_flops(model: nn.Module, resolution: int) -> float:
+    """Compute FLOPs for a model using torch profiler or manual calculation
+
+    Args:
+        model: PyTorch model
+        resolution: Input image resolution
+
+    Returns:
+        FLOPs count (float)
+    """
+    # First try model's own method
+    if hasattr(model, 'get_FLOPs'):
+        try:
+            return float(model.get_FLOPs(resolution))
+        except:
+            pass
+
+    # Try using thop library
+    try:
+        from thop import profile
+        device = next(model.parameters()).device
+        dummy_input = torch.randn(1, 3, resolution, resolution).to(device)
+        flops, _ = profile(model, inputs=(dummy_input,), verbose=False)
+        return float(flops)
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"Warning: thop FLOPs calculation failed: {e}")
+
+    # Try using fvcore
+    try:
+        from fvcore.nn import FlopCountAnalysis
+        device = next(model.parameters()).device
+        dummy_input = torch.randn(1, 3, resolution, resolution).to(device)
+        flops = FlopCountAnalysis(model, dummy_input).total()
+        return float(flops)
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"Warning: fvcore FLOPs calculation failed: {e}")
+
+    # Manual estimation as last resort
+    return _estimate_flops_manual(model, resolution)
+
+
+def _estimate_flops_manual(model: nn.Module, resolution: int) -> float:
+    """Manually estimate FLOPs by analyzing model structure
+
+    This is a rough estimation when profiling libraries are not available.
+    """
+    total_flops = 0
+    input_size = resolution
+
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            # FLOPs = 2 * Cin * Cout * K^2 * Hout * Wout
+            out_size = input_size // module.stride[0] if module.stride[0] > 1 else input_size
+            flops = 2 * module.in_channels * module.out_channels * \
+                    module.kernel_size[0] * module.kernel_size[1] * \
+                    out_size * out_size / module.groups
+            total_flops += flops
+            if module.stride[0] > 1:
+                input_size = out_size
+
+        elif isinstance(module, nn.Linear):
+            # FLOPs = 2 * in_features * out_features
+            total_flops += 2 * module.in_features * module.out_features
+
+        elif isinstance(module, nn.BatchNorm2d):
+            # FLOPs ≈ 4 * num_features * H * W (mean, var, normalize, scale)
+            total_flops += 4 * module.num_features * input_size * input_size
+
+    return float(total_flops)
 
 
 def compute_synflow(model, gpu, resolution, batch_size, fp16=False):
@@ -460,57 +510,65 @@ def compute_synflow(model, gpu, resolution, batch_size, fp16=False):
     """
     model = model.model if isinstance(model, ModelWrapper) else model
 
-    model.train()
-    model.cuda()
+    # Replace Poly4 with Swish for ZCP evaluation
+    replaced_modules = replace_poly4_with_swish_for_zcp(model)
 
-    if gpu is not None:
-        device = torch.device('cuda:{}'.format(gpu))
-    else:
-        device = torch.device('cpu')
+    try:
+        model.train()
+        model.cuda()
 
-    if fp16:
-        dtype = torch.half
-    else:
-        dtype = torch.float32
+        if gpu is not None:
+            device = torch.device('cuda:{}'.format(gpu))
+        else:
+            device = torch.device('cpu')
 
-    # SynFlow initialization
-    init_model_synflow(model)
+        if fp16:
+            dtype = torch.half
+        else:
+            dtype = torch.float32
 
-    # Use all-ones input for SynFlow
-    input_ = torch.ones(size=[batch_size, 3, resolution, resolution], device=device, dtype=dtype)
+        # SynFlow initialization
+        init_model_synflow(model)
 
-    # Forward pass
-    output = model(input_)
+        # Use all-ones input for SynFlow
+        input_ = torch.ones(size=[batch_size, 3, resolution, resolution], device=device, dtype=dtype)
 
-    # Compute loss (output should be as large as possible, so we minimize negative output)
-    # For classification, we want to maximize output, so we minimize -output
-    loss = -output.mean()
+        # Forward pass
+        output = model(input_)
 
-    # Backward pass
-    loss.backward()
+        # Compute loss (output should be as large as possible, so we minimize negative output)
+        # For classification, we want to maximize output, so we minimize -output
+        loss = -output.mean()
 
-    # Compute SynFlow score: sum of absolute gradients for all parameters
-    synflow_score = 0.0
-    total_params = 0
-    grad_norm_sq = 0.0
+        # Backward pass
+        loss.backward()
 
-    for param in model.parameters():
-        if param.grad is not None:
-            synflow_score += param.grad.abs().sum().item()
-            grad_norm_sq += (param.grad ** 2).sum().item()
-            total_params += param.numel()
+        # Compute SynFlow score: sum of absolute gradients for all parameters
+        synflow_score = 0.0
+        total_params = 0
+        grad_norm_sq = 0.0
 
-    # Compute gradient norm
-    grad_norm = np.sqrt(grad_norm_sq)
+        for param in model.parameters():
+            if param.grad is not None:
+                synflow_score += param.grad.abs().sum().item()
+                grad_norm_sq += (param.grad ** 2).sum().item()
+                total_params += param.numel()
 
-    # Clean up gradients
-    model.zero_grad()
+        # Compute gradient norm
+        grad_norm = np.sqrt(grad_norm_sq)
 
-    return {
-        'synflow_score': float(synflow_score),
-        'synflow_grad_norm': float(grad_norm),
-        'synflow_params': int(total_params)
-    }
+        # Clean up gradients
+        model.zero_grad()
+
+        return {
+            'synflow_score': float(synflow_score),
+            'synflow_grad_norm': float(grad_norm),
+            'synflow_params': int(total_params)
+        }
+
+    finally:
+        # Always restore original Poly4 activations
+        restore_poly4_activations(replaced_modules)
 
 
 def network_weight_gaussian_init(net: nn.Module):

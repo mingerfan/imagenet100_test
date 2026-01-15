@@ -4,7 +4,7 @@ Implements the regularized evolution algorithm with:
 - FIFO population aging
 - Tournament selection
 - Single-parent mutation
-- AZ-NAS fitness function
+- ZenNAS fitness function with FHE constraints
 """
 
 import sys
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .population import Population
 from .mutations import MutationOperator
 from .evaluation import FitnessEvaluator
-from .fitness_function import AZNASFitnessFunction
+from .fitness_function import ZenNASFitnessFunction
 from .utils import EvolutionCheckpoint, EvolutionLogger, save_best_architectures, save_sampled_architectures
 
 
@@ -31,7 +31,7 @@ class RegularizedEvolution:
     - Age-based population management (FIFO queue)
     - Tournament selection from recent samples
     - Single-parent mutation (no crossover)
-    - AZ-NAS fitness function with FHE latency
+    - ZenNAS fitness function with FHE latency constraints
     """
 
     def __init__(self, config):
@@ -53,7 +53,7 @@ class RegularizedEvolution:
         )
         self.mutator = MutationOperator()
         self.evaluator = FitnessEvaluator(config)
-        self.fitness_fn = AZNASFitnessFunction(latency_baseline=latency_baseline)
+        self.fitness_fn = ZenNASFitnessFunction(latency_baseline=latency_baseline)
 
         # Logging and checkpointing
         self.logger = EvolutionLogger(config.logging.output_dir)
@@ -114,12 +114,7 @@ class RegularizedEvolution:
             # Compute fitness for this single offspring
             # (fitness is relative, but we compute it for logging)
             # We'll recompute proper fitness when needed
-            dummy_fitness = sum([
-                scores['expressivity'],
-                scores['progressivity'],
-                scores['trainability'],
-                -scores['fhe_latency'] / 1e6  # Normalize latency
-            ])
+            dummy_fitness = scores['zen_score'] - scores['fhe_latency'] / 1e7
 
             # Add to population (oldest removed automatically if full)
             self.population.add(offspring_config, scores, dummy_fitness, generation)
@@ -182,13 +177,13 @@ class RegularizedEvolution:
             # Add to population
             self.population.add(network_config, scores, dummy_fitness, generation=0)
 
-        # Now compute proper AZ-NAS fitness for entire population
+        # Now compute proper ZenNAS fitness for entire population
         self._recompute_population_fitness()
 
         self.logger.log_message(f"Initial population created: {len(self.population)} architectures")
 
     def _recompute_population_fitness(self):
-        """Recompute AZ-NAS fitness for entire population
+        """Recompute ZenNAS fitness for entire population
 
         This ensures fitness scores are properly ranked relative to the
         current population.
@@ -199,12 +194,12 @@ class RegularizedEvolution:
         # Collect all scores
         all_scores = [ind.scores for ind in self.population.individuals]
 
-        # Compute AZ-NAS fitness
-        aznas_scores = self.fitness_fn.compute_fitness(all_scores)
+        # Compute ZenNAS fitness
+        zen_scores = self.fitness_fn.compute_fitness(all_scores)
 
         # Update individual fitness values
         for i, ind in enumerate(self.population.individuals):
-            ind.aznas_fitness = float(aznas_scores[i])
+            ind.zen_fitness = float(zen_scores[i])
 
     def _tournament_select(self):
         """Tournament selection from recent population
@@ -217,10 +212,10 @@ class RegularizedEvolution:
 
         # Recompute fitness for candidates (in case population has changed)
         candidate_scores = [ind.scores for ind in candidates]
-        aznas_scores = self.fitness_fn.compute_fitness(candidate_scores)
+        zen_scores = self.fitness_fn.compute_fitness(candidate_scores)
 
         # Select best
-        best_idx = aznas_scores.argmax()
+        best_idx = zen_scores.argmax()
         best_individual = candidates[best_idx]
 
         return best_individual.config
@@ -267,11 +262,11 @@ class RegularizedEvolution:
         """
         # Recompute fitness for entire history
         all_scores = [ind.scores for ind in self.population.history]
-        aznas_scores = self.fitness_fn.compute_fitness(all_scores)
+        zen_scores = self.fitness_fn.compute_fitness(all_scores)
 
         # Update fitness values
         for i, ind in enumerate(self.population.history):
-            ind.aznas_fitness = float(aznas_scores[i])
+            ind.zen_fitness = float(zen_scores[i])
 
         # Get best k
         return self.population.get_best(k=k, from_history=True)
@@ -296,14 +291,14 @@ class RegularizedEvolution:
 
         # Recompute fitness for entire history
         all_scores = [ind.scores for ind in self.population.history]
-        aznas_scores = self.fitness_fn.compute_fitness(all_scores)
+        zen_scores = self.fitness_fn.compute_fitness(all_scores)
 
         # Update fitness values
         for i, ind in enumerate(self.population.history):
-            ind.aznas_fitness = float(aznas_scores[i])
+            ind.zen_fitness = float(zen_scores[i])
 
         # Sort by fitness (descending)
-        sorted_history = sorted(self.population.history, key=lambda x: x.aznas_fitness, reverse=True)
+        sorted_history = sorted(self.population.history, key=lambda x: x.zen_fitness, reverse=True)
 
         total = len(sorted_history)
 

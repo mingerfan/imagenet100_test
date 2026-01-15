@@ -1,5 +1,5 @@
 # Evolution Configuration for NAS
-# Regularized Evolution with AZ-NAS proxies and FHE latency
+# Regularized Evolution with ZenNAS proxies and FHE latency
 
 # Search Configuration
 search:
@@ -22,7 +22,7 @@ evaluation:
 
 # Fitness Function
 fitness:
-  type: "aznas_ranking"          # AZ-NAS non-linear ranking aggregation
+  type: "zen_ranking"            # ZenNAS non-linear ranking aggregation
   epsilon: 1.0e-10               # Numerical stability for log
 
 # Logging

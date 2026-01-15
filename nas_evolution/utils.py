@@ -193,10 +193,11 @@ class EvolutionLogger:
 
         if best_individual:
             message += f"  Best individual:\n"
-            message += f"    Expressivity: {best_individual.scores['expressivity']:.4f}\n"
-            message += f"    Progressivity: {best_individual.scores['progressivity']:.4f}\n"
-            message += f"    Trainability: {best_individual.scores['trainability']:.4f}\n"
-            message += f"    FHE Latency: {best_individual.scores['fhe_latency']:.0f}\n"
+            message += f"    ZEN Score: {best_individual.scores.get('zen_score', 0.0):.4f}\n"
+            message += f"    Params: {best_individual.scores.get('params', 0):,}\n"
+            message += f"    FLOPs: {best_individual.scores.get('flops', 0.0):.2e}\n"
+            message += f"    FHE Latency: {best_individual.scores.get('fhe_latency', 0.0):.0f}\n"
+            message += f"    FHE Boot Count: {best_individual.scores.get('fhe_boot_count', 0)}\n"
 
         message += "\n"
 
@@ -249,11 +250,12 @@ class EvolutionLogger:
 
         for i, ind in enumerate(best_individuals):
             message += f"Rank {i+1}:\n"
-            message += f"  Fitness: {ind.aznas_fitness:.6f}\n"
-            message += f"  Expressivity: {ind.scores['expressivity']:.4f}\n"
-            message += f"  Progressivity: {ind.scores['progressivity']:.4f}\n"
-            message += f"  Trainability: {ind.scores['trainability']:.4f}\n"
-            message += f"  FHE Latency: {ind.scores['fhe_latency']:.0f}\n"
+            message += f"  Fitness: {ind.zen_fitness:.6f}\n"
+            message += f"  ZEN Score: {ind.scores.get('zen_score', 0.0):.4f}\n"
+            message += f"  Params: {ind.scores.get('params', 0):,}\n"
+            message += f"  FLOPs: {ind.scores.get('flops', 0.0):.2e}\n"
+            message += f"  FHE Latency: {ind.scores.get('fhe_latency', 0.0):.0f}\n"
+            message += f"  FHE Boot Count: {ind.scores.get('fhe_boot_count', 0)}\n"
             message += f"  Generation: {ind.generation}\n"
             message += "\n"
 
@@ -274,12 +276,12 @@ def save_best_architectures(best_individuals, output_dir: str):
     os.makedirs(best_dir, exist_ok=True)
 
     for i, ind in enumerate(best_individuals):
-        filename = f'rank{i+1}_fitness{ind.aznas_fitness:.4f}.json'
+        filename = f'rank{i+1}_fitness{ind.zen_fitness:.4f}.json'
         filepath = os.path.join(best_dir, filename)
 
         data = {
             'rank': i + 1,
-            'aznas_fitness': ind.aznas_fitness,
+            'zen_fitness': ind.zen_fitness,
             'scores': ind.scores,
             'generation': ind.generation,
             'config': ind.config.to_dict()
@@ -303,13 +305,13 @@ def save_sampled_architectures(individuals, output_dir: str, category: str):
     os.makedirs(sample_dir, exist_ok=True)
 
     for i, ind in enumerate(individuals):
-        filename = f'{category}_rank{i+1}_fitness{ind.aznas_fitness:.4f}.json'
+        filename = f'{category}_rank{i+1}_fitness{ind.zen_fitness:.4f}.json'
         filepath = os.path.join(sample_dir, filename)
 
         data = {
             'category': category,
             'rank_in_category': i + 1,
-            'aznas_fitness': ind.aznas_fitness,
+            'zen_fitness': ind.zen_fitness,
             'scores': ind.scores,
             'generation': ind.generation,
             'config': ind.config.to_dict()

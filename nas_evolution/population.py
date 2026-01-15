@@ -15,7 +15,7 @@ class Individual:
     Attributes:
         config: NetworkConfig object defining the architecture
         scores: Dict with all evaluation scores (expressivity, progressivity, trainability, fhe_latency)
-        aznas_fitness: AZ-NAS fitness score (computed from scores)
+        zen_fitness: ZenNAS fitness score (computed from scores)
         generation: Birth generation number
         age: Age of individual (increments each generation)
         id: Unique identifier
@@ -23,18 +23,18 @@ class Individual:
 
     _next_id = 0  # Class variable for generating unique IDs
 
-    def __init__(self, network_config, scores: Dict, aznas_fitness: float, generation: int):
+    def __init__(self, network_config, scores: Dict, zen_fitness: float, generation: int):
         """Initialize individual
 
         Args:
             network_config: NetworkConfig object
             scores: Dict with evaluation scores
-            aznas_fitness: AZ-NAS fitness score
+            zen_fitness: ZenNAS fitness score
             generation: Generation when individual was created
         """
         self.config = network_config
         self.scores = scores
-        self.aznas_fitness = aznas_fitness
+        self.zen_fitness = zen_fitness
         self.generation = generation
         self.age = 0
         self.id = Individual._next_id
@@ -54,7 +54,7 @@ class Individual:
             'id': self.id,
             'config': self.config.to_dict(),
             'scores': self.scores,
-            'aznas_fitness': self.aznas_fitness,
+            'zen_fitness': self.zen_fitness,
             'generation': self.generation,
             'age': self.age
         }
@@ -74,7 +74,7 @@ class Individual:
         individual = cls(
             network_config=config,
             scores=data['scores'],
-            aznas_fitness=data['aznas_fitness'],
+            zen_fitness=data['zen_fitness'],
             generation=data['generation']
         )
         individual.age = data['age']
@@ -110,16 +110,16 @@ class Population:
         self.individuals: List[Individual] = []
         self.history: List[Individual] = []
 
-    def add(self, network_config, scores: Dict, aznas_fitness: float, generation: int):
+    def add(self, network_config, scores: Dict, zen_fitness: float, generation: int):
         """Add individual to population with diversity-aware removal
 
         Args:
             network_config: NetworkConfig object
             scores: Evaluation scores dict
-            aznas_fitness: AZ-NAS fitness score
+            zen_fitness: ZenNAS fitness score
             generation: Current generation number
         """
-        individual = Individual(network_config, scores, aznas_fitness, generation)
+        individual = Individual(network_config, scores, zen_fitness, generation)
 
         # Add to population
         self.individuals.append(individual)
@@ -222,7 +222,7 @@ class Population:
         return random.sample(self.individuals, k)
 
     def get_best(self, k: int = 10, from_history: bool = True) -> List[Individual]:
-        """Get top k individuals by AZ-NAS fitness
+        """Get top k individuals by ZenNAS fitness
 
         Args:
             k: Number of individuals to return
@@ -233,7 +233,7 @@ class Population:
         """
         source = self.history if from_history else self.individuals
         k = min(k, len(source))
-        sorted_pop = sorted(source, key=lambda x: x.aznas_fitness, reverse=True)
+        sorted_pop = sorted(source, key=lambda x: x.zen_fitness, reverse=True)
         return sorted_pop[:k]
 
     def get_current_stats(self) -> Dict:
@@ -252,7 +252,7 @@ class Population:
                 'max_age': 0
             }
 
-        fitnesses = [ind.aznas_fitness for ind in self.individuals]
+        fitnesses = [ind.zen_fitness for ind in self.individuals]
         ages = [ind.age for ind in self.individuals]
 
         return {

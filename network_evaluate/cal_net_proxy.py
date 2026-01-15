@@ -91,7 +91,7 @@ def main():
     # 配置参数
     resolution = 224  # ImageNet标准分辨率
     batch_size = 16
-    gpu = 0
+    gpu = 1
     fp16 = False
 
     # ZEN 特定参数

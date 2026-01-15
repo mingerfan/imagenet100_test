@@ -131,11 +131,12 @@ def main():
 
         for i, ind in enumerate(best_individuals[:5]):  # Show top 5
             print(f"\nRank {i+1}:")
-            print(f"  AZ-NAS Fitness: {ind.aznas_fitness:.6f}")
-            print(f"  Expressivity: {ind.scores['expressivity']:.4f}")
-            print(f"  Progressivity: {ind.scores['progressivity']:.4f}")
-            print(f"  Trainability: {ind.scores['trainability']:.4f}")
-            print(f"  FHE Latency: {ind.scores['fhe_latency']:.0f}")
+            print(f"  ZenNAS Fitness: {ind.zen_fitness:.6f}")
+            print(f"  ZEN Score: {ind.scores.get('zen_score', 0.0):.4f}")
+            print(f"  Params: {ind.scores.get('params', 0):,}")
+            print(f"  FLOPs: {ind.scores.get('flops', 0.0):.2e}")
+            print(f"  FHE Latency: {ind.scores.get('fhe_latency', 0.0):.0f}")
+            print(f"  FHE Boot Count: {ind.scores.get('fhe_boot_count', 0)}")
             print(f"  Generation: {ind.generation}")
 
         print(f"\nResults saved to: {config.logging.output_dir}")

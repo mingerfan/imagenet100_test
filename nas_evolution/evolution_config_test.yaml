@@ -20,7 +20,7 @@ evaluation:
 
 # Fitness Function
 fitness:
-  type: "aznas_ranking"
+  type: "zen_ranking"
   epsilon: 1.0e-10
 
 # Logging
