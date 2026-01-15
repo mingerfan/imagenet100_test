@@ -316,9 +316,10 @@ class MemoryFSManager:
             print(f"[MemoryFS] 内存FS中无数据: {self.shm_path}")
 
 
-def create_memory_fs_manager(train_dir: str, 
+def create_memory_fs_manager(train_dir: str,
                               val_dir: str,
-                              use_memory_fs: bool = True) -> Optional[MemoryFSManager]:
+                              use_memory_fs: bool = True,
+                              shm_name: Optional[str] = None) -> Optional[MemoryFSManager]:
     """
     创建内存文件系统管理器
     
@@ -326,6 +327,7 @@ def create_memory_fs_manager(train_dir: str,
         train_dir: 训练集目录
         val_dir: 验证集目录
         use_memory_fs: 是否使用内存文件系统
+        shm_name: /dev/shm 中的名称（为空时使用默认值）
     
     Returns:
         MemoryFSManager实例或None
@@ -352,6 +354,7 @@ def create_memory_fs_manager(train_dir: str,
     # 创建管理器
     manager = MemoryFSManager(
         source_path=str(common_parent),
+        shm_name=shm_name or "imagenet100",
         auto_copy=True
     )
     

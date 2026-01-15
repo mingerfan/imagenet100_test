@@ -18,6 +18,7 @@ Usage:
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -84,6 +85,11 @@ def main():
     # Load configuration
     print(f"Loading configuration from: {args.config}")
     config = load_config(args.config)
+
+    if args.output_dir is None:
+        config_stem = Path(args.config).stem
+        if config.logging.output_dir in {"nas_results", "./nas_results"}:
+            config.logging.output_dir = os.path.join(config.logging.output_dir, config_stem)
 
     # Override config with command line arguments
     if args.output_dir:

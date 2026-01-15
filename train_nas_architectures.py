@@ -23,7 +23,7 @@ from network_gen import create_network
 from network_gen.network_config import NetworkConfig
 from trainers import Trainer
 from trainers.multi_gpu_manager import create_smart_optimizer
-from data import create_dataloaders
+from data import create_dataloaders, get_dataset_info, normalize_dataset_name
 
 
 def load_nas_architectures(nas_result_dir: str):
@@ -90,6 +90,9 @@ def train_architecture(arch_info, train_loader, val_loader, result_dir, device, 
     # Create model from config
     try:
         config = NetworkConfig.from_dict(arch_info['config'])
+        if args.dataset_num_classes and config.num_classes != args.dataset_num_classes:
+            print(f"⚠ Adjusting num_classes: {config.num_classes} -> {args.dataset_num_classes}")
+            config.num_classes = args.dataset_num_classes
         model = create_network(config)
         model = model.to(device)
         print(f"Model created: {sum(p.numel() for p in model.parameters()):,} parameters")
@@ -226,15 +229,19 @@ def save_results(results, nas_result_dir):
 def parse_args():
     parser = argparse.ArgumentParser(description='Train NAS architectures')
 
+    # Dataset settings
+    parser.add_argument('--dataset', type=str, default='imagenet100',
+                       help='Dataset type: imagenet100/imagenet1k/cifar10/cifar100')
+
     # Data paths
     parser.add_argument('--nas_results', type=str, default='nas_results',
                        help='NAS results directory')
     parser.add_argument('--train_dir', type=str,
-                       default='/home/xuming/Documents/dataset/ImageNet_100/train',
-                       help='Training data directory')
+                       default=None,
+                       help='Training data directory (ImageFolder) or CIFAR root')
     parser.add_argument('--val_dir', type=str,
-                       default='/home/xuming/Documents/dataset/ImageNet_100/val',
-                       help='Validation data directory')
+                       default=None,
+                       help='Validation data directory (ImageFolder) or CIFAR root')
 
     # Training settings
     parser.add_argument('--epochs', type=int, default=25,
@@ -253,6 +260,12 @@ def parse_args():
                        help='Use automatic mixed precision')
     parser.add_argument('--use_memory_fs', action='store_true', default=True,
                        help='Use memory filesystem for faster data loading')
+    parser.add_argument('--no_memory_fs', dest='use_memory_fs', action='store_false',
+                       help='Disable memory filesystem')
+    parser.add_argument('--download', action='store_true',
+                       help='Allow dataset download (CIFAR only)')
+    parser.add_argument('--input_size', type=int, default=None,
+                       help='Input image size override')
 
     # Save settings
     parser.add_argument('--save_freq', type=int, default=10,
@@ -275,17 +288,45 @@ def main():
     print("NAS Architecture Training")
     print("="*80)
 
+    dataset_name = normalize_dataset_name(args.dataset)
+    dataset_info = get_dataset_info(dataset_name)
+    args.dataset = dataset_name
+    args.dataset_num_classes = dataset_info['num_classes']
+
+    # Resolve default paths
+    if args.train_dir is None:
+        if dataset_name == 'imagenet100':
+            args.train_dir = '/home/xuming/Documents/dataset/ImageNet_100/train'
+        elif dataset_name in ('cifar10', 'cifar100'):
+            args.train_dir = './data'
+        else:
+            print("❌ ImageNet-1k requires --train_dir")
+            sys.exit(1)
+
+    if args.val_dir is None:
+        if dataset_name == 'imagenet100':
+            args.val_dir = '/home/xuming/Documents/dataset/ImageNet_100/val'
+        elif dataset_name in ('cifar10', 'cifar100'):
+            args.val_dir = args.train_dir
+        else:
+            print("❌ ImageNet-1k requires --val_dir")
+            sys.exit(1)
+
     # Check paths
     if not os.path.exists(args.nas_results):
         print(f"❌ NAS results directory not found: {args.nas_results}")
         sys.exit(1)
 
-    if not os.path.exists(args.train_dir):
-        print(f"❌ Training directory not found: {args.train_dir}")
-        sys.exit(1)
-
-    if not os.path.exists(args.val_dir):
-        print(f"❌ Validation directory not found: {args.val_dir}")
+    if dataset_info['type'] == 'imagefolder':
+        if not os.path.exists(args.train_dir):
+            print(f"❌ Training directory not found: {args.train_dir}")
+            sys.exit(1)
+        if not os.path.exists(args.val_dir):
+            print(f"❌ Validation directory not found: {args.val_dir}")
+            sys.exit(1)
+    elif not os.path.exists(args.train_dir) and not args.download:
+        print(f"❌ CIFAR root directory not found: {args.train_dir}")
+        print("提示: 使用 --download 允许自动下载")
         sys.exit(1)
 
     # Setup device
@@ -320,7 +361,10 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=device.type == 'cuda',
-        use_memory_fs=args.use_memory_fs
+        use_memory_fs=args.use_memory_fs,
+        dataset=args.dataset,
+        download=args.download,
+        input_size=args.input_size
     )
     print(f"✓ Train batches: {len(train_loader)}")
     print(f"✓ Val batches: {len(val_loader)}")

@@ -70,7 +70,10 @@ class MultiGPUManager:
         default_batch_size: int = 128,
         default_lr: float = 0.001,
         default_num_workers: int = 16,
-        use_memory_fs: bool = True
+        use_memory_fs: bool = True,
+        dataset: str = "imagenet100",
+        download: bool = False,
+        input_size: Optional[int] = None
     ):
         """
         初始化多GPU管理器
@@ -88,6 +91,9 @@ class MultiGPUManager:
             use_memory_fs: 是否使用内存文件系统（推荐，避免并发内存问题）
                            注意：内存文件系统本身就可以被所有进程共享访问，
                            每个进程会创建独立的DataLoader实例
+            dataset: 数据集类型 (imagenet100/imagenet1k/cifar10/cifar100)
+            download: 是否允许下载数据集（仅CIFAR有效）
+            input_size: 输入图像大小（可选，覆盖默认值）
         """
         self.train_dir = train_dir
         self.val_dir = val_dir
@@ -99,6 +105,9 @@ class MultiGPUManager:
         self.default_lr = default_lr
         self.default_num_workers = default_num_workers
         self.use_memory_fs = use_memory_fs
+        self.dataset = dataset
+        self.download = download
+        self.input_size = input_size
         
         # 创建结果目录
         import os
@@ -198,7 +207,10 @@ class MultiGPUManager:
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=device.type == 'cuda',
-            use_memory_fs=self.use_memory_fs
+            use_memory_fs=self.use_memory_fs,
+            dataset=self.dataset,
+            download=self.download,
+            input_size=self.input_size
         )
         
         # 创建模型

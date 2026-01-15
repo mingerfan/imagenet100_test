@@ -9,11 +9,12 @@ import sys
 from trainers import MultiGPUManager
 from utils import load_config, get_model_configs
 from models import MODEL_REGISTRY
+from data import get_dataset_info, normalize_dataset_name
 
 
 def parse_args():
     """解析命令行参数"""
-    parser = argparse.ArgumentParser(description='ImageNet-100 多模型训练脚本')
+    parser = argparse.ArgumentParser(description='多模型训练脚本')
     
     # 配置文件
     parser.add_argument(
@@ -23,18 +24,26 @@ def parse_args():
         help='模型配置文件路径'
     )
     
+    # 数据集类型
+    parser.add_argument(
+        '--dataset',
+        type=str,
+        default='imagenet100',
+        help='数据集类型: imagenet100/imagenet1k/cifar10/cifar100'
+    )
+
     # 数据集路径
     parser.add_argument(
         '--train_dir',
         type=str,
-        default='/home/xuming/Documents/dataset/ImageNet_100/train',
-        help='训练集目录'
+        default=None,
+        help='训练集目录（ImageFolder）或 CIFAR 根目录'
     )
     parser.add_argument(
         '--val_dir',
         type=str,
-        default='/home/xuming/Documents/dataset/ImageNet_100/val',
-        help='验证集目录'
+        default=None,
+        help='验证集目录（ImageFolder）或 CIFAR 根目录'
     )
     
     # 结果目录
@@ -71,6 +80,23 @@ def parse_args():
         default=True,
         help='使用内存文件系统（/dev/shm）加速数据加载（推荐，避免并发内存问题）'
     )
+    parser.add_argument(
+        '--no_memory_fs',
+        dest='use_memory_fs',
+        action='store_false',
+        help='禁用内存文件系统'
+    )
+    parser.add_argument(
+        '--download',
+        action='store_true',
+        help='允许下载数据集（仅 CIFAR 有效）'
+    )
+    parser.add_argument(
+        '--input_size',
+        type=int,
+        default=None,
+        help='输入图像大小（可选，覆盖默认值）'
+    )
     
     # 选择特定模型
     parser.add_argument(
@@ -85,7 +111,7 @@ def parse_args():
     parser.add_argument(
         '--num_classes',
         type=int,
-        default=100,
+        default=None,
         help='类别数量'
     )
     parser.add_argument(
@@ -101,11 +127,36 @@ def parse_args():
 def main():
     """主函数"""
     args = parse_args()
+
+    dataset_name = normalize_dataset_name(args.dataset)
+    dataset_info = get_dataset_info(dataset_name)
     
     print("=" * 60)
-    print("ImageNet-100 多模型训练系统")
+    print("多模型训练系统")
     print("=" * 60)
     
+    # 设置默认数据路径
+    if args.train_dir is None:
+        if dataset_name == 'imagenet100':
+            args.train_dir = '/home/xuming/Documents/dataset/ImageNet_100/train'
+        elif dataset_name in ('cifar10', 'cifar100'):
+            args.train_dir = './data'
+        else:
+            print("⚠ ImageNet-1k 需要显式指定 --train_dir")
+            sys.exit(1)
+
+    if args.val_dir is None:
+        if dataset_name == 'imagenet100':
+            args.val_dir = '/home/xuming/Documents/dataset/ImageNet_100/val'
+        elif dataset_name in ('cifar10', 'cifar100'):
+            args.val_dir = args.train_dir
+        else:
+            print("⚠ ImageNet-1k 需要显式指定 --val_dir")
+            sys.exit(1)
+
+    if args.num_classes is None:
+        args.num_classes = dataset_info['num_classes']
+
     # 检查配置文件
     if not os.path.exists(args.config):
         print(f"⚠ 配置文件不存在: {args.config}")
@@ -142,12 +193,17 @@ def main():
         print(f"     - Learning Rate: {model_config.get('learning_rate', 0.001)}")
         print(f"     - Pretrained: {model_config.get('params', {}).get('pretrained', True)}")
     
-    # 检查数据集目录
-    if not os.path.exists(args.train_dir):
-        print(f"\n⚠ 训练集目录不存在: {args.train_dir}")
-        sys.exit(1)
-    if not os.path.exists(args.val_dir):
-        print(f"\n⚠ 验证集目录不存在: {args.val_dir}")
+    # 检查数据集目录（CIFAR 可通过下载创建）
+    if dataset_info['type'] == 'imagefolder':
+        if not os.path.exists(args.train_dir):
+            print(f"\n⚠ 训练集目录不存在: {args.train_dir}")
+            sys.exit(1)
+        if not os.path.exists(args.val_dir):
+            print(f"\n⚠ 验证集目录不存在: {args.val_dir}")
+            sys.exit(1)
+    elif not os.path.exists(args.train_dir) and not args.download:
+        print(f"\n⚠ CIFAR 根目录不存在: {args.train_dir}")
+        print("提示: 使用 --download 允许自动下载")
         sys.exit(1)
     
     # 创建多GPU管理器
@@ -159,7 +215,10 @@ def main():
         gpus=args.gpus,
         num_classes=args.num_classes,
         default_num_workers=args.num_workers,
-        use_memory_fs=args.use_memory_fs
+        use_memory_fs=args.use_memory_fs,
+        dataset=dataset_name,
+        download=args.download,
+        input_size=args.input_size
     )
     
     # 训练模型
