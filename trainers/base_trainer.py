@@ -31,7 +31,8 @@ class Trainer:
         use_amp=True,
         save_freq=10,
         grad_clip_max_norm=1.0,
-        poly4_warmup_ratio=0.5
+        poly4_warmup_ratio=0.5,
+        nan_debug=False
     ):
         """
         初始化训练器
@@ -50,6 +51,7 @@ class Trainer:
             save_freq: 保存检查点的频率
             grad_clip_max_norm: 梯度裁剪的最大范数，用于防止梯度爆炸
             poly4_warmup_ratio: StablePoly4的warmup比例（默认0.5，即50%的epoch用于warmup）
+            nan_debug: 是否启用NaN定位钩子（默认关闭）
         """
         self.model = model
         self.train_loader = train_loader
@@ -64,6 +66,11 @@ class Trainer:
         self.save_freq = save_freq
         self.grad_clip_max_norm = grad_clip_max_norm
         self.poly4_warmup_ratio = poly4_warmup_ratio
+        self.nan_debug = nan_debug
+        self._nan_debug_running = False
+        self._nan_hooks = []
+        self._nan_triggered = False
+        self._nan_debug_active = False
 
         # 创建结果目录
         os.makedirs(result_dir, exist_ok=True)
@@ -87,6 +94,98 @@ class Trainer:
 
         # 最佳准确率
         self.best_acc = 0.0
+
+    def _find_nonfinite_tensor(self, obj):
+        if torch.is_tensor(obj):
+            if not torch.isfinite(obj).all().item():
+                return obj
+            return None
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                t = self._find_nonfinite_tensor(item)
+                if t is not None:
+                    return t
+        if isinstance(obj, dict):
+            for item in obj.values():
+                t = self._find_nonfinite_tensor(item)
+                if t is not None:
+                    return t
+        return None
+
+    def _tensor_nonfinite_stats(self, t):
+        finite_mask = torch.isfinite(t)
+        bad_count = (~finite_mask).sum().item()
+        numel = t.numel()
+        if finite_mask.any().item():
+            finite_vals = t[finite_mask]
+            min_val = finite_vals.min().item()
+            max_val = finite_vals.max().item()
+        else:
+            min_val = float("nan")
+            max_val = float("nan")
+        return {
+            "shape": tuple(t.shape),
+            "dtype": str(t.dtype),
+            "device": str(t.device),
+            "bad_count": bad_count,
+            "numel": numel,
+            "min": min_val,
+            "max": max_val,
+        }
+
+    def _register_nan_hooks(self):
+        self._nan_hooks = []
+        self._nan_triggered = False
+
+        def hook_fn(name):
+            def _hook(module, inputs, output):
+                if self._nan_triggered:
+                    return
+                bad_tensor = self._find_nonfinite_tensor(inputs)
+                location = "input"
+                if bad_tensor is None:
+                    bad_tensor = self._find_nonfinite_tensor(output)
+                    location = "output"
+                if bad_tensor is None:
+                    return
+                self._nan_triggered = True
+                stats = self._tensor_nonfinite_stats(bad_tensor)
+                print(
+                    f"Non-finite {location} detected in "
+                    f"{name} ({module.__class__.__name__}): "
+                    f"shape={stats['shape']} dtype={stats['dtype']} "
+                    f"device={stats['device']} bad={stats['bad_count']}/{stats['numel']} "
+                    f"finite_min={stats['min']:.6g} finite_max={stats['max']:.6g}"
+                )
+                raise RuntimeError("Non-finite detected during forward pass")
+            return _hook
+
+        for name, module in self.model.named_modules():
+            if name == "":
+                continue
+            if any(True for _ in module.children()):
+                continue
+            self._nan_hooks.append(module.register_forward_hook(hook_fn(name)))
+        self._nan_debug_active = True
+
+    def _remove_nan_hooks(self):
+        for handle in self._nan_hooks:
+            handle.remove()
+        self._nan_hooks = []
+        self._nan_debug_active = False
+
+    def _debug_nan_forward(self, images):
+        if not self.nan_debug or self._nan_debug_running:
+            return
+        self._nan_debug_running = True
+        print("Non-finite output detected, running forward with NaN hooks...")
+        self._register_nan_hooks()
+        try:
+            with torch.no_grad():
+                _ = self.model(images)
+        finally:
+            self._remove_nan_hooks()
+            self._nan_debug_running = False
 
     def _adjust_poly4_warmup(self):
         """
@@ -168,6 +267,14 @@ class Trainer:
             with autocast(device_type=device_type):
                 outputs = self.model(images)
                 loss = self.criterion(outputs, labels)
+
+            if self.nan_debug and not self._nan_debug_running:
+                if self._find_nonfinite_tensor(outputs) is not None:
+                    print("Non-finite output detected in forward")
+                    raise RuntimeError("Non-finite output detected")
+                if not torch.isfinite(loss).all().item():
+                    print("Non-finite loss detected before backward")
+                    raise RuntimeError("Non-finite loss detected")
             
             # 反向传播
             if self.use_amp:
@@ -297,56 +404,63 @@ class Trainer:
         print(f"批次大小: {self.train_loader.batch_size}")
         print(f"混合精度训练: {self.use_amp}")
         print(f"结果保存目录: {self.result_dir}")
-        
+
         start_time = time.time()
-        
-        for epoch in range(1, self.epochs + 1):
-            # 为所有需要 epoch 信息的模块更新 epoch
-            self._set_epoch_for_model(epoch)
-            
-            epoch_start = time.time()
-            
-            # 训练
-            train_loss, train_acc = self.train_one_epoch(epoch)
-            
-            # 验证
-            val_loss, val_acc = self.validate()
-            
-            # 更新学习率
-            if self.scheduler is not None:
-                self.scheduler.step()
-            
-            current_lr = self.optimizer.param_groups[0]['lr']
-            
-            # 计算时间
-            epoch_time = time.time() - epoch_start
-            
-            # 记录历史
-            self.history['epoch'].append(epoch)
-            self.history['train_loss'].append(train_loss)
-            self.history['train_acc'].append(train_acc)
-            self.history['val_loss'].append(val_loss)
-            self.history['val_acc'].append(val_acc)
-            self.history['learning_rate'].append(current_lr)
-            self.history['epoch_time'].append(epoch_time)
-            
-            # 打印结果
-            print(f"\nEpoch [{epoch}/{self.epochs}] - {epoch_time:.2f}s")
-            print(f"  训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-            print(f"  验证 - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
-            print(f"  学习率: {current_lr:.6f}")
-            
-            # 保存最佳模型
-            if val_acc > self.best_acc:
-                self.best_acc = val_acc
-                self.save_checkpoint(epoch, is_best=True)
-            
-            # 定期保存检查点
-            if epoch % self.save_freq == 0:
-                self.save_checkpoint(epoch, is_best=False)
-            
-            # 保存历史
-            self.save_history()
+
+        if self.nan_debug and not self._nan_debug_active:
+            self._register_nan_hooks()
+
+        try:
+            for epoch in range(1, self.epochs + 1):
+                # 为所有需要 epoch 信息的模块更新 epoch
+                self._set_epoch_for_model(epoch)
+                
+                epoch_start = time.time()
+                
+                # 训练
+                train_loss, train_acc = self.train_one_epoch(epoch)
+                
+                # 验证
+                val_loss, val_acc = self.validate()
+                
+                # 更新学习率
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                
+                current_lr = self.optimizer.param_groups[0]['lr']
+                
+                # 计算时间
+                epoch_time = time.time() - epoch_start
+                
+                # 记录历史
+                self.history['epoch'].append(epoch)
+                self.history['train_loss'].append(train_loss)
+                self.history['train_acc'].append(train_acc)
+                self.history['val_loss'].append(val_loss)
+                self.history['val_acc'].append(val_acc)
+                self.history['learning_rate'].append(current_lr)
+                self.history['epoch_time'].append(epoch_time)
+                
+                # 打印结果
+                print(f"\nEpoch [{epoch}/{self.epochs}] - {epoch_time:.2f}s")
+                print(f"  训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+                print(f"  验证 - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
+                print(f"  学习率: {current_lr:.6f}")
+                
+                # 保存最佳模型
+                if val_acc > self.best_acc:
+                    self.best_acc = val_acc
+                    self.save_checkpoint(epoch, is_best=True)
+                
+                # 定期保存检查点
+                if epoch % self.save_freq == 0:
+                    self.save_checkpoint(epoch, is_best=False)
+                
+                # 保存历史
+                self.save_history()
+        finally:
+            if self._nan_debug_active:
+                self._remove_nan_hooks()
         
         # 训练完成
         total_time = time.time() - start_time

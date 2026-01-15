@@ -2,6 +2,41 @@ import torch
 import torch.nn as nn
 
 
+def _safe_gated_mul(feat, gate):
+    if not torch.is_tensor(feat):
+        return feat * gate
+    if not feat.is_floating_point():
+        return feat * gate
+    dtype = feat.dtype
+    if dtype in (torch.float16, torch.bfloat16):
+        feat_f = feat.float()
+        gate_f = gate.float()
+        prod = feat_f * gate_f
+        max_val = torch.finfo(dtype).max
+        prod = torch.nan_to_num(prod, nan=0.0, posinf=max_val, neginf=-max_val)
+        prod = torch.clamp(prod, min=-max_val, max=max_val)
+        return prod.to(dtype)
+    return feat * gate
+
+
+def _safe_conv_bn(conv, bn, x):
+    if not torch.is_tensor(x):
+        return bn(conv(x))
+    if not x.is_floating_point():
+        return bn(conv(x))
+    dtype = x.dtype
+    if dtype in (torch.float16, torch.bfloat16):
+        device_type = "cuda" if x.is_cuda else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            y = conv(x.float())
+            y = bn(y)
+        max_val = torch.finfo(dtype).max
+        y = torch.nan_to_num(y, nan=0.0, posinf=max_val, neginf=-max_val)
+        y = torch.clamp(y, min=-max_val, max=max_val)
+        return y.to(dtype)
+    return bn(conv(x))
+
+
 class Activation(nn.Module):
     def forward(self, x):
         pass
@@ -49,7 +84,7 @@ class StablePoly4(nn.Module):
     用于: Standard Poly, Gated Poly (Ours)
 
     改进版本：
-    - 使用ReLU进行预热训练（前warmup_epochs个epoch）
+    - 使用Swish进行预热训练（前warmup_epochs个epoch）
     - 平滑过渡到多项式激活
     - 使用更小的初始化值防止梯度爆炸
     - 添加梯度裁剪保护
@@ -60,6 +95,7 @@ class StablePoly4(nn.Module):
         super().__init__()
         self.output_scale = output_scale
         self.warmup_epochs = warmup_epochs
+        self.warmup_act = nn.SiLU()
 
         # 使用更小的初始化值，防止高阶项导致梯度爆炸
         # a, b, c 初始化为接近0的小值
@@ -93,45 +129,59 @@ class StablePoly4(nn.Module):
         # 数值稳定性保护：限制输入范围
         x_clipped = torch.clamp(x, min=-10.0, max=10.0)
 
-        # 计算ReLU激活（用于预热）
-        relu_out = torch.nn.functional.relu(x_clipped)
+        orig_dtype = x_clipped.dtype
+        if orig_dtype in (torch.float16, torch.bfloat16):
+            x_work = x_clipped.float()
+        else:
+            x_work = x_clipped
+
+        # 计算Swish激活（用于预热）
+        swish_out = self.warmup_act(x_work)
 
         # 计算多项式激活
-        x2 = x_clipped * x_clipped
-        x3 = x2 * x_clipped
-        x4 = x3 * x_clipped
+        x2 = x_work * x_work
+        x3 = x2 * x_work
+        x4 = x3 * x_work
 
         # 对高阶参数进行软约束，防止它们过大
         a_clamped = torch.clamp(self.a, min=-0.01, max=0.01)
         b_clamped = torch.clamp(self.b, min=-0.1, max=0.1)
         c_clamped = torch.clamp(self.c, min=-0.5, max=0.5)
+        d_clamped = torch.clamp(self.d, min=-5.0, max=5.0)
+        e_clamped = torch.clamp(self.e, min=-5.0, max=5.0)
 
         poly_out = (
             a_clamped * x4
             + b_clamped * x3
             + c_clamped * x2
-            + self.d * x_clipped
-            + self.e
+            + d_clamped * x_work
+            + e_clamped
         )
 
-        # 渐进式过渡：前warmup_epochs个epoch完全使用ReLU，然后平滑过渡到多项式
+        # 渐进式过渡：前warmup_epochs个epoch完全使用Swish，然后平滑过渡到多项式
         # 从 buffer 中获取当前 epoch 值
         epoch = self.current_epoch.item()
         if epoch < self.warmup_epochs:
-            # 预热阶段：使用ReLU
+            # 预热阶段：使用Swish
             alpha = 0.0
         elif epoch < self.warmup_epochs + 10:
-            # 过渡阶段（10个epoch）：从ReLU平滑过渡到多项式
+            # 过渡阶段（10个epoch）：从Swish平滑过渡到多项式
             progress = (epoch - self.warmup_epochs) / 10.0
             alpha = progress
         else:
             # 完全使用多项式
             alpha = 1.0
 
-        # 混合ReLU和多项式输出
-        out = (1 - alpha) * relu_out + alpha * poly_out
+        # 混合Swish和多项式输出
+        out = (1 - alpha) * swish_out + alpha * poly_out
 
-        return out * self.output_scale
+        out = out * self.output_scale
+        if out.dtype != orig_dtype:
+            max_val = torch.finfo(orig_dtype).max
+            out = torch.nan_to_num(out, nan=0.0, posinf=max_val, neginf=-max_val)
+            out = torch.clamp(out, min=-max_val, max=max_val)
+            out = out.to(orig_dtype)
+        return out
 
 
 class BasicBlock(nn.Module):
@@ -255,11 +305,11 @@ class SelfGated(nn.Module):
         gate = self.conv_gate(feat_intrinsic)
         gate = self.act(gate)
 
-        feat_generated = feat_intrinsic * gate
+        feat_generated = _safe_gated_mul(feat_intrinsic, gate)
 
         out = torch.cat([feat_intrinsic, feat_generated], dim=1)
 
-        out = self.bn_out(self.conv_out(out))
+        out = _safe_conv_bn(self.conv_out, self.bn_out, out)
 
         return out
 
@@ -444,7 +494,7 @@ class GatedDepthwiseConv(nn.Module):
         gate = self.activation(gate)
 
         # 生成门控特征
-        feat_gated = feat_intrinsic * gate
+        feat_gated = _safe_gated_mul(feat_intrinsic, gate)
 
         # 拼接恢复通道数（类似SelfGated）
         out = torch.cat([feat_intrinsic, feat_gated], dim=1)
