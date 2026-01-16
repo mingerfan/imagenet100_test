@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Type, Tuple, Optional
 from itertools import combinations
 from math import comb
+import math
 import sys
 import os
 
@@ -290,6 +291,12 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
 
     assert len(blocks) == 22, f"Expected 22 blocks, got {len(blocks)}"
     return blocks
+
+
+def _next_power_of_2_float(n: float) -> int:
+    if n <= 0:
+        return 1
+    return 2 ** math.ceil(math.log2(n))
 
 
 # 全局的22种Block定义
@@ -614,6 +621,24 @@ class ChannelCalculator:
         # 确保通道数是偶数（SelfGated模块要求）
         channels = (channels // 2) * 2
         return max(2, channels)
+
+    def calc_channel_per_ct(self, feature_size: int) -> int:
+        """计算每个CT可容纳的通道数"""
+        denom = feature_size * feature_size
+        if denom <= 0:
+            return 1
+        return max(1, self.ct_slots // denom)
+
+    def compute_ct_from_channels(self, channels: int, feature_size: int) -> int:
+        """根据通道数反推所需的CT数量"""
+        if channels <= 0:
+            return 1
+        resolve_prod = feature_size * feature_size
+        if resolve_prod > self.ct_slots:
+            min_ct_per_feature_map = _next_power_of_2_float(resolve_prod / self.ct_slots)
+            return int(min_ct_per_feature_map * channels)
+        channel_per_ct = self.calc_channel_per_ct(feature_size)
+        return max(1, math.ceil(channels / channel_per_ct))
 
     def compute_channels_sequence(
         self,

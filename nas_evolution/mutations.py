@@ -6,7 +6,7 @@ network_gen search space.
 
 import random
 import copy
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import sys
 import os
 
@@ -24,9 +24,18 @@ class MutationOperator:
     - Stride patterns (1344 stride encodings)
     - CT (ciphertext) policies
     - Downsample methods (6 options)
+    - Initial CT count
     """
 
-    def __init__(self, mutation_probs: Dict[str, float] = None):
+    def __init__(
+        self,
+        mutation_probs: Dict[str, float] = None,
+        ct_slots: int = 32768,
+        input_size: int = 224,
+        stem_downsample: int = 4,
+        initial_min_channels: int = 16,
+        initial_max_channels: Optional[int] = 64,
+    ):
         """Initialize mutation operator
 
         Args:
@@ -38,6 +47,7 @@ class MutationOperator:
             'stride': 0.15,      # Mutate stride pattern
             'ct_policy': 0.1,    # Mutate CT policy
             'downsample': 0.1,   # Mutate downsample method
+            'initial_ct': 0.05,  # Mutate initial CT count
         }
 
         # Normalize probabilities
@@ -47,6 +57,12 @@ class MutationOperator:
         # Cache for stride codes grouped by block count
         # Format: {num_blocks: [stride_code1, stride_code2, ...]}
         self._stride_cache = None
+        self.ct_slots = ct_slots
+        self.input_size = input_size
+        self.stem_downsample = stem_downsample
+        self.initial_min_channels = initial_min_channels
+        self.initial_max_channels = initial_max_channels
+        self._channel_calculator = None
 
     def mutate(self, parent_config):
         """Apply random mutation to network config
@@ -75,6 +91,8 @@ class MutationOperator:
             self._mutate_ct_policy(config)
         elif mutation_type == 'downsample':
             self._mutate_downsample(config)
+        elif mutation_type == 'initial_ct':
+            self._mutate_initial_ct_count(config)
 
         return config
 
@@ -259,14 +277,9 @@ class MutationOperator:
             config: NetworkConfig to update
         """
         try:
-            from network_gen.search_space import ChannelCalculator
-
-            # Initialize calculator with same parameters as generator
-            calculator = ChannelCalculator(
-                ct_slots=32768,  # Standard FHE parameter
-                input_size=224,  # ImageNet input size
-                stem_downsample=4  # Stem does 2x downsampling twice
-            )
+            calculator = self._get_channel_calculator()
+            if calculator is None:
+                return
 
             # Get current strides from blocks
             strides = [block.stride for block in config.blocks]
@@ -296,6 +309,57 @@ class MutationOperator:
             print(f"Warning: Could not import ChannelCalculator: {e}")
         except Exception as e:
             print(f"Warning: Error recalculating channels: {e}")
+
+    def _get_channel_calculator(self):
+        if self._channel_calculator is not None:
+            return self._channel_calculator
+        try:
+            from network_gen.search_space import ChannelCalculator
+        except ImportError:
+            return None
+        self._channel_calculator = ChannelCalculator(
+            ct_slots=self.ct_slots,
+            input_size=self.input_size,
+            stem_downsample=self.stem_downsample,
+        )
+        return self._channel_calculator
+
+    def _mutate_initial_ct_count(self, config):
+        """Mutate initial CT count and recompute channels"""
+        calculator = self._get_channel_calculator()
+        if calculator is None:
+            return
+
+        feature_size = calculator.feature_size_after_stem
+        min_ct = calculator.compute_ct_from_channels(
+            self.initial_min_channels,
+            feature_size,
+        )
+        if self.initial_max_channels is not None:
+            max_ct = calculator.compute_ct_from_channels(
+                self.initial_max_channels,
+                feature_size,
+            )
+            max_ct = max(max_ct, min_ct)
+        else:
+            max_ct = min_ct
+
+        current = config.initial_ct_count
+        if min_ct == max_ct:
+            new_ct = min_ct
+        else:
+            new_ct = random.randint(min_ct, max_ct)
+            if new_ct == current:
+                if current < max_ct:
+                    new_ct = current + 1
+                elif current > min_ct:
+                    new_ct = current - 1
+
+        if new_ct == current:
+            return
+
+        config.initial_ct_count = new_ct
+        self._recalculate_channels(config)
 
 
 def test_mutation():

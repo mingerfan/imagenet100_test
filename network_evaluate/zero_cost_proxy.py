@@ -343,7 +343,7 @@ def compute_fhe_latency(model: nn.Module, input_shape: Tuple[int, int, int, int]
 
 
 def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=False,
-                       repeat=8, mixup_gamma=1e-2):
+                       repeat=8, mixup_gamma=1e-2, include_synflow=False):
     """Compute NAS score using ZenNAS zero-cost proxy and FHE latency
 
     Uses ZEN score as the primary evaluation metric, which has been shown to have
@@ -361,6 +361,7 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
         fp16: Use FP16 precision
         repeat: Number of repetitions for ZEN score averaging
         mixup_gamma: Mixup coefficient for ZEN score
+        include_synflow: Whether to compute SynFlow for sanity checking
 
     Returns:
         dict with keys:
@@ -373,6 +374,11 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
             - 'fhe_max_depth': Maximum circuit depth
             - 'fhe_operation_latency': Operation latency (excluding bootstrap)
             - 'fhe_boot_latency': Bootstrap latency only
+            - 'synflow_score': SynFlow score (if enabled)
+            - 'synflow_grad_norm': SynFlow gradient norm (if enabled)
+            - 'synflow_params': SynFlow parameter count (if enabled)
+            - 'synflow_issue': Potential SynFlow issue flag (if enabled)
+            - 'synflow_ok': True if SynFlow looks valid (if enabled)
     """
     # Get the underlying model if wrapped
     eval_model = model.model if isinstance(model, ModelWrapper) else model
@@ -403,6 +409,22 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
         # ============ 3. Compute FHE Latency (for constraints) ============
         fhe_metrics = compute_fhe_latency(eval_model, (batch_size, 3, resolution, resolution))
         info.update(fhe_metrics)
+
+        # ============ 4. Optional SynFlow Check ============
+        if include_synflow:
+            try:
+                synflow_results = compute_synflow(
+                    eval_model, gpu, resolution, batch_size, fp16=fp16
+                )
+            except Exception as e:
+                synflow_results = {
+                    'synflow_score': float('nan'),
+                    'synflow_grad_norm': float('nan'),
+                    'synflow_params': 0,
+                    'synflow_issue': f'error: {e}',
+                    'synflow_ok': False
+                }
+            info.update(synflow_results)
 
     finally:
         # Always restore original Poly4 activations
@@ -507,6 +529,8 @@ def compute_synflow(model, gpu, resolution, batch_size, fp16=False):
             - 'synflow_score': SynFlow score (higher is better)
             - 'synflow_grad_norm': L2 norm of gradients
             - 'synflow_params': Number of parameters
+            - 'synflow_issue': Issue string if gradients look invalid
+            - 'synflow_ok': True if score looks valid
     """
     model = model.model if isinstance(model, ModelWrapper) else model
 
@@ -560,15 +584,34 @@ def compute_synflow(model, gpu, resolution, batch_size, fp16=False):
         # Clean up gradients
         model.zero_grad()
 
-        return {
+        results = {
             'synflow_score': float(synflow_score),
             'synflow_grad_norm': float(grad_norm),
             'synflow_params': int(total_params)
         }
+        synflow_issue = detect_synflow_issue(results)
+        results['synflow_issue'] = synflow_issue
+        results['synflow_ok'] = synflow_issue is None
+        return results
 
     finally:
         # Always restore original Poly4 activations
         restore_poly4_activations(replaced_modules)
+
+
+def detect_synflow_issue(results: dict) -> Optional[str]:
+    """Check SynFlow results for potential architecture issues."""
+    synflow_score = results.get('synflow_score', float('nan'))
+    grad_norm = results.get('synflow_grad_norm', float('nan'))
+    params = results.get('synflow_params', 0)
+
+    if not np.isfinite(synflow_score) or not np.isfinite(grad_norm):
+        return "non_finite"
+    if params <= 0:
+        return "no_params"
+    if synflow_score <= 0 or grad_norm <= 0:
+        return "zero_grad"
+    return None
 
 
 def network_weight_gaussian_init(net: nn.Module):

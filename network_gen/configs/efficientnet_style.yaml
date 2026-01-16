@@ -9,6 +9,8 @@ dataset:
 search_space:
   ct_slots: 32768
   initial_ct_count: 1
+  initial_min_channels: 16
+  initial_max_channels: 64
 
   stem:
     enabled: true

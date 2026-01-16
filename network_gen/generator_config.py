@@ -144,6 +144,10 @@ class SearchSpaceConstraints:
     """搜索空间约束"""
     ct_slots: int = 32768                                   # CT槽位数
     initial_ct_count: int = 1                               # 初始CT数量
+    initial_ct_count_min: Optional[int] = None              # 初始CT数量下限
+    initial_ct_count_max: Optional[int] = None              # 初始CT数量上限
+    initial_min_channels: int = 16                          # 初始最少通道数
+    initial_max_channels: Optional[int] = 64                # 初始最多通道数
     stem: StemConstraints = field(default_factory=StemConstraints)
     second_downsample: SecondDownsampleConstraints = field(
         default_factory=SecondDownsampleConstraints
@@ -320,6 +324,10 @@ class GeneratorConfig:
         return SearchSpaceConstraints(
             ct_slots=data.get("ct_slots", 32768),
             initial_ct_count=data.get("initial_ct_count", 1),
+            initial_ct_count_min=data.get("initial_ct_count_min"),
+            initial_ct_count_max=data.get("initial_ct_count_max"),
+            initial_min_channels=data.get("initial_min_channels", 16),
+            initial_max_channels=data.get("initial_max_channels", 64),
             stem=stem,
             second_downsample=second_downsample,
             blocks=blocks,
@@ -349,6 +357,10 @@ class GeneratorConfig:
         result = {
             "ct_slots": self.search_space.ct_slots,
             "initial_ct_count": self.search_space.initial_ct_count,
+            "initial_ct_count_min": self.search_space.initial_ct_count_min,
+            "initial_ct_count_max": self.search_space.initial_ct_count_max,
+            "initial_min_channels": self.search_space.initial_min_channels,
+            "initial_max_channels": self.search_space.initial_max_channels,
             "stem": {
                 "enabled": self.search_space.stem.enabled,
                 "allowed_codes": self.search_space.stem.allowed_codes,
@@ -405,6 +417,12 @@ class GeneratorConfig:
             "\n搜索空间:",
             f"  CT槽位数: {self.search_space.ct_slots}",
             f"  初始CT数量: {self.search_space.initial_ct_count}",
+            f"  初始CT数量范围: "
+            f"{self.search_space.initial_ct_count_min or '-'}"
+            f"..{self.search_space.initial_ct_count_max or '-'}",
+            f"  初始通道数范围: "
+            f"{self.search_space.initial_min_channels}"
+            f"..{self.search_space.initial_max_channels or '-'}",
             "\nStem层:",
             f"  启用: {self.search_space.stem.enabled}",
             f"  允许的配置: {self.search_space.stem.allowed_codes or 'All'}",
@@ -448,6 +466,10 @@ def create_default_imagenet_config() -> GeneratorConfig:
         search_space=SearchSpaceConstraints(
             ct_slots=32768,
             initial_ct_count=1,
+            initial_ct_count_min=None,
+            initial_ct_count_max=None,
+            initial_min_channels=16,
+            initial_max_channels=64,
             stem=StemConstraints(enabled=True, allowed_codes=None),
             second_downsample=SecondDownsampleConstraints(enabled=True, allowed_codes=None),
             blocks=BlockConstraints(allowed_block_ids=None, first_layers_constraints=None),
@@ -474,6 +496,10 @@ def create_default_cifar10_config() -> GeneratorConfig:
         search_space=SearchSpaceConstraints(
             ct_slots=32768,
             initial_ct_count=1,
+            initial_ct_count_min=None,
+            initial_ct_count_max=None,
+            initial_min_channels=16,
+            initial_max_channels=64,
             stem=StemConstraints(
                 enabled=False,  # CIFAR-10不需要激进的stem
                 allowed_codes=None,

@@ -251,6 +251,7 @@ class EvolutionLogger:
         for i, ind in enumerate(best_individuals):
             message += f"Rank {i+1}:\n"
             message += f"  Fitness: {ind.zen_fitness:.6f}\n"
+            message += f"  SynFlow: {ind.scores.get('synflow_score', 0.0):.4f}\n"
             message += f"  ZEN Score: {ind.scores.get('zen_score', 0.0):.4f}\n"
             message += f"  Params: {ind.scores.get('params', 0):,}\n"
             message += f"  FLOPs: {ind.scores.get('flops', 0.0):.2e}\n"

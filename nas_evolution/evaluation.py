@@ -35,6 +35,7 @@ class FitnessEvaluator:
         self.resolution = config.evaluation.resolution
         self.batch_size = config.evaluation.batch_size
         self.use_dataloader = config.evaluation.use_dataloader
+        self.synflow_check = getattr(config.evaluation, "synflow_check", False)
 
         # Initialize fitness function
         self.fitness_fn = ZenNASFitnessFunction()
@@ -47,6 +48,7 @@ class FitnessEvaluator:
         print(f"  Resolution: {self.resolution}")
         print(f"  Batch size: {self.batch_size}")
         print(f"  Use dataloader: {self.use_dataloader}")
+        print(f"  SynFlow check: {self.synflow_check}")
 
     def evaluate(self, network_config) -> Dict:
         """Evaluate single architecture
@@ -63,6 +65,8 @@ class FitnessEvaluator:
                 - 'fhe_latency': float
                 - 'fhe_boot_count': int
                 - 'fhe_max_depth': int
+                - 'synflow_score': float (if enabled)
+                - 'synflow_issue': str or None (if enabled)
         """
         # Check cache (hash by config dict)
         config_str = str(sorted(network_config.to_dict().items()))
@@ -85,8 +89,14 @@ class FitnessEvaluator:
                 gpu=self.gpu,
                 trainloader=None,
                 resolution=self.resolution,
-                batch_size=self.batch_size
+                batch_size=self.batch_size,
+                include_synflow=self.synflow_check
             )
+
+            if self.synflow_check:
+                synflow_issue = scores.get('synflow_issue')
+                if synflow_issue:
+                    print(f"  ⚠ SynFlow issue detected: {synflow_issue}")
 
             # Cache result
             self.eval_cache[config_str] = scores
@@ -99,7 +109,7 @@ class FitnessEvaluator:
             traceback.print_exc()
 
             # Return invalid scores
-            return {
+            invalid_scores = {
                 'zen_score': float('-inf'),
                 'std_zen_score': 0.0,
                 'params': 0,
@@ -110,6 +120,15 @@ class FitnessEvaluator:
                 'fhe_operation_latency': 0.0,
                 'fhe_boot_latency': 0.0
             }
+            if self.synflow_check:
+                invalid_scores.update({
+                    'synflow_score': float('nan'),
+                    'synflow_grad_norm': float('nan'),
+                    'synflow_params': 0,
+                    'synflow_issue': 'evaluation_error',
+                    'synflow_ok': False
+                })
+            return invalid_scores
 
     def evaluate_population(self, population):
         """Evaluate multiple architectures and compute ZenNAS fitness

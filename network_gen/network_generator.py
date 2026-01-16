@@ -214,17 +214,18 @@ class RandomNetworkGenerator:
         # 应用位置特定的block约束
         block_ids = self._apply_block_constraints(block_ids)
 
-        # 6. 计算通道数
+        # 6. 选择初始CT数量并计算通道数
+        initial_ct_count = self._random_initial_ct_count()
         channels, feature_sizes, ct_counts = self.channel_calculator.compute_channels_sequence(
             strides=strides,
             ct_policies=ct_policies,
-            initial_ct_count=self.search_space.initial_ct_count,
+            initial_ct_count=initial_ct_count,
         )
 
         # 7. 构建block配置列表
         blocks = []
         stem_out_channels = self.channel_calculator.get_initial_channels(
-            self.search_space.initial_ct_count
+            initial_ct_count
         )
 
         for i in range(num_blocks):
@@ -253,7 +254,7 @@ class RandomNetworkGenerator:
             ct_policies=ct_policies,
             block_choices=block_choices,
             blocks=blocks,
-            initial_ct_count=self.search_space.initial_ct_count,
+            initial_ct_count=initial_ct_count,
             stem_out_channels=stem_out_channels,
             created_at=datetime.now().isoformat(),
         )
@@ -307,6 +308,56 @@ class RandomNetworkGenerator:
         )
 
     # ========== 约束应用辅助方法 ==========
+
+    def _resolve_initial_ct_count_range(self) -> Tuple[int, int]:
+        """计算初始CT数量范围（结合最小通道数约束）"""
+        min_channels = 16
+        max_channels = 64
+        min_ct_override = None
+        max_ct_override = None
+        legacy_ct = None
+
+        if self.config is not None:
+            min_channels = getattr(self.config.search_space, "initial_min_channels", min_channels)
+            max_channels = getattr(self.config.search_space, "initial_max_channels", max_channels)
+            min_ct_override = getattr(self.config.search_space, "initial_ct_count_min", None)
+            max_ct_override = getattr(self.config.search_space, "initial_ct_count_max", None)
+            legacy_ct = getattr(self.config.search_space, "initial_ct_count", None)
+        else:
+            legacy_ct = getattr(self.search_space, "initial_ct_count", None)
+
+        feature_size = self.channel_calculator.feature_size_after_stem
+        min_required_ct = self.channel_calculator.compute_ct_from_channels(
+            min_channels,
+            feature_size,
+        )
+
+        if min_ct_override is not None:
+            min_ct = max(min_required_ct, min_ct_override)
+        else:
+            min_ct = min_required_ct
+
+        if max_ct_override is not None:
+            max_ct = max(max_ct_override, min_ct)
+        elif max_channels is not None:
+            max_from_channels = self.channel_calculator.compute_ct_from_channels(
+                max_channels,
+                feature_size,
+            )
+            max_ct = max(max_from_channels, min_ct)
+        elif legacy_ct is not None:
+            max_ct = max(legacy_ct, min_ct)
+        else:
+            max_ct = min_ct
+
+        return min_ct, max_ct
+
+    def _random_initial_ct_count(self) -> int:
+        """随机选择初始CT数量（满足最小通道数约束）"""
+        min_ct, max_ct = self._resolve_initial_ct_count_range()
+        if min_ct == max_ct:
+            return min_ct
+        return random.randint(min_ct, max_ct)
 
     def _random_stem_code(self) -> int:
         """随机选择stem配置（应用约束）"""
@@ -471,7 +522,7 @@ class NetworkBuilder:
             layers.append(activation_class())
 
         # MaxPool, stride=2
-        layers.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
+        # layers.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
 
         return nn.Sequential(*layers)
 
@@ -574,6 +625,8 @@ class GeneratedNetwork(nn.Module):
         # 构建Stem
         self.stem = builder.build_stem(config)
 
+        self.second = builder.build_second_downsample(config, config.stem_out_channels, config.stem_out_channels)
+
         # 构建Body（所有blocks）
         self.blocks = nn.ModuleList()
         for block_cfg in config.blocks:
@@ -602,6 +655,8 @@ class GeneratedNetwork(nn.Module):
     def forward(self, x):
         # Stem
         x = self.stem(x)
+
+        x = self.second(x)
 
         # Body blocks
         for block in self.blocks:
