@@ -3,6 +3,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from torch import nn
 import numpy as np
+import random
 import time
 from typing import List, Tuple, Optional
 
@@ -305,7 +306,8 @@ def compute_fhe_latency(model: nn.Module, input_shape: Tuple[int, int, int, int]
 
         # FheInfo requires model to be on CPU for tracing
         # Check if model is on CUDA and move to CPU temporarily
-        is_cuda = next(model.parameters()).is_cuda
+        original_device = next(model.parameters()).device
+        is_cuda = original_device.type == 'cuda'
         if is_cuda:
             model = model.cpu()
 
@@ -313,9 +315,9 @@ def compute_fhe_latency(model: nn.Module, input_shape: Tuple[int, int, int, int]
         fhe_info = FheInfo(model, input_shape=input_shape, optimize_boot=True)
         fhe_info.run_statistics()
 
-        # Move model back to CUDA if it was there originally
+        # Move model back to original device if it was there originally
         if is_cuda:
-            model = model.cuda()
+            model = model.to(original_device)
 
         # Total latency = operation latency + bootstrap latency
         total_latency = fhe_info.total_latency + fhe_info.total_boot_latency
@@ -539,12 +541,13 @@ def compute_synflow(model, gpu, resolution, batch_size, fp16=False):
 
     try:
         model.train()
-        model.cuda()
 
         if gpu is not None:
             device = torch.device('cuda:{}'.format(gpu))
         else:
             device = torch.device('cpu')
+
+        model.to(device)
 
         if fp16:
             dtype = torch.half
@@ -612,6 +615,125 @@ def detect_synflow_issue(results: dict) -> Optional[str]:
     if synflow_score <= 0 or grad_norm <= 0:
         return "zero_grad"
     return None
+
+
+def compute_meco(model, gpu, resolution, batch_size, measure='meco_opt', fp16=False):
+    """
+    Compute MECO (Minimum Eigenvalue of COrrelation) zero-cost proxy score
+
+    MECO measures the expressiveness of a network by computing the minimum
+    eigenvalue of the correlation matrix of features at each layer. A higher
+    MECO score indicates better feature diversity and less redundancy.
+
+    Args:
+        model: PyTorch model to evaluate
+        gpu: GPU device ID
+        resolution: Input image resolution
+        batch_size: Batch size for evaluation
+        measure: 'meco' for full correlation or 'meco_opt' for optimized sampling
+        fp16: Use FP16 precision
+
+    Returns:
+        dict with keys:
+            - 'meco_score': MECO score (higher is better)
+            - 'num_layers': Number of layers evaluated
+    """
+    model = model.model if isinstance(model, ModelWrapper) else model
+
+    # Replace Poly4 with Swish for ZCP evaluation
+    replaced_modules = replace_poly4_with_swish_for_zcp(model)
+
+    result_list = []
+    hooks = []
+
+    def forward_hook(module, data_input, data_output):
+        # Handle tuple outputs (some layers return tuples)
+        if isinstance(data_output, tuple):
+            fea = data_output[0].clone().detach()
+        else:
+            fea = data_output.clone().detach()
+
+        # Only process if we have enough dimensions
+        if fea.dim() < 2:
+            return
+
+        n = fea.shape[0]
+        if n < 2:
+            return
+
+        fea = fea.reshape(n, -1)
+
+        if measure == 'meco':
+            corr = torch.corrcoef(fea)
+            corr[torch.isnan(corr)] = 0
+            corr[torch.isinf(corr)] = 0
+            values = torch.linalg.eig(corr)[0]
+            result = torch.min(torch.real(values))
+        elif measure == 'meco_opt':
+            # Optimized: sample 8 random indices for efficiency
+            sample_size = min(8, n)
+            if n > sample_size:
+                idxs = random.sample(range(n), sample_size)
+                fea = fea[idxs, :]
+            corr = torch.corrcoef(fea)
+            corr[torch.isnan(corr)] = 0
+            corr[torch.isinf(corr)] = 0
+            values = torch.linalg.eig(corr)[0]
+            result = torch.min(torch.real(values)) * n / sample_size
+        else:
+            raise ValueError(f"Unknown measure: {measure}")
+
+        result_list.append(result)
+
+    try:
+        model.eval()
+
+        if gpu is not None:
+            device = torch.device('cuda:{}'.format(gpu))
+        else:
+            device = torch.device('cpu')
+
+        model.to(device)
+
+        if fp16:
+            dtype = torch.half
+        else:
+            dtype = torch.float32
+
+        # Initialize model with kaiming normal
+        init_model(model, method='kaiming_norm_fanin')
+
+        # Register forward hooks on all modules
+        for name, module in model.named_modules():
+            hook = module.register_forward_hook(forward_hook)
+            hooks.append(hook)
+
+        # Generate random input
+        x = torch.randn(batch_size, 3, resolution, resolution, device=device, dtype=dtype)
+
+        # Forward pass
+        with torch.no_grad():
+            model(x)
+
+        # Aggregate results
+        results = torch.tensor(result_list)
+        results = results[torch.logical_not(torch.isnan(results))]
+        results = results[torch.logical_not(torch.isinf(results))]
+        meco_score = torch.sum(results).item()
+
+        return {
+            'meco_score': float(meco_score),
+            'num_layers': int(len(results))
+        }
+
+    finally:
+        # Clean up hooks
+        for hook in hooks:
+            hook.remove()
+        result_list.clear()
+
+        # Restore original Poly4 activations
+        restore_poly4_activations(replaced_modules)
 
 
 def network_weight_gaussian_init(net: nn.Module):
@@ -725,12 +847,13 @@ def compute_zen_score(model, gpu, resolution, batch_size, repeat=32, mixup_gamma
     # Wrap model to get features before GAP
     zen_model = ZENScoreWrapper(model)
     zen_model.train()
-    zen_model.cuda()
 
     if gpu is not None:
         device = torch.device('cuda:{}'.format(gpu))
     else:
         device = torch.device('cpu')
+
+    zen_model.to(device)
 
     if fp16:
         dtype = torch.half

@@ -17,7 +17,7 @@ import os
 import time
 
 # 导入zero_cost_proxy中的计算函数
-from zero_cost_proxy import compute_synflow, compute_zen_score
+from zero_cost_proxy import compute_synflow, compute_zen_score, compute_meco
 
 
 def get_model(model_name: str, num_classes: int = 100) -> nn.Module:
@@ -83,6 +83,22 @@ def print_zen_results(model_name: str, results: dict):
     print(f"ZEN 分数: {results['zen_score']:.4g}")
     print(f"标准差: {results['std_zen_score']:.6f}")
     print(f"95% 置信区间精度: {results['zen_precision']:.6f}")
+    print(f"{'='*60}\n")
+
+
+def print_meco_results(model_name: str, results: dict):
+    """
+    格式化打印MECO结果
+
+    Args:
+        model_name: 模型名称
+        results: 计算结果字典
+    """
+    print(f"\n{'='*60}")
+    print(f"模型: {model_name}")
+    print(f"{'='*60}")
+    print(f"MECO 分数: {results['meco_score']:.6f}")
+    print(f"评估层数: {results['num_layers']}")
     print(f"{'='*60}\n")
 
 
@@ -168,6 +184,36 @@ def main():
 
         except Exception as e:
             print(f"计算 {model_name} 的 ZEN 时出错: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # MECO Score 计算
+    print("\n\n>>> 计算 MECO 分数 (meco_opt) <<<\n")
+    for model_name in model_names:
+        print(f"正在加载 {model_name}...")
+
+        try:
+            # 获取模型
+            model = get_model(model_name, num_classes=100)
+
+            # 计算MECO指标
+            start_time = time.time()
+            results = compute_meco(
+                model=model,
+                gpu=gpu,
+                resolution=resolution,
+                batch_size=batch_size,
+                measure='meco_opt',
+                fp16=fp16
+            )
+            time_cost = time.time() - start_time
+
+            # 打印结果
+            print_meco_results(model_name, results)
+            print(f"计算时间: {time_cost:.4g} 秒")
+
+        except Exception as e:
+            print(f"计算 {model_name} 的 MECO 时出错: {e}")
             import traceback
             traceback.print_exc()
 
