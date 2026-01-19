@@ -15,7 +15,7 @@ search_space:
   # CT相关配置
   ct_slots: 32768           # 每个CT的槽位数 (2^15)
   initial_ct_count: 1       # 初始CT数量
-  initial_min_channels: 32  # 初始最少通道数
+  initial_min_channels: 28  # 初始最少通道数
   initial_max_channels: 96  # 初始最多通道数
 
   # Stem层配置
