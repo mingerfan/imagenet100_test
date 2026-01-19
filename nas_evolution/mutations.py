@@ -6,12 +6,15 @@ network_gen search space.
 
 import random
 import copy
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 import sys
 import os
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from network_gen.search_space import UNIFIED_BLOCKS
+from models.gate_net_cmp.block_def import StablePoly4
 
 
 class MutationOperator:
@@ -94,66 +97,103 @@ class MutationOperator:
         elif mutation_type == 'initial_ct':
             self._mutate_initial_ct_count(config)
 
+        self._enforce_tail_no_poly4(config)
+        self._sync_blocks_from_choices(config)
         return config
 
     def _mutate_block(self, config):
-        """Mutate a block type in the hierarchical selection
-
-        The network_gen uses hierarchical block selection:
-        - Front 4 blocks: Independent choices (indices 0-3)
-        - Remaining blocks: Paired choices (every 2 blocks share a choice)
-
-        We mutate one choice to a different block type (0-21).
-        """
-        # Get the block_choices attribute (hierarchical representation)
-        if not hasattr(config, 'block_choices'):
-            # Fallback: reconstruct from blocks if needed
-            print("Warning: config missing block_choices, cannot mutate block")
+        """Mutate a block type in per-block block_choices."""
+        block_choices = self._ensure_block_choices(config)
+        if not block_choices:
             return
 
-        block_choices = config.block_choices
+        num_blocks = len(block_choices)
+        choice_idx = random.randint(0, num_blocks - 1)
+        group_start, group_end = self._group_bounds(choice_idx, num_blocks)
+        tail_start = self._tail_start(num_blocks)
+        group_in_tail = group_end >= tail_start
 
-        # Randomly select which choice to mutate
-        choice_idx = random.randint(0, len(block_choices) - 1)
+        candidate_ids = self._all_block_ids()
+        if group_in_tail:
+            candidate_ids = self._non_poly4_block_ids(candidate_ids)
+            if not candidate_ids:
+                raise ValueError("No non-poly4 block IDs available for tail mutation")
 
-        # Mutate to a different block type (0-21)
-        current_block = block_choices[choice_idx]
-        new_block = random.randint(0, 21)
+        current_ids = {block_choices[i] for i in range(group_start, group_end + 1)}
+        candidate_ids = [block_id for block_id in candidate_ids if block_id not in current_ids]
+        if not candidate_ids:
+            return
 
-        # Ensure it's different from current
-        while new_block == current_block:
-            new_block = random.randint(0, 21)
+        new_block = random.choice(candidate_ids)
+        for i in range(group_start, group_end + 1):
+            block_choices[i] = new_block
 
-        block_choices[choice_idx] = new_block
         config.block_choices = block_choices
+        self._enforce_tail_no_poly4(config)
+        self._sync_blocks_from_choices(config)
 
-        # Regenerate blocks from hierarchical choices
-        self._expand_block_choices(config)
+    def _ensure_block_choices(self, config) -> List[int]:
+        if hasattr(config, 'blocks') and getattr(config, 'blocks') is not None:
+            block_ids = [block.block_id for block in config.blocks]
+        else:
+            block_ids = []
 
-    def _expand_block_choices(self, config):
-        """Expand hierarchical block choices to full block list
+        if not hasattr(config, 'block_choices') or config.block_choices is None:
+            config.block_choices = block_ids
+            return config.block_choices
 
-        Matches the logic in HierarchicalBlockSelector from network_gen.
-        """
-        expanded = []
+        if block_ids and len(config.block_choices) != len(block_ids):
+            config.block_choices = block_ids
+        return config.block_choices
 
-        # Front 4 blocks: direct mapping
-        for i in range(min(4, len(config.block_choices))):
-            expanded.append(config.block_choices[i])
+    def _sync_blocks_from_choices(self, config) -> None:
+        if not hasattr(config, 'blocks') or config.blocks is None:
+            return
+        for i, block_config in enumerate(config.blocks):
+            if i < len(config.block_choices):
+                block_config.block_id = config.block_choices[i]
 
-        # Remaining blocks: pairs
-        # Each choice after the first 4 applies to 2 consecutive blocks
-        remaining_choices = config.block_choices[4:]
-        for choice in remaining_choices:
-            expanded.append(choice)
-            expanded.append(choice)
+    def _all_block_ids(self) -> List[int]:
+        return list(range(len(UNIFIED_BLOCKS)))
 
-        # Update the blocks attribute with new block types
-        # Keep existing channels and strides
-        if hasattr(config, 'blocks'):
-            for i, block_config in enumerate(config.blocks):
-                if i < len(expanded):
-                    block_config.block_id = expanded[i]  # Use attribute access
+    def _is_poly4_block_id(self, block_id: int) -> bool:
+        return UNIFIED_BLOCKS[block_id].activation_class is StablePoly4
+
+    def _non_poly4_block_ids(self, block_ids: List[int]) -> List[int]:
+        return [block_id for block_id in block_ids if not self._is_poly4_block_id(block_id)]
+
+    def _tail_start(self, num_blocks: int) -> int:
+        return num_blocks // 2
+
+    def _group_bounds(self, index: int, num_blocks: int) -> Tuple[int, int]:
+        if index < 4 or num_blocks <= 4:
+            return index, index
+        group_start = 4 + ((index - 4) // 2) * 2
+        group_end = min(group_start + 1, num_blocks - 1)
+        return group_start, group_end
+
+    def _enforce_tail_no_poly4(self, config) -> None:
+        block_choices = self._ensure_block_choices(config)
+        if not block_choices:
+            return
+
+        num_blocks = len(block_choices)
+        tail_start = self._tail_start(num_blocks)
+        non_poly4_ids = self._non_poly4_block_ids(self._all_block_ids())
+        if not non_poly4_ids:
+            raise ValueError("No non-poly4 block IDs available for tail constraint")
+
+        idx = 0
+        while idx < num_blocks:
+            group_start, group_end = self._group_bounds(idx, num_blocks)
+            group_in_tail = group_end >= tail_start
+            if group_in_tail and any(self._is_poly4_block_id(block_choices[i]) for i in range(group_start, group_end + 1)):
+                new_block = random.choice(non_poly4_ids)
+                for i in range(group_start, group_end + 1):
+                    block_choices[i] = new_block
+            idx = group_end + 1
+
+        config.block_choices = block_choices
 
     def _mutate_stem(self, config):
         """Mutate stem configuration (0-3)"""

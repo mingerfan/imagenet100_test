@@ -35,6 +35,7 @@ from models.gate_net_cmp.block_def import (
     FullGatedBasicBlock,
     MBConvBlock,
     SelfGated,
+    StablePoly4,
 )
 
 
@@ -212,6 +213,7 @@ class RandomNetworkGenerator:
 
         # Apply position-specific block constraints
         block_ids = self._apply_block_constraints(block_ids)
+        block_ids = self._apply_poly4_tail_constraint(block_ids)
         block_choices = block_ids
 
         # 6. 选择初始CT数量并计算通道数
@@ -430,6 +432,49 @@ class RandomNetworkGenerator:
 
         return [random.choice(allowed_policies) for _ in range(3)]
 
+    def _get_allowed_block_ids(self, position: Optional[int] = None) -> List[int]:
+        if self.config is None:
+            allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
+        else:
+            allowed_ids = self.config.search_space.blocks.allowed_block_ids
+            if allowed_ids is None:
+                allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
+
+            if position is not None:
+                constraints = self.config.search_space.blocks.first_layers_constraints
+                if constraints:
+                    for constraint in constraints:
+                        if constraint.position == position and constraint.allowed_block_ids is not None:
+                            allowed_ids = constraint.allowed_block_ids
+                            break
+
+        return allowed_ids
+
+    def _is_poly4_block_id(self, block_id: int) -> bool:
+        return UNIFIED_BLOCKS[block_id].activation_class is StablePoly4
+
+    def _filter_non_poly4_block_ids(self, allowed_ids: List[int]) -> List[int]:
+        return [block_id for block_id in allowed_ids if not self._is_poly4_block_id(block_id)]
+
+    def _apply_poly4_tail_constraint(self, block_ids: List[int]) -> List[int]:
+        if not block_ids:
+            return block_ids
+
+        start_idx = len(block_ids) // 2
+        block_ids = block_ids.copy()
+
+        for i in range(start_idx, len(block_ids)):
+            if self._is_poly4_block_id(block_ids[i]):
+                allowed_ids = self._get_allowed_block_ids(position=i)
+                allowed_ids = self._filter_non_poly4_block_ids(allowed_ids)
+                if not allowed_ids:
+                    raise ValueError(
+                        f"No non-poly4 block IDs available for position {i} in tail constraint"
+                    )
+                block_ids[i] = random.choice(allowed_ids)
+
+        return block_ids
+
     def _normalize_block_choices(self, block_choices: List[int], num_blocks: int) -> List[int]:
         """Normalize block choices to a per-block list."""
         if len(block_choices) == num_blocks:
@@ -446,28 +491,37 @@ class RandomNetworkGenerator:
 
     def _random_block_choices(self, num_blocks: int) -> List[int]:
         """Randomly generate per-block choices with pair sharing after the first blocks."""
-        if self.config is None:
-            allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
-        else:
-            allowed_ids = self.config.search_space.blocks.allowed_block_ids
-            if allowed_ids is None:
-                allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
-
+        allowed_ids = self._get_allowed_block_ids()
         if not allowed_ids:
             raise ValueError("No allowed block IDs in config")
+
+        non_poly4_ids = self._filter_non_poly4_block_ids(allowed_ids)
+        if num_blocks > 0 and not non_poly4_ids:
+            raise ValueError("No non-poly4 block IDs available for tail constraint")
 
         block_ids = []
         num_individual = self.block_selector.NUM_INDIVIDUAL
         group_size = self.block_selector.GROUP_SIZE
         shared_choice = None
+        tail_start = num_blocks // 2
 
         for i in range(num_blocks):
+            if i >= num_individual:
+                group_idx = (i - num_individual) // group_size
+                group_start = num_individual + (group_idx * group_size)
+                group_end = min(group_start + group_size - 1, num_blocks - 1)
+                group_in_tail = group_end >= tail_start
+            else:
+                group_in_tail = i >= tail_start
+
+            candidate_ids = non_poly4_ids if group_in_tail else allowed_ids
+
             if i < num_individual:
-                block_ids.append(random.choice(allowed_ids))
+                block_ids.append(random.choice(candidate_ids))
                 continue
 
             if (i - num_individual) % group_size == 0:
-                shared_choice = random.choice(allowed_ids)
+                shared_choice = random.choice(candidate_ids)
             block_ids.append(shared_choice)
 
         return block_ids
