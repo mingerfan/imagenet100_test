@@ -90,11 +90,10 @@ class NetworkConfig:
     # CT策略列表（3个位置）
     ct_policies: List[str]
 
-    # 分层Block选择ID列表
-    # 前4个是单独选择，后面每个代表2个block共享的选择
+    # Block choices per block (length == num_blocks)
     block_choices: List[int]
 
-    # 每个block的配置（由block_choices展开得到）
+    # Each block config (matches block_choices)
     blocks: List[BlockConfig]
 
     # 初始CT数量
@@ -112,6 +111,10 @@ class NetworkConfig:
     created_at: Optional[str] = None
 
     def __post_init__(self):
+        if self.blocks:
+            block_ids = [b.block_id for b in self.blocks]
+            if self.block_choices != block_ids:
+                self.block_choices = block_ids
         if self.name is None:
             self.name = self.generate_name()
 
@@ -129,7 +132,7 @@ class NetworkConfig:
 
     @property
     def num_choices(self) -> int:
-        """选择位数量（前4个单独 + 后面每2个一组）"""
+        """Number of block choices (per block)."""
         return len(self.block_choices)
 
     @property
@@ -153,7 +156,7 @@ class NetworkConfig:
             f"Stem: {self.stem_config}",
             f"第二次降分辨率: {self.second_ds_config}",
             f"Block数量: {self.num_blocks}",
-            f"选择位数: {self.num_choices} (前4单独 + 后{self.num_choices-4}组)",
+            f"Block choices: {self.num_choices}",
             f"Stride位置: {self.get_stride_positions()}",
             f"CT策略: {self.ct_policies}",
             "",

@@ -175,7 +175,7 @@ class RandomNetworkGenerator:
             stem_code: 指定stem配置 [0-3]，默认随机（受约束）
             second_ds_code: 指定第二次降分辨率配置 [0-5]，默认随机（受约束）
             stride_code: 指定stride编码 [0-1343]，默认随机（受约束）
-            block_choices: 分层Block选择，默认随机（受约束）
+            block_choices: Block choices per block. Length should be num_blocks.
             ct_policies: CT策略列表，默认随机（受约束）
 
         Returns:
@@ -204,15 +204,15 @@ class RandomNetworkGenerator:
         if ct_policies is None:
             ct_policies = self._random_ct_policies()
 
-        # 5. 生成分层Block选择（应用约束）
+        # 5. Block choices (apply constraints during generation)
         if block_choices is None:
-            block_choices = self._random_block_choices(num_blocks)
+            block_ids = self._random_block_choices(num_blocks)
+        else:
+            block_ids = self._normalize_block_choices(block_choices, num_blocks)
 
-        # 展开为每个block的选择
-        block_ids = self.block_selector.expand_choices(block_choices, num_blocks)
-
-        # 应用位置特定的block约束
+        # Apply position-specific block constraints
         block_ids = self._apply_block_constraints(block_ids)
+        block_choices = block_ids
 
         # 6. 选择初始CT数量并计算通道数
         initial_ct_count = self._random_initial_ct_count()
@@ -430,23 +430,47 @@ class RandomNetworkGenerator:
 
         return [random.choice(allowed_policies) for _ in range(3)]
 
+    def _normalize_block_choices(self, block_choices: List[int], num_blocks: int) -> List[int]:
+        """Normalize block choices to a per-block list."""
+        if len(block_choices) == num_blocks:
+            return list(block_choices)
+
+        expected_num_choices = self.block_selector.compute_num_choices(num_blocks)
+        if len(block_choices) == expected_num_choices:
+            return self.block_selector.expand_choices(block_choices, num_blocks)
+
+        raise ValueError(
+            f"block_choices length {len(block_choices)} does not match num_blocks "
+            f"{num_blocks} or compact length {expected_num_choices}"
+        )
+
     def _random_block_choices(self, num_blocks: int) -> List[int]:
-        """随机生成block选择（应用约束）"""
-        num_choices = self.block_selector.compute_num_choices(num_blocks)
-
+        """Randomly generate per-block choices with pair sharing after the first blocks."""
         if self.config is None:
-            # 无约束，使用全部22种block
-            return [random.randint(0, self.block_selector.NUM_BLOCK_TYPES - 1) for _ in range(num_choices)]
-
-        # 应用全局block约束
-        allowed_ids = self.config.search_space.blocks.allowed_block_ids
-        if allowed_ids is None:
             allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
+        else:
+            allowed_ids = self.config.search_space.blocks.allowed_block_ids
+            if allowed_ids is None:
+                allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
 
         if not allowed_ids:
             raise ValueError("No allowed block IDs in config")
 
-        return [random.choice(allowed_ids) for _ in range(num_choices)]
+        block_ids = []
+        num_individual = self.block_selector.NUM_INDIVIDUAL
+        group_size = self.block_selector.GROUP_SIZE
+        shared_choice = None
+
+        for i in range(num_blocks):
+            if i < num_individual:
+                block_ids.append(random.choice(allowed_ids))
+                continue
+
+            if (i - num_individual) % group_size == 0:
+                shared_choice = random.choice(allowed_ids)
+            block_ids.append(shared_choice)
+
+        return block_ids
 
     def _apply_stride_constraints(self, strides: List[int]) -> List[int]:
         """应用stride约束（first_layers_constraints）"""
