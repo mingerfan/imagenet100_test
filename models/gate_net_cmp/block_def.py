@@ -205,7 +205,7 @@ class BasicBlock(nn.Module):
 
         if in_channels != out_channels or stride != 1:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride, 0),
+                nn.Conv2d(in_channels, out_channels, 1, stride, 0, bias=False),
                 nn.BatchNorm2d(out_channels),
             )
 
@@ -251,7 +251,7 @@ class BottleneckBlock(nn.Module):
 
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride, 0),
+                nn.Conv2d(in_channels, out_channels, 1, stride, 0, bias=False),
                 nn.BatchNorm2d(out_channels),
             )
 
@@ -343,7 +343,7 @@ class BottleneckSelfGatedBlock(nn.Module):
         self.shortcut = nn.Identity()
         if in_channels != out_channels or stride != 1:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(out_channels),
             )
 
@@ -394,7 +394,7 @@ class BasicSelfGatedBlock(nn.Module):
         if in_channels != out_channels or stride != 1:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(
-                    in_channels, out_channels, kernel_size=1, stride=stride, padding=0
+                    in_channels, out_channels, kernel_size=1, stride=stride, padding=0, bias=False
                 ),
                 nn.BatchNorm2d(out_channels),
             )
