@@ -26,10 +26,21 @@ def _safe_conv_bn(conv, bn, x):
         return bn(conv(x))
     dtype = x.dtype
     if dtype in (torch.float16, torch.bfloat16):
+        conv_weight = getattr(conv, "weight", None)
+        bn_weight = getattr(bn, "weight", None)
+        conv_dtype = conv_weight.dtype if conv_weight is not None else dtype
+        bn_dtype = bn_weight.dtype if bn_weight is not None else conv_dtype
         device_type = "cuda" if x.is_cuda else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
-            y = conv(x.float())
-            y = bn(y)
+            if conv_dtype == torch.float32 and bn_dtype == torch.float32:
+                y = conv(x.float())
+                y = bn(y)
+            else:
+                x_work = x.to(conv_dtype) if x.dtype != conv_dtype else x
+                y = conv(x_work)
+                if y.dtype != bn_dtype:
+                    y = y.to(bn_dtype)
+                y = bn(y)
         max_val = torch.finfo(dtype).max
         y = torch.nan_to_num(y, nan=0.0, posinf=max_val, neginf=-max_val)
         y = torch.clamp(y, min=-max_val, max=max_val)
