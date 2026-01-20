@@ -214,6 +214,7 @@ class RandomNetworkGenerator:
         # Apply position-specific block constraints
         block_ids = self._apply_block_constraints(block_ids)
         block_ids = self._apply_poly4_tail_constraint(block_ids)
+        block_ids = self._apply_last_blocks_constraint(block_ids)
         block_choices = block_ids
 
         # 6. 选择初始CT数量并计算通道数
@@ -502,6 +503,21 @@ class RandomNetworkGenerator:
 
             idx = group_end + 1
 
+        return block_ids
+
+    def _apply_last_blocks_constraint(self, block_ids: List[int]) -> List[int]:
+        """Force the last two blocks to use block 7 (mbconv4_swish_se).
+        
+        Block 7 is MBConv4 + Swish + SE, which has been experimentally
+        shown to perform better at the end of the network.
+        """
+        if not block_ids or len(block_ids) < 2:
+            return block_ids
+        
+        block_ids = block_ids.copy()
+        # Force last two positions to block 7 (mbconv4_swish_se)
+        block_ids[-2] = 7
+        block_ids[-1] = 7
         return block_ids
 
     def _normalize_block_choices(self, block_choices: List[int], num_blocks: int) -> List[int]:

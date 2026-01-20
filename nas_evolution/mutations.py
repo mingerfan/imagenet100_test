@@ -98,6 +98,7 @@ class MutationOperator:
             self._mutate_initial_ct_count(config)
 
         self._enforce_tail_no_poly4(config)
+        self._enforce_last_blocks_constraint(config)
         self._sync_blocks_from_choices(config)
         return config
 
@@ -193,6 +194,20 @@ class MutationOperator:
                     block_choices[i] = new_block
             idx = group_end + 1
 
+        config.block_choices = block_choices
+
+    def _enforce_last_blocks_constraint(self, config) -> None:
+        """Force the last two blocks to use block 7 (mbconv4_swish_se).
+        
+        Block 7 is MBConv4 + Swish + SE, which has been experimentally
+        shown to perform better at the end of the network.
+        """
+        block_choices = self._ensure_block_choices(config)
+        if not block_choices or len(block_choices) < 2:
+            return
+        
+        block_choices[-2] = 7
+        block_choices[-1] = 7
         config.block_choices = block_choices
 
     def _mutate_stem(self, config):

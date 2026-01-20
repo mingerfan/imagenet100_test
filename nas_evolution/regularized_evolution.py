@@ -153,6 +153,10 @@ class RegularizedEvolution:
         self.logger.log_message(f"  Worst architectures: {len(stratified_sample['worst'])}")
         self.logger.log_message(f"  Total sampled: {len(stratified_sample['top']) + len(stratified_sample['middle']) + len(stratified_sample['worst'])}")
 
+        # Generate evolution statistics plots
+        self.logger.log_message("\nGenerating evolution statistics plots...")
+        self.logger.plot_evolution_stats()
+
         return best_individuals
 
     def _initialize_population(self):

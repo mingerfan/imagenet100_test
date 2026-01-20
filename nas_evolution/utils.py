@@ -7,7 +7,7 @@ import json
 import yaml
 import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List
 from types import SimpleNamespace
 
 
@@ -264,6 +264,148 @@ class EvolutionLogger:
             f.write(message)
 
         print(message)
+
+    def plot_evolution_stats(self):
+        """Plot evolution statistics and save to output directory
+        
+        Generates plots for:
+        - Fitness over generations (best, mean, worst)
+        - ZEN score progression
+        - FHE latency progression
+        - Parameter count distribution
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib
+            matplotlib.use('Agg')  # Non-interactive backend for saving
+        except ImportError:
+            print("Warning: matplotlib not available, skipping plot generation")
+            return
+        
+        if not self.stats_history:
+            print("No stats history available for plotting")
+            return
+        
+        # Create plots directory
+        plots_dir = os.path.join(self.output_dir, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Extract data from stats history
+        generations = [s['generation'] for s in self.stats_history]
+        best_fitness = [s['best_fitness'] for s in self.stats_history]
+        mean_fitness = [s['mean_fitness'] for s in self.stats_history]
+        worst_fitness = [s['worst_fitness'] for s in self.stats_history]
+        
+        # Extract best scores if available
+        zen_scores = []
+        fhe_latencies = []
+        params_list = []
+        fhe_boot_counts = []
+        
+        for s in self.stats_history:
+            if 'best_scores' in s:
+                zen_scores.append(s['best_scores'].get('zen_score', 0))
+                fhe_latencies.append(s['best_scores'].get('fhe_latency', 0))
+                params_list.append(s['best_scores'].get('params', 0))
+                fhe_boot_counts.append(s['best_scores'].get('fhe_boot_count', 0))
+        
+        # Set style
+        plt.style.use('seaborn-v0_8-whitegrid') if 'seaborn-v0_8-whitegrid' in plt.style.available else None
+        
+        # 1. Fitness progression plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(generations, best_fitness, 'g-', linewidth=2, label='Best Fitness', marker='o', markersize=3)
+        ax.plot(generations, mean_fitness, 'b-', linewidth=1.5, label='Mean Fitness', alpha=0.7)
+        ax.plot(generations, worst_fitness, 'r-', linewidth=1, label='Worst Fitness', alpha=0.5)
+        ax.fill_between(generations, worst_fitness, best_fitness, alpha=0.2, color='blue')
+        ax.set_xlabel('Generation', fontsize=12)
+        ax.set_ylabel('Fitness Score', fontsize=12)
+        ax.set_title('Evolution Fitness Progression', fontsize=14, fontweight='bold')
+        ax.legend(loc='lower right')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, 'fitness_progression.png'), dpi=150)
+        plt.close()
+        
+        # 2. ZEN Score progression (if available)
+        if zen_scores:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(generations[:len(zen_scores)], zen_scores, 'purple', linewidth=2, marker='o', markersize=3)
+            ax.set_xlabel('Generation', fontsize=12)
+            ax.set_ylabel('ZEN Score', fontsize=12)
+            ax.set_title('Best Architecture ZEN Score Progression', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(os.path.join(plots_dir, 'zen_score_progression.png'), dpi=150)
+            plt.close()
+        
+        # 3. FHE Latency progression (if available)
+        if fhe_latencies:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(generations[:len(fhe_latencies)], [l/1e6 for l in fhe_latencies], 'orange', linewidth=2, marker='o', markersize=3)
+            ax.set_xlabel('Generation', fontsize=12)
+            ax.set_ylabel('FHE Latency (×10⁶)', fontsize=12)
+            ax.set_title('Best Architecture FHE Latency Progression', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(os.path.join(plots_dir, 'fhe_latency_progression.png'), dpi=150)
+            plt.close()
+        
+        # 4. FHE Boot Count progression (if available)
+        if fhe_boot_counts:
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(generations[:len(fhe_boot_counts)], fhe_boot_counts, 'teal', linewidth=2, marker='o', markersize=3)
+            ax.set_xlabel('Generation', fontsize=12)
+            ax.set_ylabel('FHE Boot Count', fontsize=12)
+            ax.set_title('Best Architecture FHE Boot Count Progression', fontsize=14, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(os.path.join(plots_dir, 'fhe_boot_count_progression.png'), dpi=150)
+            plt.close()
+        
+        # 5. Combined metrics plot (2x2 subplots)
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        # Fitness
+        axes[0, 0].plot(generations, best_fitness, 'g-', linewidth=2, label='Best')
+        axes[0, 0].plot(generations, mean_fitness, 'b-', linewidth=1.5, label='Mean', alpha=0.7)
+        axes[0, 0].fill_between(generations, worst_fitness, best_fitness, alpha=0.2, color='blue')
+        axes[0, 0].set_xlabel('Generation')
+        axes[0, 0].set_ylabel('Fitness')
+        axes[0, 0].set_title('Fitness Progression')
+        axes[0, 0].legend(loc='lower right')
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # ZEN Score
+        if zen_scores:
+            axes[0, 1].plot(generations[:len(zen_scores)], zen_scores, 'purple', linewidth=2)
+            axes[0, 1].set_xlabel('Generation')
+            axes[0, 1].set_ylabel('ZEN Score')
+            axes[0, 1].set_title('ZEN Score (Best)')
+            axes[0, 1].grid(True, alpha=0.3)
+        
+        # FHE Latency
+        if fhe_latencies:
+            axes[1, 0].plot(generations[:len(fhe_latencies)], [l/1e6 for l in fhe_latencies], 'orange', linewidth=2)
+            axes[1, 0].set_xlabel('Generation')
+            axes[1, 0].set_ylabel('FHE Latency (×10⁶)')
+            axes[1, 0].set_title('FHE Latency (Best)')
+            axes[1, 0].grid(True, alpha=0.3)
+        
+        # Parameters
+        if params_list:
+            axes[1, 1].plot(generations[:len(params_list)], [p/1e6 for p in params_list], 'brown', linewidth=2)
+            axes[1, 1].set_xlabel('Generation')
+            axes[1, 1].set_ylabel('Parameters (M)')
+            axes[1, 1].set_title('Parameters (Best)')
+            axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.suptitle('Evolution Statistics Summary', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, 'evolution_summary.png'), dpi=150)
+        plt.close()
+        
+        print(f"Evolution plots saved to {plots_dir}")
 
 
 def save_best_architectures(best_individuals, output_dir: str):
