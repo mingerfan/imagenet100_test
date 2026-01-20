@@ -51,7 +51,18 @@ class RegularizedEvolution:
             diversity_quota=diversity_quota,
             latency_baseline=latency_baseline
         )
-        self.mutator = MutationOperator()
+        
+        # Load generator config to get allowed_block_ids
+        allowed_block_ids = None
+        if hasattr(config, 'network_config') and config.network_config:
+            try:
+                from network_gen.generator_config import GeneratorConfig
+                generator_config = GeneratorConfig.from_yaml(config.network_config)
+                allowed_block_ids = generator_config.search_space.blocks.allowed_block_ids
+            except Exception:
+                pass  # Use default (all blocks allowed)
+        
+        self.mutator = MutationOperator(allowed_block_ids=allowed_block_ids)
         self.evaluator = FitnessEvaluator(config)
         self.fitness_fn = ZenNASFitnessFunction(latency_baseline=latency_baseline)
 
@@ -161,7 +172,22 @@ class RegularizedEvolution:
 
     def _initialize_population(self):
         """Initialize population with random architectures"""
-        from network_gen import create_random_network
+        from network_gen.network_generator import RandomNetworkGenerator
+        from network_gen.generator_config import GeneratorConfig
+
+        # Load generator config if specified in evolution config
+        generator_config = None
+        if hasattr(self.config, 'network_config') and self.config.network_config:
+            try:
+                generator_config = GeneratorConfig.from_yaml(self.config.network_config)
+                self.logger.log_message(f"Loaded network config: {self.config.network_config}")
+                if generator_config.search_space.stride.allowed_block_counts:
+                    self.logger.log_message(f"  Allowed block counts: {generator_config.search_space.stride.allowed_block_counts}")
+            except Exception as e:
+                self.logger.log_message(f"Warning: Could not load network config: {e}")
+
+        # Create generator with config
+        generator = RandomNetworkGenerator(config=generator_config)
 
         self.logger.log_message(f"Generating {self.population_size} random architectures...")
 
@@ -169,8 +195,8 @@ class RegularizedEvolution:
             if (i + 1) % 10 == 0:
                 self.logger.log_message(f"  Progress: {i+1}/{self.population_size}")
 
-            # Generate random architecture
-            _, network_config = create_random_network()
+            # Generate random architecture using configured generator
+            network_config = generator.generate_random_config()
 
             # Evaluate
             scores = self.evaluator.evaluate(network_config)

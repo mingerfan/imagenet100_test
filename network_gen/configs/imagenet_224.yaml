@@ -44,7 +44,7 @@ search_space:
 
   # Stride配置
   stride:
-    allowed_block_counts: null           # null表示允许所有: [4, 6, 8, 10, 12, 14, 16]
+    allowed_block_counts: [10]           # 只允许10个block
     num_strides: 3                       # Body部分固定3次降分辨率 (56->28->14->7)
 
   # CT策略配置

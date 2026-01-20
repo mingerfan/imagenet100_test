@@ -1,0 +1,52 @@
+# ImageNet-100配置文件 (224x224输入) - MBConv风格
+# 只使用MBConv和GatedMBConv，排除BasicBlock
+
+name: "imagenet_224_mbconv_style"
+description: "ImageNet-100 with 224x224 input - MBConv-style blocks only (MBConv, GatedMBConv)"
+
+# 数据集配置
+dataset:
+  name: "imagenet"
+  num_classes: 100
+  input_size: 224
+
+# 搜索空间配置
+search_space:
+  # CT相关配置
+  ct_slots: 32768           # 每个CT的槽位数 (2^15)
+  initial_ct_count: 1       # 初始CT数量
+  initial_min_channels: 28  # 初始最少通道数
+  initial_max_channels: 96  # 初始最多通道数
+
+  # Stem层配置
+  stem:
+    enabled: true
+    allowed_codes: null     # 允许所有 [0-3]
+
+  # 第二次降分辨率配置
+  second_downsample:
+    enabled: true
+    allowed_codes: null     # 允许所有 [0-5]
+
+  # Block配置 - 只使用MBConv风格
+  # Block 0-3: MBConv1 (exp=1.0) 系列
+  # Block 4-7: MBConv4 (exp=4.0) 系列
+  # Block 8-11: GatedMBConv1 (exp=1.0) 系列
+  # Block 12-15: GatedMBConv4 (exp=4.0) 系列
+  blocks:
+    allowed_block_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    first_layers_constraints: null
+
+  # Stride配置 - 限制6个blocks
+  stride:
+    allowed_block_counts: [6]
+    num_strides: 3
+
+  # CT策略配置
+  ct_policies:
+    allowed: ["keep", "half"]
+
+# 输出配置
+output:
+  base_dir: "generated_networks/imagenet_224_mbconv"
+  save_format: "json"

@@ -214,7 +214,6 @@ class RandomNetworkGenerator:
         # Apply position-specific block constraints
         block_ids = self._apply_block_constraints(block_ids)
         block_ids = self._apply_poly4_tail_constraint(block_ids)
-        block_ids = self._apply_last_blocks_constraint(block_ids)
         block_choices = block_ids
 
         # 6. 选择初始CT数量并计算通道数

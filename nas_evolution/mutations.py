@@ -38,11 +38,13 @@ class MutationOperator:
         stem_downsample: int = 4,
         initial_min_channels: int = 16,
         initial_max_channels: Optional[int] = 64,
+        allowed_block_ids: Optional[List[int]] = None,
     ):
         """Initialize mutation operator
 
         Args:
             mutation_probs: Dict mapping mutation types to probabilities
+            allowed_block_ids: List of allowed block IDs (0-21), None means all allowed
         """
         self.probs = mutation_probs or {
             'block': 0.5,        # Mutate block type (most important)
@@ -66,6 +68,7 @@ class MutationOperator:
         self.initial_min_channels = initial_min_channels
         self.initial_max_channels = initial_max_channels
         self._channel_calculator = None
+        self.allowed_block_ids = allowed_block_ids  # None means all 22 blocks allowed
 
     def mutate(self, parent_config):
         """Apply random mutation to network config
@@ -98,7 +101,6 @@ class MutationOperator:
             self._mutate_initial_ct_count(config)
 
         self._enforce_tail_no_poly4(config)
-        self._enforce_last_blocks_constraint(config)
         self._sync_blocks_from_choices(config)
         return config
 
@@ -155,6 +157,8 @@ class MutationOperator:
                 block_config.block_id = config.block_choices[i]
 
     def _all_block_ids(self) -> List[int]:
+        if self.allowed_block_ids is not None:
+            return list(self.allowed_block_ids)
         return list(range(len(UNIFIED_BLOCKS)))
 
     def _is_poly4_block_id(self, block_id: int) -> bool:
