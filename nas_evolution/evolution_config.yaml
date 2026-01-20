@@ -17,7 +17,7 @@ network_config: "network_gen/configs/imagenet_224.yaml"
 evaluation:
   resolution: 224                # Input image resolution
   batch_size: 64                 # Batch size for evaluation
-  gpu: 0                         # GPU device ID
+  gpu: 1                         # GPU device ID
   use_dataloader: false          # Use random input instead of dataloader
 
 # Fitness Function
