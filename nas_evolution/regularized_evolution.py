@@ -52,17 +52,37 @@ class RegularizedEvolution:
             latency_baseline=latency_baseline
         )
         
-        # Load generator config to get allowed_block_ids
+        # Load generator config to get search space parameters
         allowed_block_ids = None
+        ct_slots = 32768
+        input_size = 224
+        stem_downsample = 4
+        initial_min_channels = 16
+        initial_max_channels = 64
+        
         if hasattr(config, 'network_config') and config.network_config:
             try:
                 from network_gen.generator_config import GeneratorConfig
                 generator_config = GeneratorConfig.from_yaml(config.network_config)
-                allowed_block_ids = generator_config.search_space.blocks.allowed_block_ids
+                search_space = generator_config.search_space
+                allowed_block_ids = search_space.blocks.allowed_block_ids
+                ct_slots = getattr(search_space, 'ct_slots', ct_slots)
+                initial_min_channels = getattr(search_space, 'initial_min_channels', initial_min_channels)
+                initial_max_channels = getattr(search_space, 'initial_max_channels', initial_max_channels)
+                # Get input size from dataset config
+                if hasattr(generator_config, 'dataset'):
+                    input_size = getattr(generator_config.dataset, 'input_size', input_size)
             except Exception:
-                pass  # Use default (all blocks allowed)
+                pass  # Use defaults
         
-        self.mutator = MutationOperator(allowed_block_ids=allowed_block_ids)
+        self.mutator = MutationOperator(
+            allowed_block_ids=allowed_block_ids,
+            ct_slots=ct_slots,
+            input_size=input_size,
+            stem_downsample=stem_downsample,
+            initial_min_channels=initial_min_channels,
+            initial_max_channels=initial_max_channels,
+        )
         self.evaluator = FitnessEvaluator(config)
         self.fitness_fn = ZenNASFitnessFunction(latency_baseline=latency_baseline)
 
