@@ -457,21 +457,50 @@ class RandomNetworkGenerator:
         return [block_id for block_id in allowed_ids if not self._is_poly4_block_id(block_id)]
 
     def _apply_poly4_tail_constraint(self, block_ids: List[int]) -> List[int]:
+        """Apply poly4 tail constraint respecting group sharing."""
         if not block_ids:
             return block_ids
 
-        start_idx = len(block_ids) // 2
+        num_blocks = len(block_ids)
+        tail_start = num_blocks // 2
         block_ids = block_ids.copy()
+        num_individual = self.block_selector.NUM_INDIVIDUAL
+        group_size = self.block_selector.GROUP_SIZE
 
-        for i in range(start_idx, len(block_ids)):
-            if self._is_poly4_block_id(block_ids[i]):
-                allowed_ids = self._get_allowed_block_ids(position=i)
-                allowed_ids = self._filter_non_poly4_block_ids(allowed_ids)
-                if not allowed_ids:
-                    raise ValueError(
-                        f"No non-poly4 block IDs available for position {i} in tail constraint"
-                    )
-                block_ids[i] = random.choice(allowed_ids)
+        # Process by groups to maintain sharing consistency
+        idx = 0
+        while idx < num_blocks:
+            # Determine group bounds
+            if idx < num_individual:
+                group_start, group_end = idx, idx
+            else:
+                group_idx = (idx - num_individual) // group_size
+                group_start = num_individual + (group_idx * group_size)
+                group_end = min(group_start + group_size - 1, num_blocks - 1)
+
+            # Check if this group is in tail (any part of group >= tail_start)
+            group_in_tail = group_end >= tail_start
+
+            if group_in_tail:
+                # Check if any block in the group is poly4
+                has_poly4 = any(
+                    self._is_poly4_block_id(block_ids[i])
+                    for i in range(group_start, group_end + 1)
+                )
+                if has_poly4:
+                    # Get allowed non-poly4 IDs for this group
+                    allowed_ids = self._get_allowed_block_ids(position=group_start)
+                    allowed_ids = self._filter_non_poly4_block_ids(allowed_ids)
+                    if not allowed_ids:
+                        raise ValueError(
+                            f"No non-poly4 block IDs available for positions {group_start}-{group_end} in tail constraint"
+                        )
+                    # Replace all positions in the group with the same non-poly4 block
+                    new_block = random.choice(allowed_ids)
+                    for i in range(group_start, group_end + 1):
+                        block_ids[i] = new_block
+
+            idx = group_end + 1
 
         return block_ids
 
