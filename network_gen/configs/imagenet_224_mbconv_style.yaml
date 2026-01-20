@@ -37,7 +37,7 @@ search_space:
     allowed_block_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     first_layers_constraints: null
 
-  # Stride配置 - 限制6个blocks
+  # Stride配置 - 限制6个或者8个blocks
   stride:
     allowed_block_counts: [6, 8]
     num_strides: 3
