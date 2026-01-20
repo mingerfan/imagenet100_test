@@ -82,19 +82,83 @@ nas_results/
 }
 ```
 
+## 网络配置选项
+
+系统现在支持多种网络配置，可通过 `--network_config` 参数灵活选择：
+
+### 配置文件
+
+1. **imagenet_224.yaml** （默认）
+   - 块数量：10
+   - 支持块类型：所有类型（0-21）
+   - 用途：通用架构搜索，包含所有块类型
+
+2. **imagenet_224_resnet_style.yaml**（新增）
+   - 块数量：10  
+   - 支持块类型：ResNet风格块（16-21）
+   - 用途：在FHE中文化限制下，只使用ResNet友好的块
+
+3. **imagenet_224_mbconv_style.yaml**（新增）
+   - 块数量：6
+   - 支持块类型：MBConv风格块（0-15）
+   - 用途：在FHE优化下，只使用MBConv块进行轻量化搜索
+
+### 约束条件说明
+
+#### Poly4激活函数约束
+- Poly4块**只能**出现在网络的前50%
+- 约束采用**分组感知**方式：位置4及以后的块成对共享，替换时整组替换
+- 自动在所有生成的网络中强制执行
+
+#### 分组共享一致性
+- 位置0-3：独立块选择
+- 位置4-9：成对共享（[4,5]必须相同，[6,7]必须相同，[8,9]必须相同）
+- 突变操作自动维护这些一致性
+
+#### 块类型过滤（allowed_block_ids）
+- ResNet风格配置：仅允许块 16-21（ResNet块，无激活裁剪）
+- MBConv风格配置：仅允许块 0-15（MBConv块，支持激活裁剪）
+- 突变算子尊重这些限制，生成的架构始终合法
+
 ## 使用方法
 
 ### 1. 运行进化搜索
 
 ```bash
-# 小规模测试 (population=10, generations=5)
+# 小规模测试，使用默认配置 (population=10, generations=5)
 uv run python nas_evolution/run_evolution.py --config nas_evolution/evolution_config_test.yaml
 
-# 完整搜索 (population=200, generations=100)
+# 完整搜索，使用默认配置 (population=200, generations=100)
 uv run python nas_evolution/run_evolution.py --config nas_evolution/evolution_config.yaml
+
+# 使用特定网络配置进行搜索
+# ResNet风格（10块，块类型16-21）
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --network_config network_gen/configs/imagenet_224_resnet_style.yaml
+
+# MBConv风格（6块，块类型0-15）
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --network_config network_gen/configs/imagenet_224_mbconv_style.yaml
 ```
 
-### 2. 分析采样结果
+### 2. 进化统计可视化
+
+进化搜索运行完成后，系统自动生成可视化图表保存在 `nas_results/<run_name>/plots/` 目录：
+
+```
+nas_results/<run_name>/plots/
+├── fitness_progression.png          # Fitness随代数进化曲线
+├── zen_score_progression.png        # ZEN分数随代数进化曲线
+├── fhe_latency_progression.png      # FHE延迟随代数进化曲线
+├── fhe_boot_count_progression.png   # FHE启动次数随代数进化曲线
+└── evolution_summary.png            # 2×2总结图（所有指标一览）
+```
+
+这些图表帮助了解进化过程中的性能改进轨迹。
+
+### 3. 分析采样结果
 
 ```bash
 # 分析统计信息并生成可视化
@@ -107,7 +171,7 @@ uv run python nas_evolution/analyze_sampling.py nas_results/<run_name>
 - `stratified_sampling_scatter.png`: Fitness vs 其他指标的散点图
 - `architectures_for_training.json`: 所有45个架构的配置（用于训练）
 
-### 3. 训练和评估架构
+### 4. 训练和评估架构
 
 使用 `architectures_for_training.json` 中的配置重建模型并训练：
 
@@ -187,15 +251,45 @@ for arch in architectures:
 
 ## 配置参数
 
-可以在 `regularized_evolution.py` 中修改采样数量：
+### 进化搜索参数
 
-```python
-# 在 run() 方法中
-stratified_sample = self._get_stratified_sample(
-    top_k=15,      # 修改top架构数量
-    middle_k=15,   # 修改middle架构数量
-    worst_k=15     # 修改worst架构数量
-)
+可以在 `evolution_config.yaml` 中修改采样参数：
+
+```yaml
+# 分层采样配置
+stratified_sampling:
+  top_k: 15          # Top架构数量
+  middle_k: 15       # Middle架构数量  
+  worst_k: 15        # Worst架构数量
+  # top_k 不适用于middle/worst（它们是随机采样的）
+
+# 网络生成配置
+network_config: network_gen/configs/imagenet_224.yaml  # 默认配置
+```
+
+### 运行时覆盖参数
+
+使用CLI参数覆盖配置文件中的设置：
+
+```bash
+# 覆盖网络配置
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --network_config network_gen/configs/imagenet_224_mbconv_style.yaml
+```
+
+### 块类型配置
+
+在网络配置YAML中定义：
+
+```yaml
+# network_gen/configs/imagenet_224_resnet_style.yaml
+block_count: 10
+allowed_block_ids: [16, 17, 18, 19, 20, 21]  # ResNet风格块
+
+# network_gen/configs/imagenet_224_mbconv_style.yaml  
+block_count: 6
+allowed_block_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # MBConv块
 ```
 
 ## 注意事项
@@ -213,12 +307,25 @@ stratified_sample = self._get_stratified_sample(
    - fitness值越高越好（负值较小表示更好）
    - fitness = Σ log(Rank(metric)/m)，惩罚任何弱维度
 
+4. **块约束说明**
+   - Poly4约束：自动在所有网络中执行，无需手动配置
+   - 块类型过滤：通过 `allowed_block_ids` 配置，在生成和突变时强制执行
+   - 分组共享：自动维护位置4+的块对一致性
+
+5. **可视化生成**
+   - 图表自动保存到 `nas_results/<run_name>/plots/`
+   - 需要 matplotlib 库（通常预装）
+   - 若matplotlib不可用，演化继续进行但不生成图表
+
 ## 相关文件
 
-- `regularized_evolution.py`: 主进化算法，包含 `_get_stratified_sample()` 方法
-- `utils.py`: 保存功能，包含 `save_sampled_architectures()` 函数
-- `analyze_sampling.py`: 分析脚本，生成统计和可视化
-- `evolution_config.yaml`: 配置文件
+- `regularized_evolution.py`: 主进化算法，包含 `_get_stratified_sample()` 方法、配置加载和可视化生成
+- `mutations.py`: 突变算子，现在支持 `allowed_block_ids` 参数用于块类型过滤
+- `network_generator.py`: 网络生成器，实现Poly4约束和分组共享一致性
+- `utils.py`: 包含 `EvolutionLogger` 类的 `plot_evolution_stats()` 方法，生成进化统计图表
+- `analyze_sampling.py`: 分析脚本，生成采样统计和可视化
+- `evolution_config.yaml`: 主进化配置文件
+- `network_gen/configs/imagenet_224*.yaml`: 网络配置文件（3个配置选项）
 
 ## 参考
 

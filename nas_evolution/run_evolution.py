@@ -75,6 +75,13 @@ def parse_args():
         help='Override number of generations from config'
     )
 
+    parser.add_argument(
+        '--network_config',
+        type=str,
+        default=None,
+        help='Override network configuration file (e.g., network_gen/configs/imagenet_224_resnet_style.yaml)'
+    )
+
     return parser.parse_args()
 
 
@@ -100,6 +107,9 @@ def main():
         config.search.population_size = args.population_size
     if args.num_generations:
         config.search.num_generations = args.num_generations
+    if args.network_config:
+        config.network_config = args.network_config
+        print(f"Overriding network config: {args.network_config}")
 
     # Create output directory
     os.makedirs(config.logging.output_dir, exist_ok=True)
