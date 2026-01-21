@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from .base_trainer import Trainer
 from models import get_model
 from data import create_dataloaders
+from utils import set_random_seed
 from typing import List, Dict, Optional
 import threading
 import queue
@@ -73,7 +74,8 @@ class MultiGPUManager:
         use_memory_fs: bool = True,
         dataset: str = "imagenet100",
         download: bool = False,
-        input_size: Optional[int] = None
+        input_size: Optional[int] = None,
+        seed: Optional[int] = 42
     ):
         """
         初始化多GPU管理器
@@ -108,6 +110,9 @@ class MultiGPUManager:
         self.dataset = dataset
         self.download = download
         self.input_size = input_size
+        self.seed = seed
+
+        set_random_seed(self.seed)
         
         # 创建结果目录
         import os
@@ -210,7 +215,8 @@ class MultiGPUManager:
             use_memory_fs=self.use_memory_fs,
             dataset=self.dataset,
             download=self.download,
-            input_size=self.input_size
+            input_size=self.input_size,
+            seed=self.seed
         )
         
         # 创建模型

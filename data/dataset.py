@@ -4,10 +4,16 @@
 可选使用内存文件系统加速（ImageFolder类数据集）
 """
 
+import random
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from .memory_fs import create_memory_fs_manager
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - optional dependency
+    np = None
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
@@ -188,7 +194,8 @@ def create_dataloaders(
     use_memory_fs=False,
     dataset="imagenet100",
     download=False,
-    input_size=None
+    input_size=None,
+    seed=None
 ):
     """
     创建训练和验证数据加载器
@@ -316,6 +323,20 @@ def create_dataloaders(
     print(f"  Worker数量: {num_workers}")
     print(f"  内存固定: {pin_memory}")
     
+    generator = None
+    worker_init_fn = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+
+        def _seed_worker(worker_id):
+            worker_seed = torch.initial_seed() % 2**32
+            random.seed(worker_seed)
+            if np is not None:
+                np.random.seed(worker_seed)
+
+        worker_init_fn = _seed_worker
+
     persistent_workers = num_workers > 0
     train_loader = DataLoader(
         train_dataset,
@@ -324,7 +345,9 @@ def create_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        drop_last=True
+        drop_last=True,
+        worker_init_fn=worker_init_fn,
+        generator=generator
     )
 
     val_loader = DataLoader(
@@ -333,7 +356,9 @@ def create_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        persistent_workers=persistent_workers
+        persistent_workers=persistent_workers,
+        worker_init_fn=worker_init_fn,
+        generator=generator
     )
     
     print(f"\n  训练批次数: {len(train_loader)}")

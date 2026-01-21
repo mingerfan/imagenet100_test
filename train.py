@@ -7,7 +7,7 @@ import argparse
 import os
 import sys
 from trainers import MultiGPUManager
-from utils import load_config, get_model_configs
+from utils import load_config, get_model_configs, set_random_seed
 from models import MODEL_REGISTRY
 from data import get_dataset_info, normalize_dataset_name
 
@@ -121,12 +121,20 @@ def parse_args():
         help='数据加载worker数量'
     )
     
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Random seed'
+    )
+
     return parser.parse_args()
 
 
 def main():
     """主函数"""
     args = parse_args()
+    set_random_seed(args.seed)
 
     dataset_name = normalize_dataset_name(args.dataset)
     dataset_info = get_dataset_info(dataset_name)
@@ -218,7 +226,8 @@ def main():
         use_memory_fs=args.use_memory_fs,
         dataset=dataset_name,
         download=args.download,
-        input_size=args.input_size
+        input_size=args.input_size,
+        seed=args.seed
     )
     
     # 训练模型

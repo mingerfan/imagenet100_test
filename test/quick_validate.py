@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from models import get_model, MODEL_REGISTRY
-from utils import load_config, get_model_configs
+from utils import load_config, get_model_configs, set_random_seed
 from data import create_dataloaders
 
 
@@ -138,6 +138,8 @@ def parse_args():
     )
 
     parser.add_argument("--use_cache", action="store_true", help="使用内存缓存数据集")
+
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     return parser.parse_args()
 
@@ -307,6 +309,7 @@ def quick_validate(args):
             batch_size=args.batch_size,
             num_workers=4,
             pin_memory=True,
+            seed=args.seed,
         )
         print(f"✓ 训练集加载器创建成功")
         print(f"  批次大小: {args.batch_size}")
@@ -404,6 +407,7 @@ def quick_validate(args):
 def main():
     """主函数"""
     args = parse_args()
+    set_random_seed(args.seed)
 
     success = quick_validate(args)
     sys.exit(0 if success else 1)

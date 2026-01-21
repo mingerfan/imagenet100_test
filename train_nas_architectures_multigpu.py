@@ -26,6 +26,7 @@ from network_gen.network_config import NetworkConfig
 from trainers import Trainer
 from trainers.multi_gpu_manager import create_smart_optimizer
 from data import create_dataloaders, get_dataset_info, normalize_dataset_name
+from utils import set_random_seed
 
 
 def load_nas_architectures(nas_result_dir: str):
@@ -87,7 +88,8 @@ def train_architecture_worker(arch_info, gpu_id, args, result_queue):
             use_memory_fs=args.use_memory_fs,
             dataset=args.dataset,
             download=args.download,
-            input_size=args.input_size
+            input_size=args.input_size,
+            seed=args.seed
         )
 
         # Create model from config
@@ -308,11 +310,14 @@ def parse_args():
     parser.add_argument('--max_per_category', type=int, default=None,
                        help='Maximum architectures per category')
 
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    set_random_seed(args.seed)
 
     print("="*80)
     print("Multi-GPU NAS Architecture Training")
