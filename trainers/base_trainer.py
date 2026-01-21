@@ -30,6 +30,7 @@ class Trainer:
         scheduler=None,
         use_amp=True,
         save_freq=10,
+        save_checkpoints=True,
         grad_clip_max_norm=1.0,
         poly4_warmup_ratio=0.5,
         nan_debug=False
@@ -64,6 +65,7 @@ class Trainer:
         self.scheduler = scheduler
         self.use_amp = use_amp
         self.save_freq = save_freq
+        self.save_checkpoints = save_checkpoints
         self.grad_clip_max_norm = grad_clip_max_norm
         self.poly4_warmup_ratio = poly4_warmup_ratio
         self.nan_debug = nan_debug
@@ -357,6 +359,8 @@ class Trainer:
             is_best: 是否为最佳模型
             filename: 保存文件名（可选）
         """
+        if not self.save_checkpoints:
+            return
         if filename is None:
             filename = f'checkpoint_epoch_{epoch}.pth'
         
@@ -450,11 +454,13 @@ class Trainer:
                 # 保存最佳模型
                 if val_acc > self.best_acc:
                     self.best_acc = val_acc
-                    self.save_checkpoint(epoch, is_best=True)
+                    if self.save_checkpoints:
+                        self.save_checkpoint(epoch, is_best=True)
                 
                 # 定期保存检查点
-                if epoch % self.save_freq == 0:
-                    self.save_checkpoint(epoch, is_best=False)
+                if self.save_checkpoints and self.save_freq and self.save_freq > 0:
+                    if epoch % self.save_freq == 0:
+                        self.save_checkpoint(epoch, is_best=False)
                 
                 # 保存历史
                 self.save_history()

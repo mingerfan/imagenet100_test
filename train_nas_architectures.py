@@ -24,7 +24,7 @@ from network_gen.network_config import NetworkConfig
 from trainers import Trainer
 from trainers.multi_gpu_manager import create_smart_optimizer
 from data import create_dataloaders, get_dataset_info, normalize_dataset_name
-from utils import set_random_seed
+from utils import set_random_seed, load_config
 
 
 def load_nas_architectures(nas_result_dir: str):
@@ -133,6 +133,7 @@ def train_architecture(arch_info, train_loader, val_loader, result_dir, device, 
         scheduler=scheduler,
         use_amp=args.use_amp,
         save_freq=args.save_freq,
+        save_checkpoints=args.save_checkpoints,
         grad_clip_max_norm=1.0
     )
 
@@ -227,8 +228,43 @@ def save_results(results, nas_result_dir):
     print(f"✓ Summary saved to: {json_path}")
 
 
+def _coerce_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+
+def apply_yaml_config(args):
+    if not args.config:
+        return
+    if not os.path.exists(args.config):
+        print(f"Warning: config file not found: {args.config}")
+        return
+    config = load_config(args.config) or {}
+    if not isinstance(config, dict):
+        print("Warning: config is not a mapping; ignoring.")
+        return
+    training_config = config.get("training", config)
+    if not isinstance(training_config, dict):
+        print("Warning: training config is not a mapping; ignoring.")
+        return
+    if "save_checkpoints" in training_config and "--no_checkpoint" not in sys.argv:
+        args.save_checkpoints = _coerce_bool(training_config.get("save_checkpoints"))
+    if "save_freq" in training_config and "--save_freq" not in sys.argv:
+        try:
+            args.save_freq = int(training_config.get("save_freq"))
+        except (TypeError, ValueError):
+            print("Warning: invalid save_freq in config; using CLI/default.")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train NAS architectures')
+
+    # Config
+    parser.add_argument('--config', type=str, default=None,
+                       help='Optional YAML config file')
 
     # Dataset settings
     parser.add_argument('--dataset', type=str, default='imagenet100',
@@ -271,6 +307,9 @@ def parse_args():
     # Save settings
     parser.add_argument('--save_freq', type=int, default=10,
                        help='Save checkpoint every N epochs')
+    parser.add_argument('--no_checkpoint', dest='save_checkpoints', action='store_false',
+                       help='Disable checkpoint saving')
+    parser.set_defaults(save_checkpoints=True)
 
     # Selection
     parser.add_argument('--categories', type=str, nargs='+',
@@ -286,6 +325,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    apply_yaml_config(args)
     set_random_seed(args.seed)
 
     print("="*80)
