@@ -11,6 +11,27 @@ global:
 
 # 需要训练的模型列表（显式指定）
 models:
+  # Baselines
+  - name: "resnet18"
+    class: "resnet18"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 60
+    batch_size: 128
+    learning_rate: 0.001
+    num_workers: 8
+
+  - name: "efficientnet-b0"
+    class: "efficientnet-b0"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 60
+    batch_size: 128
+    learning_rate: 0.001
+    num_workers: 8
+
   # ResNet18
   - name: "resnet-basic-relu-layer1block1"
     class: "resnet-basic-relu-layer1block1"
