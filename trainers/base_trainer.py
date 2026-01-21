@@ -268,7 +268,11 @@ class Trainer:
             device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
             with autocast(device_type=device_type):
                 outputs = self.model(images)
-                loss = self.criterion(outputs, labels)
+                # 重要：将 outputs 转为 float32 再计算 loss
+                # 在 1000 类分类任务中，float16 的 log_softmax 容易溢出
+                # 因为 exp(logit) 在 logit > 11 时就会变成 inf
+                outputs_fp32 = outputs.float()
+                loss = self.criterion(outputs_fp32, labels)
 
             if self.nan_debug and not self._nan_debug_running:
                 if self._find_nonfinite_tensor(outputs) is not None:
@@ -345,14 +349,28 @@ class Trainer:
                 device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
                 with autocast(device_type=device_type):
                     outputs = self.model(images)
-                    loss = self.criterion(outputs, labels)
+                
+                # 重要：将 outputs 转回 float32 再计算 loss
+                # AMP 下 outputs 可能是 float16，大的 logits 值会导致 log_softmax 溢出
+                outputs_fp32 = outputs.float()
+                loss = self.criterion(outputs_fp32, labels)
                 
                 # Check for NaN/Inf in loss and outputs
                 loss_value = loss.item()
                 if not torch.isfinite(loss).all() or not torch.isfinite(outputs).all():
+                    # 详细诊断信息
+                    out_min = outputs.min().item() if torch.isfinite(outputs.min()) else float('nan')
+                    out_max = outputs.max().item() if torch.isfinite(outputs.max()) else float('nan')
+                    nan_count = (~torch.isfinite(outputs)).sum().item()
                     print(f"\n⚠ Warning: Non-finite values detected in validation!")
-                    print(f"  Loss: {loss_value}, Output range: [{outputs.min().item():.2f}, {outputs.max().item():.2f}]")
-                    # Skip this batch
+                    print(f"  Loss: {loss_value}")
+                    print(f"  Output stats: min={out_min:.2f}, max={out_max:.2f}, nan_count={nan_count}/{outputs.numel()}")
+                    # Skip this batch but count towards total for acc
+                    _, predicted = outputs.max(1)
+                    # 只有当 outputs 完全是 finite 时才计算 accuracy
+                    if torch.isfinite(outputs).all():
+                        total += labels.size(0)
+                        correct += predicted.eq(labels).sum().item()
                     continue
                 
                 total_loss += loss_value

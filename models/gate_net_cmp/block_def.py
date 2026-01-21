@@ -16,7 +16,11 @@ def _safe_gated_mul(feat, gate):
         prod = torch.nan_to_num(prod, nan=0.0, posinf=max_val, neginf=-max_val)
         prod = torch.clamp(prod, min=-max_val, max=max_val)
         return prod.to(dtype)
-    return feat * gate
+    # float32 也需要保护，防止 inf/nan 传播
+    prod = feat * gate
+    prod = torch.nan_to_num(prod, nan=0.0, posinf=1e6, neginf=-1e6)
+    prod = torch.clamp(prod, min=-1e6, max=1e6)
+    return prod
 
 
 def _safe_conv_bn(conv, bn, x):
@@ -45,7 +49,11 @@ def _safe_conv_bn(conv, bn, x):
         y = torch.nan_to_num(y, nan=0.0, posinf=max_val, neginf=-max_val)
         y = torch.clamp(y, min=-max_val, max=max_val)
         return y.to(dtype)
-    return bn(conv(x))
+    # float32 也需要保护
+    y = bn(conv(x))
+    y = torch.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
+    y = torch.clamp(y, min=-1e6, max=1e6)
+    return y
 
 
 class Activation(nn.Module):
@@ -187,9 +195,14 @@ class StablePoly4(nn.Module):
         out = (1 - alpha) * swish_out + alpha * poly_out
 
         out = out * self.output_scale
+        
+        # 始终检查并处理 NaN/Inf，防止数值不稳定传播
+        # 先 clamp 到合理范围，再处理可能的 NaN
+        out = torch.clamp(out, min=-100.0, max=100.0)
+        out = torch.nan_to_num(out, nan=0.0, posinf=100.0, neginf=-100.0)
+        
         if out.dtype != orig_dtype:
             max_val = torch.finfo(orig_dtype).max
-            out = torch.nan_to_num(out, nan=0.0, posinf=max_val, neginf=-max_val)
             out = torch.clamp(out, min=-max_val, max=max_val)
             out = out.to(orig_dtype)
         return out
