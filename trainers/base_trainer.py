@@ -409,8 +409,6 @@ class Trainer:
         """
         if not self.save_checkpoints:
             return
-        if filename is None:
-            filename = f'checkpoint_epoch_{epoch}.pth'
         
         checkpoint = {
             'epoch': epoch,
@@ -421,13 +419,18 @@ class Trainer:
             'history': self.history
         }
         
-        save_path = os.path.join(self.result_dir, filename)
-        torch.save(checkpoint, save_path)
-        
         if is_best:
+            # 只保存best_model.pth
             best_path = os.path.join(self.result_dir, 'best_model.pth')
             torch.save(checkpoint, best_path)
-            print(f"  ✓ 新的最佳准确率: {self.best_acc:.2f}% - 已保存到 {best_path}")
+            print(f"  ✓ 新的最佳准确率: {self.best_acc:.2f}% - 已保存到 best_model.pth")
+        else:
+            # 定期保存checkpoint
+            if filename is None:
+                filename = f'checkpoint_epoch_{epoch}.pth'
+            save_path = os.path.join(self.result_dir, filename)
+            torch.save(checkpoint, save_path)
+            print(f"  ✓ 保存检查点: {filename}")
     
     def save_history(self):
         """保存训练历史到CSV"""
@@ -517,14 +520,15 @@ class Trainer:
                     print(f"{'='*60}")
                 
                 # 保存最佳模型
-                if val_acc > self.best_acc:
+                is_new_best = val_acc > self.best_acc
+                if is_new_best:
                     self.best_acc = val_acc
                     if self.save_checkpoints:
                         self.save_checkpoint(epoch, is_best=True)
                 
-                # 定期保存检查点
+                # 定期保存检查点（如果不是当前epoch的最佳模型）
                 if self.save_checkpoints and self.save_freq and self.save_freq > 0:
-                    if epoch % self.save_freq == 0:
+                    if epoch % self.save_freq == 0 and not is_new_best:
                         self.save_checkpoint(epoch, is_best=False)
                 
                 # 保存历史
