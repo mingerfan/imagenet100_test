@@ -293,16 +293,28 @@ class Trainer:
                 self.optimizer.step()
             
             # 统计
-            total_loss += loss.item()
+            loss_value = loss.item()
+            
+            # Check for NaN in training
+            if not torch.isfinite(torch.tensor(loss_value)):
+                print(f"\n⚠ Warning: Non-finite loss in training batch! Skipping...")
+                continue
+            
+            total_loss += loss_value
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
             
             # 更新进度条
             pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
+                'loss': f'{loss_value:.4f}',
                 'acc': f'{100. * correct / total:.2f}%'
             })
+        
+        # Safety check
+        if total == 0:
+            print("\n⚠ Warning: No valid training samples!")
+            return float('inf'), 0.0
         
         avg_loss = total_loss / len(self.train_loader)
         avg_acc = 100. * correct / total
@@ -335,7 +347,15 @@ class Trainer:
                     outputs = self.model(images)
                     loss = self.criterion(outputs, labels)
                 
-                total_loss += loss.item()
+                # Check for NaN/Inf in loss and outputs
+                loss_value = loss.item()
+                if not torch.isfinite(loss).all() or not torch.isfinite(outputs).all():
+                    print(f"\n⚠ Warning: Non-finite values detected in validation!")
+                    print(f"  Loss: {loss_value}, Output range: [{outputs.min().item():.2f}, {outputs.max().item():.2f}]")
+                    # Skip this batch
+                    continue
+                
+                total_loss += loss_value
                 _, predicted = outputs.max(1)
                 total += labels.size(0)
                 correct += predicted.eq(labels).sum().item()
@@ -345,8 +365,18 @@ class Trainer:
                     'acc': f'{100. * correct / total:.2f}%'
                 })
         
+        # Safety check: ensure we have valid data
+        if total == 0:
+            print("\n⚠ Warning: No valid samples in validation!")
+            return float('inf'), 0.0
+        
         avg_loss = total_loss / len(self.val_loader)
         avg_acc = 100. * correct / total
+        
+        # Final NaN check
+        if not torch.isfinite(torch.tensor(avg_loss)):
+            print(f"\n⚠ Warning: avg_loss is NaN/Inf! Setting to inf.")
+            avg_loss = float('inf')
         
         return avg_loss, avg_acc
     
@@ -447,9 +477,26 @@ class Trainer:
                 
                 # 打印结果
                 print(f"\nEpoch [{epoch}/{self.epochs}] - {epoch_time:.2f}s")
-                print(f"  训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
-                print(f"  验证 - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
+                if torch.isfinite(torch.tensor(train_loss)):
+                    print(f"  训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
+                else:
+                    print(f"  训练 - Loss: NaN/Inf, Acc: {train_acc:.2f}%")
+                if torch.isfinite(torch.tensor(val_loss)):
+                    print(f"  验证 - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%")
+                else:
+                    print(f"  验证 - Loss: NaN/Inf, Acc: {val_acc:.2f}%")
                 print(f"  学习率: {current_lr:.6f}")
+                
+                # 如果第一个epoch就出现NaN，警告用户
+                if epoch == 1 and not torch.isfinite(torch.tensor(val_loss)):
+                    print(f"\n{'='*60}")
+                    print("⚠ 警告: 第一个epoch验证loss为NaN！")
+                    print("可能原因：")
+                    print("  1. 模型初始化不当，输出值过大")
+                    print("  2. 学习率过高导致梯度爆炸")
+                    print("  3. 架构本身不稳定")
+                    print("建议: 考虑降低学习率或检查模型架构")
+                    print(f"{'='*60}")
                 
                 # 保存最佳模型
                 if val_acc > self.best_acc:
