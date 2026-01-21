@@ -508,11 +508,18 @@ def main():
     print("Training Complete")
     print(f"{'='*80}")
 
-    print(f"\nSuccessfully trained: {len(results)}/{total_tasks}")
+    success_count = len(results)
+    error_count = len(errors)
+    
+    print(f"\n总计: {total_tasks} 个架构")
+    print(f"  ✓ 成功: {success_count}")
+    print(f"  ✗ 失败: {error_count}")
+    
     if errors:
-        print(f"Errors: {len(errors)}")
+        print(f"\n训练失败的架构:")
         for err in errors:
-            print(f"  - {err['category']}/{err['arch_id']}")
+            print(f"  ✗ {err['category']}/{err['arch_id']}")
+            print(f"     错误: {err['error'][:100]}...")  # 截断长错误信息
 
     if results:
         save_results(results, args.nas_results)
@@ -530,6 +537,8 @@ def main():
         print("  - training_results.csv: Detailed results")
         print("  - training_summary.json: Summary statistics")
         print(f"  - trained_models/: Model checkpoints and logs")
+    else:
+        print("\n⚠ 没有成功训练的架构，跳过结果保存")
 
 
 if __name__ == '__main__':

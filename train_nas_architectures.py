@@ -422,30 +422,59 @@ def main():
     print(f"\n{'='*80}")
     print(f"Starting training: {len(architectures)} architectures")
     print(f"{'='*80}")
+    
+    if not args.save_checkpoints:
+        print("⚠ Checkpoint saving disabled (only best model will be saved)\n")
 
     results = []
+    failed = []
     for i, arch_info in enumerate(architectures, 1):
-        print(f"\n[{i}/{len(architectures)}] {arch_info['category']}/{arch_info['arch_id']}")
+        arch_name = f"{arch_info['category']}/{arch_info['arch_id']}"
+        print(f"\n[{i}/{len(architectures)}] {arch_name}")
 
-        result = train_architecture(
-            arch_info=arch_info,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            result_dir=result_dir,
-            device=device,
-            args=args
-        )
+        try:
+            result = train_architecture(
+                arch_info=arch_info,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                result_dir=result_dir,
+                device=device,
+                args=args
+            )
 
-        if result:
-            results.append(result)
+            if result:
+                results.append(result)
+            else:
+                failed.append({'name': arch_name, 'error': 'Training returned None'})
+        except Exception as e:
+            print(f"❌ Exception during training: {e}")
+            import traceback
+            traceback.print_exc()
+            failed.append({'name': arch_name, 'error': str(e)})
 
     # Save results
     print(f"\n{'='*80}")
     print("Training Complete")
     print(f"{'='*80}")
 
-    print(f"\nSuccessfully trained: {len(results)}/{len(architectures)}")
-    save_results(results, args.nas_results)
+    total = len(architectures)
+    success_count = len(results)
+    failed_count = len(failed)
+    
+    print(f"\n总计: {total} 个架构")
+    print(f"  ✓ 成功: {success_count}")
+    print(f"  ✗ 失败: {failed_count}")
+    
+    if failed:
+        print(f"\n训练失败的架构:")
+        for fail_info in failed:
+            print(f"  ✗ {fail_info['name']}")
+            print(f"     错误: {fail_info['error'][:100]}...")  # 截断长错误
+    
+    if results:
+        save_results(results, args.nas_results)
+    else:
+        print("\n⚠ 没有成功训练的架构，跳过结果保存")
 
     # Print summary
     print("\nAccuracy by Category:")

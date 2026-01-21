@@ -75,6 +75,13 @@ def parse_args():
         help='禁用并行训练，使用串行模式'
     )
     parser.add_argument(
+        '--no_checkpoint',
+        dest='save_checkpoints',
+        action='store_false',
+        help='禁用检查点保存（仅保存最佳模型）'
+    )
+    parser.set_defaults(save_checkpoints=True)
+    parser.add_argument(
         '--use_memory_fs',
         action='store_true',
         default=True,
@@ -214,6 +221,13 @@ def main():
         print("提示: 使用 --download 允许自动下载")
         sys.exit(1)
     
+    # 应用save_checkpoints到所有模型配置
+    for model_config in model_configs:
+        model_config['save_checkpoints'] = args.save_checkpoints
+    
+    if not args.save_checkpoints:
+        print("\n⚠ 检查点保存已禁用（仅保存最佳模型）")
+    
     # 创建多GPU管理器
     print(f"\n创建多GPU训练管理器...")
     manager = MultiGPUManager(
@@ -242,27 +256,23 @@ def main():
         parallel=not args.no_parallel
     )
     
-    # 最终总结
+    # 最终总结（MultiGPUManager已经打印了详细信息）
     print(f"\n{'=' * 60}")
-    print("训练完成总结")
+    print("训练完成")
     print(f"{'=' * 60}")
     
-    if results:
-        print(f"\n成功训练的模型: {len(results)} 个")
-        for model_name, acc in results.items():
-            print(f"  ✓ {model_name}: {acc:.2f}%")
-    else:
-        print("\n没有模型被训练（可能都已存在）")
+    total = len(model_configs)
+    success_count = len(results['success'])
+    failed_count = len(results['failed'])
+    skipped_count = len(results['skipped'])
+    
+    if success_count == 0 and failed_count == 0 and skipped_count > 0:
+        print("\n所有模型都已存在训练结果")
         if not args.force:
             print("提示: 使用 --force 参数可以强制重新训练所有模型")
     
-    # 统计跳过的模型
-    skipped = [m['name'] for m in model_configs 
-              if m['name'] not in results and not args.force]
-    if skipped:
-        print(f"\n跳过的模型（已存在结果）: {len(skipped)} 个")
-        for model_name in skipped:
-            print(f"  - {model_name}")
+    if failed_count > 0:
+        print(f"\n⚠ 注意: {failed_count} 个模型训练失败，详见上方错误信息")
     
     print(f"\n结果保存在: {args.result_dir}")
     print("=" * 60)

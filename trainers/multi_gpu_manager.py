@@ -252,6 +252,10 @@ class MultiGPUManager:
         # 对于 StablePoly4 模型，使用更严格的梯度裁剪
         grad_clip_max_norm = 0.5 if uses_stablepoly else 1.0
         
+        # 从配置中获取是否保存检查点（默认True）
+        save_checkpoints = model_config.get('save_checkpoints', True)
+        save_freq = model_config.get('save_freq', 10)
+        
         trainer = Trainer(
             model=model,
             train_loader=train_loader,
@@ -263,21 +267,28 @@ class MultiGPUManager:
             epochs=epochs,
             scheduler=scheduler,
             use_amp=True,
-            save_freq=10,
+            save_freq=save_freq,
+            save_checkpoints=save_checkpoints,
             grad_clip_max_norm=grad_clip_max_norm
         )
         
         # 开始训练
-        best_acc = trainer.train()
-        
-        return best_acc
+        try:
+            best_acc = trainer.train()
+            return best_acc
+        except Exception as e:
+            print(f"❌ 训练失败: {model_name}")
+            print(f"   错误: {e}")
+            import traceback
+            traceback.print_exc()
+            raise  # 重新抛出异常供上层处理
     
     def train_models(
         self,
         model_configs: List[Dict],
         force: bool = False,
         parallel: bool = True
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Dict]:
         """
         训练多个模型
         
@@ -287,18 +298,24 @@ class MultiGPUManager:
             parallel: 是否并行训练
         
         Returns:
-            模型名称到最佳准确率的映射
+            包含成功、失败、跳过模型信息的字典
         """
-        results = {}
+        results = {'success': {}, 'failed': {}, 'skipped': {}}
         
         if not self.available_gpus:
             print("⚠ 没有可用的GPU，将使用CPU训练")
             device = torch.device('cpu')
             
             for model_config in model_configs:
-                best_acc = self.train_model(model_config, None, force)
-                if best_acc is not None:
-                    results[model_config['name']] = best_acc
+                model_name = model_config['name']
+                try:
+                    best_acc = self.train_model(model_config, None, force)
+                    if best_acc is not None:
+                        results['success'][model_name] = best_acc
+                    else:
+                        results['skipped'][model_name] = '已训练'
+                except Exception as e:
+                    results['failed'][model_name] = str(e)
         elif parallel and len(self.available_gpus) > 1:
             # 并行训练
             print(f"\n并行训练模式，使用 {len(self.available_gpus)} 个GPU")
@@ -316,8 +333,12 @@ class MultiGPUManager:
                 while not task_queue.empty():
                     try:
                         model_config = task_queue.get(timeout=1)
-                        best_acc = self.train_model(model_config, gpu_id, force)
-                        result_queue.put((model_config['name'], best_acc))
+                        model_name = model_config['name']
+                        try:
+                            best_acc = self.train_model(model_config, gpu_id, force)
+                            result_queue.put(('success', model_name, best_acc))
+                        except Exception as e:
+                            result_queue.put(('failed', model_name, str(e)))
                         task_queue.task_done()
                     except queue.Empty:
                         break
@@ -336,36 +357,61 @@ class MultiGPUManager:
             
             # 收集结果
             while not result_queue.empty():
-                model_name, best_acc = result_queue.get()
-                if best_acc is not None:
-                    results[model_name] = best_acc
+                status, model_name, value = result_queue.get()
+                if status == 'success':
+                    if value is not None:
+                        results['success'][model_name] = value
+                    else:
+                        results['skipped'][model_name] = '已训练'
+                elif status == 'failed':
+                    results['failed'][model_name] = value
         
         else:
             # 串行训练
             print(f"\n串行训练模式，使用 GPU {self.available_gpus[0]}")
             
             for model_config in model_configs:
-                best_acc = self.train_model(
-                    model_config,
-                    self.available_gpus[0] if self.available_gpus else None,
-                    force
-                )
-                if best_acc is not None:
-                    results[model_config['name']] = best_acc
+                model_name = model_config['name']
+                try:
+                    best_acc = self.train_model(
+                        model_config,
+                        self.available_gpus[0] if self.available_gpus else None,
+                        force
+                    )
+                    if best_acc is not None:
+                        results['success'][model_name] = best_acc
+                    else:
+                        results['skipped'][model_name] = '已训练'
+                except Exception as e:
+                    results['failed'][model_name] = str(e)
         
-        # 打印总结
+        # 打印详细总结
         print(f"\n{'=' * 60}")
         print("训练总结")
         print(f"{'=' * 60}")
         
-        if results:
-            for model_name, acc in results.items():
-                print(f"  {model_name}: {acc:.2f}%")
+        total = len(model_configs)
+        success_count = len(results['success'])
+        failed_count = len(results['failed'])
+        skipped_count = len(results['skipped'])
         
-        # 统计跳过的模型
-        skipped = [m['name'] for m in model_configs 
-                  if m['name'] not in results and not force]
-        if skipped:
-            print(f"\n跳过的模型（已训练）: {', '.join(skipped)}")
+        print(f"\n总计: {total} 个模型")
+        print(f"  ✓ 成功: {success_count}")
+        print(f"  ✗ 失败: {failed_count}")
+        print(f"  ○ 跳过: {skipped_count}")
+        
+        if results['success']:
+            print(f"\n成功训练的模型:")
+            for model_name, acc in results['success'].items():
+                print(f"  ✓ {model_name}: {acc:.2f}%")
+        
+        if results['failed']:
+            print(f"\n训练失败的模型:")
+            for model_name, error in results['failed'].items():
+                print(f"  ✗ {model_name}")
+                print(f"     错误: {error[:100]}...")  # 截断长错误信息
+        
+        if results['skipped']:
+            print(f"\n跳过的模型: {', '.join(results['skipped'].keys())}")
         
         return results
