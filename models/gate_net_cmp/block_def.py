@@ -321,19 +321,93 @@ class SelfGated(nn.Module):
         self.bn_out = nn.BatchNorm2d(out_channels)
 
         self.shortcut = nn.Identity()
+        
+        # 用于检测溢出的标志
+        self._overflow_warned = False
 
     def forward(self, x):
+        # 输入检测
+        if not self._overflow_warned and not torch.isfinite(x).all():
+            print(f"\n⚠️ SelfGated输入检测: 输入包含非有限值!")
+            print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
+            print(f"   NaN数量: {torch.isnan(x).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(x).sum().item()}")
+            self._overflow_warned = True
+        
         feat_intrinsic = self.conv_3x3(x)
         feat_intrinsic = self.bn_3x3(feat_intrinsic)
+        
+        # feat_intrinsic检测
+        if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
+            print(f"\n⚠️ SelfGated检测: conv_3x3+bn后产生非有限值!")
+            print(f"   feat_intrinsic shape: {feat_intrinsic.shape}, dtype: {feat_intrinsic.dtype}")
+            finite_mask = torch.isfinite(feat_intrinsic)
+            if finite_mask.any():
+                print(f"   有限值范围: [{feat_intrinsic[finite_mask].min().item():.2f}, {feat_intrinsic[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(feat_intrinsic).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(feat_intrinsic).sum().item()}")
+            self._overflow_warned = True
 
         gate = self.conv_gate(feat_intrinsic)
+        
+        # gate检测(激活前)
+        if not self._overflow_warned and not torch.isfinite(gate).all():
+            print(f"\n⚠️ SelfGated检测: conv_gate后产生非有限值!")
+            print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
+            finite_mask = torch.isfinite(gate)
+            if finite_mask.any():
+                print(f"   有限值范围: [{gate[finite_mask].min().item():.2f}, {gate[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(gate).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
+            self._overflow_warned = True
+        
         gate = self.act(gate)
+        
+        # gate检测(激活后)
+        if not self._overflow_warned and not torch.isfinite(gate).all():
+            print(f"\n⚠️ SelfGated检测: 激活函数后产生非有限值!")
+            print(f"   激活函数类型: {type(self.act).__name__}")
+            print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
+            finite_mask = torch.isfinite(gate)
+            if finite_mask.any():
+                print(f"   有限值范围: [{gate[finite_mask].min().item():.2f}, {gate[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(gate).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
+            self._overflow_warned = True
 
         feat_generated = _safe_gated_mul(feat_intrinsic, gate)
+        
+        # feat_generated检测
+        if not self._overflow_warned and not torch.isfinite(feat_generated).all():
+            print(f"\n⚠️ SelfGated检测: 门控乘法后产生非有限值!")
+            print(f"   feat_generated shape: {feat_generated.shape}, dtype: {feat_generated.dtype}")
+            finite_mask = torch.isfinite(feat_generated)
+            if finite_mask.any():
+                print(f"   有限值范围: [{feat_generated[finite_mask].min().item():.2f}, {feat_generated[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(feat_generated).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(feat_generated).sum().item()}")
+            self._overflow_warned = True
 
         out = torch.cat([feat_intrinsic, feat_generated], dim=1)
+        
+        # concat检测
+        if not self._overflow_warned and not torch.isfinite(out).all():
+            print(f"\n⚠️ SelfGated检测: concat后产生非有限值!")
+            print(f"   out shape: {out.shape}, dtype: {out.dtype}")
+            self._overflow_warned = True
 
         out = _safe_conv_bn(self.conv_out, self.bn_out, out)
+        
+        # 最终输出检测
+        if not self._overflow_warned and not torch.isfinite(out).all():
+            print(f"\n⚠️ SelfGated检测: conv_out+bn后产生非有限值!")
+            print(f"   最终输出shape: {out.shape}, dtype: {out.dtype}")
+            finite_mask = torch.isfinite(out)
+            if finite_mask.any():
+                print(f"   有限值范围: [{out[finite_mask].min().item():.2f}, {out[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(out).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(out).sum().item()}")
+            self._overflow_warned = True
 
         return out
 
@@ -507,21 +581,90 @@ class GatedDepthwiseConv(nn.Module):
             groups=channels, bias=False
         )
         self.activation = activation()
+        
+        # 用于检测溢出的标志
+        self._overflow_warned = False
 
     def forward(self, x):
+        # 输入检测
+        if not self._overflow_warned and not torch.isfinite(x).all():
+            print(f"\n⚠️ GatedDepthwiseConv输入检测: 输入包含非有限值!")
+            print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
+            print(f"   NaN数量: {torch.isnan(x).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(x).sum().item()}")
+            self._overflow_warned = True
+        
         # 主分支特征
         feat_intrinsic = self.dw_conv(x)
         feat_intrinsic = self.bn(feat_intrinsic)
+        
+        # feat_intrinsic检测
+        if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
+            print(f"\n⚠️ GatedDepthwiseConv检测: dw_conv+bn后产生非有限值!")
+            print(f"   feat_intrinsic shape: {feat_intrinsic.shape}, dtype: {feat_intrinsic.dtype}")
+            finite_mask = torch.isfinite(feat_intrinsic)
+            if finite_mask.any():
+                print(f"   有限值范围: [{feat_intrinsic[finite_mask].min().item():.2f}, {feat_intrinsic[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(feat_intrinsic).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(feat_intrinsic).sum().item()}")
+            self._overflow_warned = True
 
         # 门控分支
         gate = self.gate_conv(feat_intrinsic)
+        
+        # gate检测(激活前)
+        if not self._overflow_warned and not torch.isfinite(gate).all():
+            print(f"\n⚠️ GatedDepthwiseConv检测: gate_conv后产生非有限值!")
+            print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
+            finite_mask = torch.isfinite(gate)
+            if finite_mask.any():
+                print(f"   有限值范围: [{gate[finite_mask].min().item():.2f}, {gate[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(gate).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
+            self._overflow_warned = True
+        
         gate = self.activation(gate)
+        
+        # gate检测(激活后)
+        if not self._overflow_warned and not torch.isfinite(gate).all():
+            print(f"\n⚠️ GatedDepthwiseConv检测: 激活函数后产生非有限值!")
+            print(f"   激活函数类型: {type(self.activation).__name__}")
+            print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
+            finite_mask = torch.isfinite(gate)
+            if finite_mask.any():
+                print(f"   有限值范围: [{gate[finite_mask].min().item():.2f}, {gate[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(gate).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
+            self._overflow_warned = True
 
         # 生成门控特征
         feat_gated = _safe_gated_mul(feat_intrinsic, gate)
+        
+        # feat_gated检测
+        if not self._overflow_warned and not torch.isfinite(feat_gated).all():
+            print(f"\n⚠️ GatedDepthwiseConv检测: 门控乘法后产生非有限值!")
+            print(f"   feat_gated shape: {feat_gated.shape}, dtype: {feat_gated.dtype}")
+            finite_mask = torch.isfinite(feat_gated)
+            if finite_mask.any():
+                print(f"   有限值范围: [{feat_gated[finite_mask].min().item():.2f}, {feat_gated[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(feat_gated).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(feat_gated).sum().item()}")
+            self._overflow_warned = True
 
         # 拼接恢复通道数（类似SelfGated）
         out = torch.cat([feat_intrinsic, feat_gated], dim=1)
+        
+        # 最终输出检测
+        if not self._overflow_warned and not torch.isfinite(out).all():
+            print(f"\n⚠️ GatedDepthwiseConv检测: concat后产生非有限值!")
+            print(f"   最终输出shape: {out.shape}, dtype: {out.dtype}")
+            finite_mask = torch.isfinite(out)
+            if finite_mask.any():
+                print(f"   有限值范围: [{out[finite_mask].min().item():.2f}, {out[finite_mask].max().item():.2f}]")
+            print(f"   NaN数量: {torch.isnan(out).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(out).sum().item()}")
+            self._overflow_warned = True
+        
         return out  # 输出通道数是输入的2倍
 
 

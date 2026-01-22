@@ -405,15 +405,31 @@ class Trainer:
                     out_min = outputs.min().item() if torch.isfinite(outputs.min()) else float('nan')
                     out_max = outputs.max().item() if torch.isfinite(outputs.max()) else float('nan')
                     nan_count = (~torch.isfinite(outputs)).sum().item()
-                    print(f"\n⚠ Warning: Non-finite values detected in validation!")
+                    print(f"\n⚠ Warning: Non-finite values detected in validation! (Epoch {epoch})")
                     print(f"  Loss: {loss_value}")
+                    print(f"  Output shape: {outputs.shape}")
                     print(f"  Output stats: min={out_min:.2f}, max={out_max:.2f}, nan_count={nan_count}/{outputs.numel()}")
-                    # Skip this batch but count towards total for acc
-                    _, predicted = outputs.max(1)
-                    # 只有当 outputs 完全是 finite 时才计算 accuracy
-                    if torch.isfinite(outputs).all():
-                        total += labels.size(0)
-                        correct += predicted.eq(labels).sum().item()
+                    
+                    # 打印前几个样本的logits分布
+                    print(f"\n  前3个样本的logits分析:")
+                    for i in range(min(3, outputs.shape[0])):
+                        sample_logits = outputs[i]  # shape: (num_classes,)
+                        finite_mask = torch.isfinite(sample_logits)
+                        num_finite = finite_mask.sum().item()
+                        num_nan = torch.isnan(sample_logits).sum().item()
+                        num_inf = torch.isinf(sample_logits).sum().item()
+                        
+                        print(f"    样本 {i}: finite={num_finite}/{len(sample_logits)}, NaN={num_nan}, Inf={num_inf}")
+                        
+                        if num_finite > 0:
+                            finite_logits = sample_logits[finite_mask]
+                            print(f"      有限值范围: [{finite_logits.min().item():.2f}, {finite_logits.max().item():.2f}]")
+                        
+                        # 显示前10个logit值
+                        logit_preview = sample_logits[:10].cpu().numpy()
+                        print(f"      前10个logits: {logit_preview}")
+                    
+                    # Skip this batch
                     continue
                 
                 total_loss += loss_value
