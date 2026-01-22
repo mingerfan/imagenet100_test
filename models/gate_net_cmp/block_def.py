@@ -56,6 +56,31 @@ def _safe_conv_bn(conv, bn, x):
     return y
 
 
+def _safe_bn_output(x, max_feature_val=1000.0):
+    """
+    安全的 BN 输出处理
+    
+    fp16 下 BN 输出可能达到 ±14000+，在后续乘法操作中容易溢出。
+    将特征值限制在合理范围内，防止雪崩式溢出。
+    
+    Args:
+        x: BN 输出张量
+        max_feature_val: 最大特征值（默认1000，足够表达特征但不会溢出）
+    
+    Returns:
+        clamp 后的张量
+    """
+    if not torch.is_tensor(x) or not x.is_floating_point():
+        return x
+    
+    dtype = x.dtype
+    if dtype in (torch.float16, torch.bfloat16):
+        # fp16 下使用更保守的限制，防止后续操作溢出
+        x = torch.clamp(x, min=-max_feature_val, max=max_feature_val)
+        x = torch.nan_to_num(x, nan=0.0, posinf=max_feature_val, neginf=-max_feature_val)
+    return x
+
+
 class Activation(nn.Module):
     def forward(self, x):
         pass
@@ -337,6 +362,9 @@ class SelfGated(nn.Module):
         feat_intrinsic = self.conv_3x3(x)
         feat_intrinsic = self.bn_3x3(feat_intrinsic)
         
+        # 关键保护：限制 BN 输出范围，防止 fp16 溢出
+        feat_intrinsic = _safe_bn_output(feat_intrinsic, max_feature_val=1000.0)
+        
         # feat_intrinsic检测
         if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
             print(f"\n⚠️ SelfGated检测: conv_3x3+bn后产生非有限值!")
@@ -598,6 +626,9 @@ class GatedDepthwiseConv(nn.Module):
         feat_intrinsic = self.dw_conv(x)
         feat_intrinsic = self.bn(feat_intrinsic)
         
+        # 关键保护：限制 BN 输出范围，防止 fp16 溢出
+        feat_intrinsic = _safe_bn_output(feat_intrinsic, max_feature_val=1000.0)
+        
         # feat_intrinsic检测
         if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
             print(f"\n⚠️ GatedDepthwiseConv检测: dw_conv+bn后产生非有限值!")
@@ -789,6 +820,9 @@ class MBConvBlock(nn.Module):
             out = self.expand_conv(x)
             out = self.bn1(out)
             
+            # 关键保护：限制 BN 输出范围，防止 fp16 溢出
+            out = _safe_bn_output(out, max_feature_val=1000.0)
+            
             # expansion后检测（关键位置！）
             if not self._overflow_warned and not torch.isfinite(out).all():
                 print(f"\n⚠️ MBConvBlock检测: expansion+bn后产生非有限值!")
@@ -820,6 +854,8 @@ class MBConvBlock(nn.Module):
         out = self.dw_conv(out)
         if not self.use_gated_dw:
             out = self.bn2(out)
+            # 关键保护：限制 BN 输出范围
+            out = _safe_bn_output(out, max_feature_val=1000.0)
             out = self.activation(out)
         # GatedDWConv内部已经完成BN和激活+拼接
 
@@ -830,6 +866,8 @@ class MBConvBlock(nn.Module):
         # 4. 压缩阶段
         out = self.project_conv(out)
         out = self.bn3(out)
+        # 关键保护：限制 BN 输出范围
+        out = _safe_bn_output(out, max_feature_val=1000.0)
 
         # 5. Shortcut连接
         if self.use_shortcut:

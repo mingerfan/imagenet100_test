@@ -763,12 +763,21 @@ class GeneratedNetwork(nn.Module):
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """初始化网络权重"""
+        """初始化网络权重
+        
+        针对 StablePoly4/SiLU 激活函数优化的初始化策略：
+        - 使用 fan_in 模式 + leaky_relu 假设，产生更保守的初始权重
+        - 降低 BN 的初始 gamma，防止特征值在网络深处膨胀
+        - 这样可以避免 BN 输出达到 ±10000+ 导致 fp16 溢出
+        """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                # 使用更保守的初始化：fan_in + leaky_relu(a=0.1)
+                # 这会产生比 relu 假设更小的初始权重
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu', a=0.1)
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
+                # 降低初始 gamma 到 0.5，防止多层累积后特征值爆炸
+                nn.init.constant_(m.weight, 0.5)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)

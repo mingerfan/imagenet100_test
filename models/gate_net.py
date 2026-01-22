@@ -81,12 +81,17 @@ class ResNet18Gate(nn.Module):
         return SpecialResNet(config=config, in_channels=64)
     
     def _initialize_weights(self):
-        """初始化网络权重"""
+        """初始化网络权重
+        
+        针对 StablePoly4/SiLU 激活函数优化的初始化策略：
+        - 使用 fan_in 模式 + leaky_relu 假设，产生更保守的初始权重
+        - 降低 BN 的初始 gamma，防止特征值在网络深处膨胀
+        """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu', a=0.1)
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.weight, 0.5)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
