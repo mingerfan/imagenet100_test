@@ -369,6 +369,8 @@ def parse_args():
                        help='GPU device IDs to use')
     parser.add_argument('--use_amp', action='store_true', default=True,
                        help='Use automatic mixed precision')
+    parser.add_argument('--no_use_amp', dest='use_amp', action='store_false',
+                       help='Disable automatic mixed precision')
     parser.add_argument('--use_memory_fs', action='store_true', default=True,
                        help='Use memory filesystem for faster data loading')
     parser.add_argument('--no_memory_fs', dest='use_memory_fs', action='store_false',
