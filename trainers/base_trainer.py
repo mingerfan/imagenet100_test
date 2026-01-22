@@ -258,9 +258,23 @@ class Trainer:
         
         pbar = tqdm(self.train_loader, desc=f'Epoch [{epoch}]({model_name})', leave=False)
         
-        for images, labels in pbar:
+        # 在第一个epoch添加详细诊断
+        first_batch_diagnostic = (epoch == 1)
+        
+        for batch_idx, (images, labels) in enumerate(pbar):
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
+            
+            # 第一个batch的诊断信息
+            if first_batch_diagnostic and batch_idx == 0:
+                print(f"\n{'='*60}")
+                print(f"第一个batch诊断 (Epoch {epoch}):")
+                print(f"  Batch shape: {images.shape}")
+                print(f"  Labels shape: {labels.shape}")
+                print(f"  Labels范围: [{labels.min().item()}, {labels.max().item()}]")
+                print(f"  Labels dtype: {labels.dtype}")
+                print(f"  唯一标签数: {len(labels.unique())}")
+                print(f"{'='*60}\n")
             
             self.optimizer.zero_grad()
             
@@ -268,11 +282,40 @@ class Trainer:
             device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
             with autocast(device_type=device_type):
                 outputs = self.model(images)
+                
+                # 第一个batch的输出诊断
+                if first_batch_diagnostic and batch_idx == 0:
+                    print(f"模型输出诊断:")
+                    print(f"  Output shape: {outputs.shape}")
+                    print(f"  Output dtype: {outputs.dtype}")
+                    print(f"  Output范围: [{outputs.min().item():.2f}, {outputs.max().item():.2f}]")
+                    print(f"  Output包含NaN: {torch.isnan(outputs).any().item()}")
+                    print(f"  Output包含Inf: {torch.isinf(outputs).any().item()}")
+                
                 # 重要：将 outputs 转为 float32 再计算 loss
                 # 在 1000 类分类任务中，float16 的 log_softmax 容易溢出
                 # 因为 exp(logit) 在 logit > 11 时就会变成 inf
                 outputs_fp32 = outputs.float()
+                
+                # Loss计算诊断
+                if first_batch_diagnostic and batch_idx == 0:
+                    print(f"\nLoss计算前:")
+                    print(f"  outputs_fp32范围: [{outputs_fp32.min().item():.2f}, {outputs_fp32.max().item():.2f}]")
+                    print(f"  labels范围: [{labels.min().item()}, {labels.max().item()}]")
+                    print(f"  期望类别数: 0 到 {outputs.shape[1] - 1}")
+                    
+                    # 检查标签是否越界
+                    if labels.max().item() >= outputs.shape[1]:
+                        print(f"  ❌ 错误: 标签 {labels.max().item()} 超出输出维度 {outputs.shape[1]}!")
+                
                 loss = self.criterion(outputs_fp32, labels)
+                
+                if first_batch_diagnostic and batch_idx == 0:
+                    print(f"\nLoss计算后:")
+                    print(f"  Loss value: {loss.item():.6f}")
+                    print(f"  Loss is finite: {torch.isfinite(loss).all().item()}")
+                    print(f"{'='*60}\n")
+                    first_batch_diagnostic = False  # 只诊断一次
 
             if self.nan_debug and not self._nan_debug_running:
                 if self._find_nonfinite_tensor(outputs) is not None:

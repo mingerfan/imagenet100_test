@@ -91,12 +91,35 @@ def train_architecture(arch_info, train_loader, val_loader, result_dir, device, 
     # Create model from config
     try:
         config = NetworkConfig.from_dict(arch_info['config'])
+        print(f"\n{'='*60}")
+        print(f"配置诊断:")
+        print(f"  JSON中的num_classes: {config.num_classes}")
+        print(f"  目标dataset: {args.dataset}")
+        print(f"  目标num_classes: {args.dataset_num_classes}")
+        
         if args.dataset_num_classes and config.num_classes != args.dataset_num_classes:
-            print(f"⚠ Adjusting num_classes: {config.num_classes} -> {args.dataset_num_classes}")
+            print(f"  ⚠ 调整num_classes: {config.num_classes} -> {args.dataset_num_classes}")
             config.num_classes = args.dataset_num_classes
+        
         model = create_network(config)
         model = model.to(device)
-        print(f"Model created: {sum(p.numel() for p in model.parameters()):,} parameters")
+        
+        # 验证分类头
+        fc_layer = model.fc
+        print(f"\n分类头验证:")
+        print(f"  FC layer: {fc_layer}")
+        print(f"  输入特征数: {fc_layer.in_features}")
+        print(f"  输出类别数: {fc_layer.out_features}")
+        print(f"  期望类别数: {args.dataset_num_classes}")
+        
+        if fc_layer.out_features != args.dataset_num_classes:
+            print(f"  ❌ 分类头类别数不匹配！")
+        else:
+            print(f"  ✓ 分类头类别数正确")
+        
+        print(f"\n模型参数: {sum(p.numel() for p in model.parameters()):,}")
+        print(f"{'='*60}\n")
+        
     except Exception as e:
         print(f"❌ Failed to create model: {e}")
         import traceback
@@ -413,6 +436,27 @@ def main():
     )
     print(f"✓ Train batches: {len(train_loader)}")
     print(f"✓ Val batches: {len(val_loader)}")
+    
+    # 检查标签范围
+    print(f"\n检查数据集标签范围...")
+    sample_labels = []
+    for i, (_, labels) in enumerate(val_loader):
+        sample_labels.extend(labels.tolist())
+        if i >= 2:  # 只检查前3个batch
+            break
+    
+    if sample_labels:
+        min_label = min(sample_labels)
+        max_label = max(sample_labels)
+        unique_labels = len(set(sample_labels))
+        print(f"  标签范围: [{min_label}, {max_label}]")
+        print(f"  前3个batch的唯一标签数: {unique_labels}")
+        print(f"  期望范围: [0, {args.dataset_num_classes - 1}]")
+        
+        if max_label >= args.dataset_num_classes:
+            print(f"  ❌ 警告: 标签 {max_label} 超出类别数 {args.dataset_num_classes}!")
+        else:
+            print(f"  ✓ 标签范围正常")
 
     # Create result directory
     result_dir = os.path.join(args.nas_results, 'trained_models')
