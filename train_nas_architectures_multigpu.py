@@ -91,17 +91,60 @@ def train_architecture_worker(arch_info, gpu_id, args, result_queue):
             input_size=args.input_size,
             seed=args.seed
         )
+        
+        # 检查标签范围
+        print(f"[GPU {gpu_id}] 检查数据集标签范围...")
+        sample_labels = []
+        for i, (_, labels) in enumerate(val_loader):
+            sample_labels.extend(labels.tolist())
+            if i >= 2:  # 只检查前3个batch
+                break
+        
+        if sample_labels:
+            min_label = min(sample_labels)
+            max_label = max(sample_labels)
+            unique_labels = len(set(sample_labels))
+            print(f"[GPU {gpu_id}]   标签范围: [{min_label}, {max_label}]")
+            print(f"[GPU {gpu_id}]   前3个batch的唯一标签数: {unique_labels}")
+            print(f"[GPU {gpu_id}]   期望范围: [0, {args.dataset_num_classes - 1}]")
+            
+            if max_label >= args.dataset_num_classes:
+                print(f"[GPU {gpu_id}]   ❌ 警告: 标签 {max_label} 超出类别数 {args.dataset_num_classes}!")
+            else:
+                print(f"[GPU {gpu_id}]   ✓ 标签范围正常")
 
         # Create model from config
         config = NetworkConfig.from_dict(arch_info['config'])
+        
+        print(f"\n[GPU {gpu_id}] {'='*60}")
+        print(f"[GPU {gpu_id}] 配置诊断:")
+        print(f"[GPU {gpu_id}]   JSON中的num_classes: {config.num_classes}")
+        print(f"[GPU {gpu_id}]   目标dataset: {args.dataset}")
+        print(f"[GPU {gpu_id}]   目标num_classes: {args.dataset_num_classes}")
+        
         if args.dataset_num_classes and config.num_classes != args.dataset_num_classes:
-            print(f"[GPU {gpu_id}] ⚠ Adjusting num_classes: {config.num_classes} -> {args.dataset_num_classes}")
+            print(f"[GPU {gpu_id}]   ⚠ 调整num_classes: {config.num_classes} -> {args.dataset_num_classes}")
             config.num_classes = args.dataset_num_classes
+            
         model = create_network(config)
         model = model.to(device)
+        
+        # 验证分类头
+        fc_layer = model.fc
+        print(f"\n[GPU {gpu_id}] 分类头验证:")
+        print(f"[GPU {gpu_id}]   FC layer: {fc_layer}")
+        print(f"[GPU {gpu_id}]   输入特征数: {fc_layer.in_features}")
+        print(f"[GPU {gpu_id}]   输出类别数: {fc_layer.out_features}")
+        print(f"[GPU {gpu_id}]   期望类别数: {args.dataset_num_classes}")
+        
+        if fc_layer.out_features != args.dataset_num_classes:
+            print(f"[GPU {gpu_id}]   ❌ 分类头类别数不匹配！")
+        else:
+            print(f"[GPU {gpu_id}]   ✓ 分类头类别数正确")
 
         n_params = sum(p.numel() for p in model.parameters())
-        print(f"[GPU {gpu_id}] Model created: {n_params:,} parameters")
+        print(f"[GPU {gpu_id}]   模型参数: {n_params:,}")
+        print(f"[GPU {gpu_id}] {'='*60}\n")
 
         # Setup training
         criterion = nn.CrossEntropyLoss()
