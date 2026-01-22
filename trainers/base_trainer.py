@@ -280,7 +280,7 @@ class Trainer:
             
             # 使用混合精度训练
             device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
-            with autocast(device_type=device_type):
+            with autocast(device_type=device_type, enabled=self.use_amp):
                 outputs = self.model(images)
                 
                 # 第一个batch的输出诊断
@@ -301,6 +301,7 @@ class Trainer:
                 if first_batch_diagnostic and batch_idx == 0:
                     print(f"\nLoss计算前:")
                     print(f"  outputs_fp32范围: [{outputs_fp32.min().item():.2f}, {outputs_fp32.max().item():.2f}]")
+                    print(f"  outputs_fp32 dtype: {outputs_fp32.dtype}")
                     print(f"  labels范围: [{labels.min().item()}, {labels.max().item()}]")
                     print(f"  期望类别数: 0 到 {outputs.shape[1] - 1}")
                     
@@ -368,11 +369,12 @@ class Trainer:
         
         return avg_loss, avg_acc
     
-    def validate(self):
+    def validate(self, epoch=None):
         """
         验证模型
         
-        Returns:
+        Args:
+            epoch: 当前epoch（用于诊断输出）        Returns:
             avg_loss: 平均损失
             avg_acc: 平均准确率
         """
@@ -390,12 +392,12 @@ class Trainer:
                 labels = labels.to(self.device, non_blocking=True)
                 
                 device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
-                with autocast(device_type=device_type):
+                with autocast(device_type=device_type, enabled=self.use_amp):
                     outputs = self.model(images)
                 
                 # 重要：将 outputs 转回 float32 再计算 loss
                 # AMP 下 outputs 可能是 float16，大的 logits 值会导致 log_softmax 溢出
-                outputs_fp32 = outputs.float()
+                outputs_fp32 = outputs.float() if self.use_amp else outputs
                 loss = self.criterion(outputs_fp32, labels)
                 
                 # Check for NaN/Inf in loss and outputs
@@ -405,7 +407,7 @@ class Trainer:
                     out_min = outputs.min().item() if torch.isfinite(outputs.min()) else float('nan')
                     out_max = outputs.max().item() if torch.isfinite(outputs.max()) else float('nan')
                     nan_count = (~torch.isfinite(outputs)).sum().item()
-                    print(f"\n⚠ Warning: Non-finite values detected in validation! (Epoch {epoch})")
+                    print(f"\n⚠ Warning: Non-finite values detected in validation!{f' (Epoch {epoch})' if epoch else ''}")
                     print(f"  Loss: {loss_value}")
                     print(f"  Output shape: {outputs.shape}")
                     print(f"  Output stats: min={out_min:.2f}, max={out_max:.2f}, nan_count={nan_count}/{outputs.numel()}")
@@ -535,7 +537,7 @@ class Trainer:
                 train_loss, train_acc = self.train_one_epoch(epoch)
                 
                 # 验证
-                val_loss, val_acc = self.validate()
+                val_loss, val_acc = self.validate(epoch=epoch)
                 
                 # 更新学习率
                 if self.scheduler is not None:
