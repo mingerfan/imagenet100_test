@@ -769,15 +769,50 @@ class MBConvBlock(nn.Module):
 
         # Shortcut连接
         self.use_shortcut = (stride == 1 and in_channels == out_channels)
+        
+        # 用于检测溢出的标志
+        self._overflow_warned = False
 
     def forward(self, x):
         identity = x
+        
+        # 输入检测
+        if not self._overflow_warned and not torch.isfinite(x).all():
+            print(f"\n⚠️ MBConvBlock输入检测: 输入包含非有限值!")
+            print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
+            print(f"   NaN数量: {torch.isnan(x).sum().item()}")
+            print(f"   Inf数量: {torch.isinf(x).sum().item()}")
+            self._overflow_warned = True
 
         # 1. 扩展阶段
         if self.use_expansion:
             out = self.expand_conv(x)
             out = self.bn1(out)
+            
+            # expansion后检测（关键位置！）
+            if not self._overflow_warned and not torch.isfinite(out).all():
+                print(f"\n⚠️ MBConvBlock检测: expansion+bn后产生非有限值!")
+                print(f"   out shape: {out.shape}, dtype: {out.dtype}")
+                finite_mask = torch.isfinite(out)
+                if finite_mask.any():
+                    print(f"   有限值范围: [{out[finite_mask].min().item():.2f}, {out[finite_mask].max().item():.2f}]")
+                print(f"   NaN数量: {torch.isnan(out).sum().item()}")
+                print(f"   Inf数量: {torch.isinf(out).sum().item()}")
+                self._overflow_warned = True
+            
             out = self.activation(out)
+            
+            # activation后检测
+            if not self._overflow_warned and not torch.isfinite(out).all():
+                print(f"\n⚠️ MBConvBlock检测: expansion激活后产生非有限值!")
+                print(f"   激活函数类型: {type(self.activation).__name__}")
+                print(f"   out shape: {out.shape}, dtype: {out.dtype}")
+                finite_mask = torch.isfinite(out)
+                if finite_mask.any():
+                    print(f"   有限值范围: [{out[finite_mask].min().item():.2f}, {out[finite_mask].max().item():.2f}]")
+                print(f"   NaN数量: {torch.isnan(out).sum().item()}")
+                print(f"   Inf数量: {torch.isinf(out).sum().item()}")
+                self._overflow_warned = True
         else:
             out = x
 
