@@ -24,8 +24,8 @@ def quick_check():
     
     # 配置
     dataset = "imagenet100"
-    train_dir = "/home/xuming/Documents/dataset/ImageNet_100/train"
-    val_dir = "/home/xuming/Documents/dataset/ImageNet_100/val"
+    train_dir = "/root/autodl-tmp/imagenet/train"
+    val_dir = "/root/autodl-tmp/imagenet/val"
     batch_size = 32
     num_workers = 4
     

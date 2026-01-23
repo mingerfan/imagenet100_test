@@ -15,8 +15,8 @@ def main():
     print("="*80)
     
     # 配置路径（请根据实际情况修改）
-    train_dir = "/home/xuming/Documents/dataset/ImageNet_100/train"
-    val_dir = "/home/xuming/Documents/dataset/ImageNet_100/val"
+    train_dir = "/root/autodl-tmp/imagenet/train"
+    val_dir = "/root/autodl-tmp/imagenet/val"
     
     # Windows路径
     if not os.path.exists(train_dir):
