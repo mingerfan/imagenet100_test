@@ -44,11 +44,14 @@ def main():
                        help='模型检查点路径（.pth文件）')
     parser.add_argument('--config_path', type=str, default=None,
                        help='网络配置文件路径（.json文件，如果checkpoint中没有config）')
-    parser.add_argument('--dataset', type=str, default='imagenet100')
+    parser.add_argument('--dataset', type=str, default='imagenet100',
+                       help='数据集类型（会根据模型自动检测，通常不需要手动指定）')
     parser.add_argument('--train_dir', type=str,
-                       default='/home/xuming/Documents/dataset/ImageNet_100/train')
+                       default='/home/xuming/Documents/dataset/ImageNet_100/train',
+                       help='训练集目录（请确保与模型训练时使用的数据集一致）')
     parser.add_argument('--val_dir', type=str,
-                       default='/home/xuming/Documents/dataset/ImageNet_100/val')
+                       default='/home/xuming/Documents/dataset/ImageNet_100/val',
+                       help='验证集目录（请确保与模型训练时使用的数据集一致）')
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=4)
     
@@ -62,8 +65,36 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\n使用设备: {device}")
     
+    # 先加载checkpoint来检测类别数
+    print(f"\n预加载checkpoint以检测配置...")
+    checkpoint = torch.load(args.model_path, map_location=device)
+    
+    # 检测实际类别数
+    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    if 'fc.weight' in state_dict:
+        detected_num_classes = state_dict['fc.weight'].shape[0]
+        print(f"  检测到模型类别数: {detected_num_classes}")
+        
+        # 根据类别数推断数据集
+        if detected_num_classes == 1000:
+            print(f"  → 这是ImageNet-1k模型 (1000类)")
+            if args.dataset == 'imagenet100':
+                print(f"  ⚠️  参数指定的是imagenet100，但模型是1000类")
+                print(f"  → 自动切换到imagenet1k数据集")
+                args.dataset = 'imagenet1k'
+        elif detected_num_classes == 100:
+            print(f"  → 这是ImageNet-100模型 (100类)")
+            if args.dataset == 'imagenet1k':
+                print(f"  ⚠️  参数指定的是imagenet1k，但模型是100类")
+                print(f"  → 自动切换到imagenet100数据集")
+                args.dataset = 'imagenet100'
+        else:
+            print(f"  → 检测到 {detected_num_classes} 类模型")
+    
     # 创建数据加载器（都使用验证transforms）
-    print("\n创建数据加载器（训练集和验证集都用验证transforms）...")
+    print(f"\n创建数据加载器（使用 {args.dataset} 数据集）...")
+    print(f"  训练集: {args.train_dir}")
+    print(f"  验证集: {args.val_dir}")
     
     from data.dataset import get_imagenet_val_transform
     from torchvision import datasets
@@ -73,6 +104,19 @@ def main():
     
     train_dataset_eval = datasets.ImageFolder(args.train_dir, transform=val_transform)
     val_dataset = datasets.ImageFolder(args.val_dir, transform=val_transform)
+    
+    print(f"  训练集样本数: {len(train_dataset_eval)}")
+    print(f"  验证集样本数: {len(val_dataset)}")
+    print(f"  数据集类别数: {len(train_dataset_eval.classes)}")
+    
+    # 验证数据集类别数与模型是否匹配
+    if 'detected_num_classes' in locals():
+        if detected_num_classes != len(train_dataset_eval.classes):
+            print(f"\n  ❌ 错误: 模型类别数 ({detected_num_classes}) 与数据集类别数 ({len(train_dataset_eval.classes)}) 不匹配!")
+            print(f"  请检查:")
+            print(f"    1. 数据集路径是否正确")
+            print(f"    2. 模型是否用于当前数据集")
+            return
     
     train_loader_eval = DataLoader(
         train_dataset_eval,
@@ -90,13 +134,8 @@ def main():
         pin_memory=True
     )
     
-    print(f"  训练集样本数: {len(train_dataset_eval)}")
-    print(f"  验证集样本数: {len(val_dataset)}")
-    
     # 加载模型
-    print(f"\n加载模型: {args.model_path}")
-    
-    checkpoint = torch.load(args.model_path, map_location=device)
+    print(f"\n加载模型配置和权重...")
     
     # 尝试从checkpoint或单独的config文件加载配置
     if 'config' in checkpoint:
@@ -114,17 +153,37 @@ def main():
     
     # 创建模型
     config = NetworkConfig.from_dict(config_dict)
+    
+    # 从checkpoint中检测实际的类别数
+    state_dict = checkpoint.get('model_state_dict', checkpoint)
+    if 'fc.weight' in state_dict:
+        actual_num_classes = state_dict['fc.weight'].shape[0]
+        if actual_num_classes != config.num_classes:
+            print(f"  ⚠️  检测到类别数不匹配:")
+            print(f"     配置文件: {config.num_classes} 类")
+            print(f"     checkpoint: {actual_num_classes} 类")
+            print(f"  → 自动调整为 {actual_num_classes} 类")
+            config.num_classes = actual_num_classes
+    
     model = create_network(config)
     
     # 加载权重
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        model.load_state_dict(checkpoint)
+    try:
+        if 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            model.load_state_dict(checkpoint)
+        print("  ✓ 模型加载成功")
+    except RuntimeError as e:
+        if "size mismatch" in str(e):
+            print(f"  ❌ 模型加载失败: 权重形状不匹配")
+            print(f"     {e}")
+            print(f"\n  提示: checkpoint可能是用不同的num_classes训练的")
+            return
+        else:
+            raise
     
     model = model.to(device)
-    
-    print("  ✓ 模型加载成功")
     
     # 评估
     print("\n" + "="*80)
