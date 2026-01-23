@@ -58,26 +58,44 @@ def _safe_conv_bn(conv, bn, x):
 
 def _safe_bn_output(x, max_feature_val=1000.0):
     """
-    安全的 BN 输出处理
+    高效的 BN 输出保护 - 只在必要时保护
     
     fp16 下 BN 输出可能达到 ±14000+，在后续乘法操作中容易溢出。
-    将特征值限制在合理范围内，防止雪崩式溢出。
+    本函数采用分层策略，避免不必要的GPU操作开销：
+    
+    1. fp32: 直接返回（范围足够大）
+    2. fp16 + 值域安全: 快速返回（只需一次 max 检查）
+    3. fp16 + 值域危险: 执行 clamp 保护
     
     Args:
         x: BN 输出张量
-        max_feature_val: 最大特征值（默认1000，足够表达特征但不会溢出）
+        max_feature_val: 最大特征值（默认1000）
     
     Returns:
-        clamp 后的张量
+        可能被保护的张量
     """
     if not torch.is_tensor(x) or not x.is_floating_point():
         return x
     
     dtype = x.dtype
+    
+    # fp32 的范围足够大，不需要保护
+    if dtype == torch.float32:
+        return x
+    
+    # fp16/bfloat16：检查值域是否安全
     if dtype in (torch.float16, torch.bfloat16):
-        # fp16 下使用更保守的限制，防止后续操作溢出
+        # 快速检查：如果最大绝对值 < 阈值的80%，说明很安全，直接返回
+        abs_max = x.abs().max()
+        if abs_max < max_feature_val * 0.8:  # 安全范围
+            return x
+        
+        # 值域接近边界：执行保护
+        # 先 clamp 再处理 NaN，避免双重检查
         x = torch.clamp(x, min=-max_feature_val, max=max_feature_val)
         x = torch.nan_to_num(x, nan=0.0, posinf=max_feature_val, neginf=-max_feature_val)
+        return x
+    
     return x
 
 

@@ -123,12 +123,17 @@ def get_dataset_info(dataset: str) -> dict:
 def get_imagenet_train_transform(input_size: int):
     """
     获取ImageNet训练集数据增强变换
+    
+    Note: 使用更温和的数据增强策略，避免训练/验证集分布差异过大：
+    - RandomResizedCrop scale=(0.08, 1.0): 标准ImageNet增强范围
+    - RandomHorizontalFlip: 保持
+    - 移除RandomRotation: 对ImageNet效果不好，容易造成过拟合
+    - 减弱ColorJitter: 避免颜色扰动过大
     """
     return transforms.Compose([
-        transforms.RandomResizedCrop(input_size, scale=(0.8, 1.0)),
+        transforms.RandomResizedCrop(input_size, scale=(0.08, 1.0)),  # 标准ImageNet范围
         transforms.RandomHorizontalFlip(p=0.5),
-        transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),  # 减弱强度
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
