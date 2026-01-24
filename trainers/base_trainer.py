@@ -33,6 +33,7 @@ class Trainer:
         save_checkpoints=True,
         grad_clip_max_norm=1.0,
         poly4_warmup_ratio=0.5,
+        gate_reg_lambda=1e-3,
         nan_debug=False
     ):
         """
@@ -68,6 +69,7 @@ class Trainer:
         self.save_checkpoints = save_checkpoints
         self.grad_clip_max_norm = grad_clip_max_norm
         self.poly4_warmup_ratio = poly4_warmup_ratio
+        self.gate_reg_lambda = gate_reg_lambda
         self.nan_debug = nan_debug
         self._nan_debug_running = False
         self._nan_hooks = []
@@ -309,7 +311,15 @@ class Trainer:
                     if labels.max().item() >= outputs.shape[1]:
                         print(f"  ❌ 错误: 标签 {labels.max().item()} 超出输出维度 {outputs.shape[1]}!")
                 
-                loss = self.criterion(outputs_fp32, labels)
+                # 计算正则化损失
+                reg_loss = 0.0
+                if self.gate_reg_lambda > 0:
+                    for module in self.model.modules():
+                        if hasattr(module, 'gate_reg_loss'):
+                            reg_loss += module.gate_reg_loss
+                    reg_loss = reg_loss * self.gate_reg_lambda
+                
+                loss = self.criterion(outputs_fp32, labels) + reg_loss
                 
                 if first_batch_diagnostic and batch_idx == 0:
                     print(f"\nLoss计算后:")
@@ -356,6 +366,7 @@ class Trainer:
             # 更新进度条
             pbar.set_postfix({
                 'loss': f'{loss_value:.4f}',
+                'reg': f'{reg_loss.item():.4f}' if isinstance(reg_loss, torch.Tensor) else '0.00',
                 'acc': f'{100. * correct / total:.2f}%'
             })
         

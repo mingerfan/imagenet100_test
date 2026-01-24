@@ -188,14 +188,11 @@ class StablePoly4(nn.Module):
         self.warmup_epochs = warmup_epochs
 
     def forward(self, x):
-        # 数值稳定性保护：限制输入范围
-        x_clipped = torch.clamp(x, min=-10.0, max=10.0)
-
-        orig_dtype = x_clipped.dtype
+        orig_dtype = x.dtype
         if orig_dtype in (torch.float16, torch.bfloat16):
-            x_work = x_clipped.float()
+            x_work = x.float()
         else:
-            x_work = x_clipped
+            x_work = x
 
         # 计算Swish激活（用于预热）
         swish_out = self.warmup_act(x_work)
@@ -240,13 +237,9 @@ class StablePoly4(nn.Module):
         out = out * self.output_scale
         
         # 始终检查并处理 NaN/Inf，防止数值不稳定传播
-        # 先 clamp 到合理范围，再处理可能的 NaN
-        out = torch.clamp(out, min=-100.0, max=100.0)
         out = torch.nan_to_num(out, nan=0.0, posinf=100.0, neginf=-100.0)
         
         if out.dtype != orig_dtype:
-            max_val = torch.finfo(orig_dtype).max
-            out = torch.clamp(out, min=-max_val, max=max_val)
             out = out.to(orig_dtype)
         return out
 
@@ -354,9 +347,12 @@ class SelfGated(nn.Module):
         )
         self.bn_3x3 = nn.BatchNorm2d(mid_channels)
 
-        self.conv_gate = nn.Conv2d(
+        # 使用谱归一化限制Lipschitz常数，防止Gate值爆炸
+        self.conv_gate = nn.utils.spectral_norm(nn.Conv2d(
             mid_channels, mid_channels, kernel_size=5, stride=1, padding=2
-        )
+        ))
+        # 补充BN：确保输入分布正态化，配合后的预缩放
+        self.bn_gate = nn.BatchNorm2d(mid_channels)
 
         self.act = activation()
 
@@ -367,6 +363,9 @@ class SelfGated(nn.Module):
         
         # 用于检测溢出的标志
         self._overflow_warned = False
+        
+        # 正则化损失缓存
+        self.gate_reg_loss = torch.tensor(0.0)
 
     def forward(self, x):
         # 输入检测
@@ -395,10 +394,11 @@ class SelfGated(nn.Module):
             self._overflow_warned = True
 
         gate = self.conv_gate(feat_intrinsic)
+        gate = self.bn_gate(gate)
         
         # gate检测(激活前)
         if not self._overflow_warned and not torch.isfinite(gate).all():
-            print(f"\n⚠️ SelfGated检测: conv_gate后产生非有限值!")
+            print(f"\n⚠️ SelfGated检测: conv_gate+bn后产生非有限值!")
             print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
             finite_mask = torch.isfinite(gate)
             if finite_mask.any():
@@ -407,7 +407,13 @@ class SelfGated(nn.Module):
             print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
             self._overflow_warned = True
         
+        # 结构性预缩放：缩小输入幅度，使其落在多项式(x^4)的稳定区
+        gate = gate * 0.125
+        
         gate = self.act(gate)
+        
+        # 计算激活正则化损失 (L2)
+        self.gate_reg_loss = (gate ** 2).mean()
         
         # gate检测(激活后)
         if not self._overflow_warned and not torch.isfinite(gate).all():
@@ -620,16 +626,22 @@ class GatedDepthwiseConv(nn.Module):
         )
         self.bn = nn.BatchNorm2d(channels)
 
-        # 门控分支：5x5深度卷积
-        self.gate_conv = nn.Conv2d(
+        # 门控分支：5x5深度卷积 + 谱归一化
+        self.gate_conv = nn.utils.spectral_norm(nn.Conv2d(
             channels, channels,
             kernel_size=5, stride=1, padding=2,
             groups=channels, bias=False
-        )
+        ))
+        # 补充BN
+        self.bn_gate = nn.BatchNorm2d(channels)
+        
         self.activation = activation()
         
         # 用于检测溢出的标志
         self._overflow_warned = False
+        
+        # 正则化损失缓存
+        self.gate_reg_loss = torch.tensor(0.0)
 
     def forward(self, x):
         # 输入检测
@@ -657,13 +669,13 @@ class GatedDepthwiseConv(nn.Module):
             print(f"   NaN数量: {torch.isnan(feat_intrinsic).sum().item()}")
             print(f"   Inf数量: {torch.isinf(feat_intrinsic).sum().item()}")
             self._overflow_warned = True
-
         # 门控分支
         gate = self.gate_conv(feat_intrinsic)
+        gate = self.bn_gate(gate) # Added
         
         # gate检测(激活前)
         if not self._overflow_warned and not torch.isfinite(gate).all():
-            print(f"\n⚠️ GatedDepthwiseConv检测: gate_conv后产生非有限值!")
+            print(f"\n⚠️ GatedDepthwiseConv检测: gate_conv+bn后产生非有限值!")
             print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
             finite_mask = torch.isfinite(gate)
             if finite_mask.any():
@@ -672,7 +684,13 @@ class GatedDepthwiseConv(nn.Module):
             print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
             self._overflow_warned = True
         
+        # 结构性预缩放
+        gate = gate * 0.125
+        
         gate = self.activation(gate)
+        
+        # 计算激活正则化损失
+        self.gate_reg_loss = (gate ** 2).mean() # Added
         
         # gate检测(激活后)
         if not self._overflow_warned and not torch.isfinite(gate).all():
