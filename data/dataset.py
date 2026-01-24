@@ -190,6 +190,16 @@ def get_cifar_val_transform(input_size: int, mean, std):
     ])
 
 
+def _seed_worker(worker_id):
+    """
+    DataLoader worker initialization function (must be picklable)
+    """
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    if np is not None:
+        np.random.seed(worker_seed)
+
+
 def create_dataloaders(
     train_dir,
     val_dir,
@@ -333,13 +343,6 @@ def create_dataloaders(
     if seed is not None:
         generator = torch.Generator()
         generator.manual_seed(seed)
-
-        def _seed_worker(worker_id):
-            worker_seed = torch.initial_seed() % 2**32
-            random.seed(worker_seed)
-            if np is not None:
-                np.random.seed(worker_seed)
-
         worker_init_fn = _seed_worker
 
     persistent_workers = num_workers > 0

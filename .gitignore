@@ -48,4 +48,5 @@ target/
 
 generated_networks/
 nas_results
+nas_result
 results_*/

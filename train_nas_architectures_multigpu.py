@@ -262,12 +262,12 @@ def save_results(results, nas_result_dir):
                 'category': result['category'],
                 'arch_id': result['arch_id'],
                 'aznas_fitness': result['aznas_fitness'],
-                'expressivity': result['scores']['expressivity'],
-                'progressivity': result['scores']['progressivity'],
-                'trainability': result['scores']['trainability'],
-                'fhe_latency': result['scores']['fhe_latency'],
-                'fhe_boot_count': result['scores']['fhe_boot_count'],
-                'fhe_max_depth': result['scores']['fhe_max_depth'],
+                'expressivity': result['scores'].get('expressivity', 0.0),
+                'progressivity': result['scores'].get('progressivity', 0.0),
+                'trainability': result['scores'].get('trainability', 0.0),
+                'fhe_latency': result['scores'].get('fhe_latency', 0.0),
+                'fhe_boot_count': result['scores'].get('fhe_boot_count', 0),
+                'fhe_max_depth': result['scores'].get('fhe_max_depth', 0),
                 'generation': result['generation'],
                 'best_val_acc': result['best_val_acc'],
                 'train_time': result['train_time'],
@@ -361,7 +361,7 @@ def parse_args():
                        help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='Initial learning rate')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=0 if os.name == 'nt' else 4,
                        help='Number of data loading workers per GPU')
 
     # Device settings

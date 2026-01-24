@@ -348,11 +348,13 @@ class SelfGated(nn.Module):
         self.bn_3x3 = nn.BatchNorm2d(mid_channels)
 
         # 使用谱归一化限制Lipschitz常数，防止Gate值爆炸
+        # 移除BN：BN会破坏SpectralNorm的Lipschitz约束，导致验证集上数值爆炸
+        # 启用bias：因为移除了BN，需要卷积层自己学习偏置
         self.conv_gate = nn.utils.spectral_norm(nn.Conv2d(
-            mid_channels, mid_channels, kernel_size=5, stride=1, padding=2
+            mid_channels, mid_channels, kernel_size=5, stride=1, padding=2, bias=True
         ))
-        # 补充BN：确保输入分布正态化，配合后的预缩放
-        self.bn_gate = nn.BatchNorm2d(mid_channels)
+        # 移除BN层
+        self.bn_gate = nn.Identity()
 
         self.act = activation()
 
@@ -627,13 +629,15 @@ class GatedDepthwiseConv(nn.Module):
         self.bn = nn.BatchNorm2d(channels)
 
         # 门控分支：5x5深度卷积 + 谱归一化
+        # 移除BN：BN会破坏SpectralNorm的Lipschitz约束
+        # 启用bias：需卷积层自己学习偏置
         self.gate_conv = nn.utils.spectral_norm(nn.Conv2d(
             channels, channels,
             kernel_size=5, stride=1, padding=2,
-            groups=channels, bias=False
+            groups=channels, bias=True
         ))
-        # 补充BN
-        self.bn_gate = nn.BatchNorm2d(channels)
+        # 移除BN
+        self.bn_gate = nn.Identity()
         
         self.activation = activation()
         

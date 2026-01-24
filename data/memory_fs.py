@@ -7,9 +7,15 @@
 import os
 import shutil
 import time
-import fcntl
+import shutil
+import time
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows compatibility
 from pathlib import Path
 from typing import Optional, Tuple
+import platform
 
 
 class MemoryFSManager:
@@ -46,6 +52,9 @@ class MemoryFSManager:
         
         使用fcntl.flock实现跨进程的文件锁机制
         """
+        if fcntl is None:
+            return True # Windows fallback: allow concurrent (or rely on single-process)
+
         try:
             # 创建锁文件（如果不存在）
             self.lock_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +99,9 @@ class MemoryFSManager:
         Returns:
             (是否可用, 原因/信息)
         """
+        if fcntl is None or platform.system() == 'Windows':
+            return False, "Windows不支持 /dev/shm 和 fcntl"
+
         # 1. 检查 /dev/shm 是否存在
         if not Path("/dev/shm").exists():
             return False, "/dev/shm 不存在"

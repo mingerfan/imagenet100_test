@@ -83,10 +83,13 @@ def train_architecture(arch_info, train_loader, val_loader, result_dir, device, 
     print(f"Training: {category}/{arch_id}")
     print(f"{'='*80}")
     print(f"AZ-NAS Fitness: {arch_info['aznas_fitness']:.4f}")
-    print(f"Expressivity: {arch_info['scores']['expressivity']:.4f}")
-    print(f"Progressivity: {arch_info['scores']['progressivity']:.4f}")
-    print(f"Trainability: {arch_info['scores']['trainability']:.4f}")
-    print(f"FHE Latency: {arch_info['scores']['fhe_latency']:.0f}")
+    if 'expressivity' in arch_info['scores']:
+        print(f"Expressivity: {arch_info['scores']['expressivity']:.4f}")
+    if 'progressivity' in arch_info['scores']:
+        print(f"Progressivity: {arch_info['scores']['progressivity']:.4f}")
+    if 'trainability' in arch_info['scores']:
+        print(f"Trainability: {arch_info['scores']['trainability']:.4f}")
+    print(f"FHE Latency: {arch_info['scores'].get('fhe_latency', 0.0):.0f}")
 
     # Create model from config
     try:
@@ -211,12 +214,12 @@ def save_results(results, nas_result_dir):
                 'category': result['category'],
                 'arch_id': result['arch_id'],
                 'aznas_fitness': result['aznas_fitness'],
-                'expressivity': result['scores']['expressivity'],
-                'progressivity': result['scores']['progressivity'],
-                'trainability': result['scores']['trainability'],
-                'fhe_latency': result['scores']['fhe_latency'],
-                'fhe_boot_count': result['scores']['fhe_boot_count'],
-                'fhe_max_depth': result['scores']['fhe_max_depth'],
+                'expressivity': result['scores'].get('expressivity', 0.0),
+                'progressivity': result['scores'].get('progressivity', 0.0),
+                'trainability': result['scores'].get('trainability', 0.0),
+                'fhe_latency': result['scores'].get('fhe_latency', 0.0),
+                'fhe_boot_count': result['scores'].get('fhe_boot_count', 0),
+                'fhe_max_depth': result['scores'].get('fhe_max_depth', 0),
                 'generation': result['generation'],
                 'best_val_acc': result['best_val_acc'],
                 'train_time': result['train_time'],
@@ -310,7 +313,7 @@ def parse_args():
                        help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                        help='Initial learning rate')
-    parser.add_argument('--num_workers', type=int, default=8,
+    parser.add_argument('--num_workers', type=int, default=0 if os.name == 'nt' else 8,
                        help='Number of data loading workers')
 
     # Device settings

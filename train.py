@@ -124,7 +124,8 @@ def parse_args():
     parser.add_argument(
         '--num_workers',
         type=int,
-        default=16,
+        type=int,
+        default=0 if os.name == 'nt' else 16,
         help='数据加载worker数量'
     )
     
