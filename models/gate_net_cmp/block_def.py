@@ -1,6 +1,10 @@
 import torch
 import torch.nn as nn
 
+# 常量定义
+BN_EPS = 1e-3  # 高eps防止验证集统计漂移
+GATE_SCALE_INIT = 1e-3  # 门控缩放初始值
+
 
 def _safe_gated_mul(feat, gate):
     if not torch.is_tensor(feat):
@@ -345,7 +349,7 @@ class SelfGated(nn.Module):
         self.conv_3x3 = nn.Conv2d(
             in_channels, mid_channels, kernel_size=3, stride=stride, padding=1
         )
-        self.bn_3x3 = nn.BatchNorm2d(mid_channels)
+        self.bn_3x3 = nn.BatchNorm2d(mid_channels, eps=BN_EPS)
 
         # 使用谱归一化限制Lipschitz常数，防止Gate值爆炸
         # 移除BN：BN会破坏SpectralNorm的Lipschitz约束，导致验证集上数值爆炸
@@ -359,9 +363,18 @@ class SelfGated(nn.Module):
         self.act = activation()
 
         self.conv_out = nn.Conv2d(out_channels, out_channels, kernel_size=1)
-        self.bn_out = nn.BatchNorm2d(out_channels)
+        self.bn_out = nn.BatchNorm2d(out_channels, eps=BN_EPS)
+        
+        # 门控缩放参数 (LayerScale/ReZero思想)
+        self.gate_scale = nn.Parameter(torch.tensor(GATE_SCALE_INIT))
 
         self.shortcut = nn.Identity()
+        
+        # Zero-Init for Gated Branch
+        # conv_out 输入是 concat([u, gate_branch])，后半通道 = gated-half
+        # 初始化时把 conv_out 对后半通道的权重置 0
+        with torch.no_grad():
+             self.conv_out.weight[:, mid_channels:, :, :] = 0
         
         # 用于检测溢出的标志
         self._overflow_warned = False
@@ -409,27 +422,25 @@ class SelfGated(nn.Module):
             print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
             self._overflow_warned = True
         
-        # 结构性预缩放：缩小输入幅度，使其落在多项式(x^4)的稳定区
+        # 结构性预缩放：缩小输入幅度
         gate = gate * 0.125
         
-        gate = self.act(gate)
+        # delta = φ(raw)  (扰动项)
+        delta = self.act(gate)
         
-        # 计算激活正则化损失 (L2)
-        self.gate_reg_loss = (gate ** 2).mean()
+        # 计算激活正则化损失 (L2) - 改为对delta约束
+        self.gate_reg_loss = (delta ** 2).mean()
         
         # gate检测(激活后)
-        if not self._overflow_warned and not torch.isfinite(gate).all():
+        if not self._overflow_warned and not torch.isfinite(delta).all():
             print(f"\n⚠️ SelfGated检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.act).__name__}")
-            print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
-            finite_mask = torch.isfinite(gate)
-            if finite_mask.any():
-                print(f"   有限值范围: [{gate[finite_mask].min().item():.2f}, {gate[finite_mask].max().item():.2f}]")
-            print(f"   NaN数量: {torch.isnan(gate).sum().item()}")
-            print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
+            print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
             self._overflow_warned = True
 
-        feat_generated = _safe_gated_mul(feat_intrinsic, gate)
+        # 门控残差化: feat_generated = gate_scale * (u ⊙ delta)
+        gated_res = _safe_gated_mul(feat_intrinsic, delta)
+        feat_generated = self.gate_scale * gated_res
         
         # feat_generated检测
         if not self._overflow_warned and not torch.isfinite(feat_generated).all():
@@ -626,7 +637,7 @@ class GatedDepthwiseConv(nn.Module):
             kernel_size=3, stride=stride, padding=1,
             groups=channels, bias=False
         )
-        self.bn = nn.BatchNorm2d(channels)
+        self.bn = nn.BatchNorm2d(channels, eps=BN_EPS)
 
         # 门控分支：5x5深度卷积 + 谱归一化
         # 移除BN：BN会破坏SpectralNorm的Lipschitz约束
@@ -640,6 +651,9 @@ class GatedDepthwiseConv(nn.Module):
         self.bn_gate = nn.Identity()
         
         self.activation = activation()
+        
+        # 门控缩放参数
+        self.gate_scale = nn.Parameter(torch.tensor(GATE_SCALE_INIT))
         
         # 用于检测溢出的标志
         self._overflow_warned = False
@@ -691,25 +705,22 @@ class GatedDepthwiseConv(nn.Module):
         # 结构性预缩放
         gate = gate * 0.125
         
-        gate = self.activation(gate)
+        # delta = activation(raw)
+        delta = self.activation(gate)
         
         # 计算激活正则化损失
-        self.gate_reg_loss = (gate ** 2).mean() # Added
+        self.gate_reg_loss = (delta ** 2).mean()
         
         # gate检测(激活后)
-        if not self._overflow_warned and not torch.isfinite(gate).all():
+        if not self._overflow_warned and not torch.isfinite(delta).all():
             print(f"\n⚠️ GatedDepthwiseConv检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.activation).__name__}")
-            print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
-            finite_mask = torch.isfinite(gate)
-            if finite_mask.any():
-                print(f"   有限值范围: [{gate[finite_mask].min().item():.2f}, {gate[finite_mask].max().item():.2f}]")
-            print(f"   NaN数量: {torch.isnan(gate).sum().item()}")
-            print(f"   Inf数量: {torch.isinf(gate).sum().item()}")
+            print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
             self._overflow_warned = True
 
-        # 生成门控特征
-        feat_gated = _safe_gated_mul(feat_intrinsic, gate)
+        # 生成门控特征 (残差化)
+        gated_res = _safe_gated_mul(feat_intrinsic, delta)
+        feat_gated = self.gate_scale * gated_res
         
         # feat_gated检测
         if not self._overflow_warned and not torch.isfinite(feat_gated).all():
@@ -797,7 +808,7 @@ class MBConvBlock(nn.Module):
                 in_channels, expansion_out_channels,
                 kernel_size=1, bias=False
             )
-            self.bn1 = nn.BatchNorm2d(expansion_out_channels)
+            self.bn1 = nn.BatchNorm2d(expansion_out_channels, eps=BN_EPS)
 
         # 深度卷积
         if use_gated_dw:
@@ -822,7 +833,7 @@ class MBConvBlock(nn.Module):
                 kernel_size=3, stride=stride, padding=1,
                 groups=expansion_out_channels, bias=False
             )
-            self.bn2 = nn.BatchNorm2d(expansion_out_channels)
+            self.bn2 = nn.BatchNorm2d(expansion_out_channels, eps=BN_EPS)
             self.dw_out_channels = expansion_out_channels
 
         # SE模块（可选）
@@ -834,7 +845,19 @@ class MBConvBlock(nn.Module):
             self.dw_out_channels, out_channels,
             kernel_size=1, bias=False
         )
-        self.bn3 = nn.BatchNorm2d(out_channels)
+        self.bn3 = nn.BatchNorm2d(out_channels, eps=BN_EPS)
+        
+        # 关键优化：Init-Zero for Gated Branch
+        if use_gated_dw:
+            # dw_out_channels 是 concat 后的通道数
+            # intrinsic_half = dw_out_channels // 2
+            # gated_half starts at intrinsic_half
+            intrinsic_half = self.dw_out_channels // 2
+            
+            # 初始化时让 project_conv 暂时“不看”gated_half
+            # 这样初始状态下，网络表现得像没有加 gate 分支一样
+            with torch.no_grad():
+                self.project_conv.weight[:, intrinsic_half:, :, :] = 0
 
         self.activation = activation()
 

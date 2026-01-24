@@ -35,7 +35,9 @@ from models.gate_net_cmp.block_def import (
     FullGatedBasicBlock,
     MBConvBlock,
     SelfGated,
+    SelfGated,
     StablePoly4,
+    BN_EPS,
 )
 
 
@@ -757,6 +759,10 @@ class GeneratedNetwork(nn.Module):
         # 输出层
         final_channels = config.blocks[-1].out_channels
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        
+        # 关键优化：FC前增加BN1d，抑制特征向量范数偶发变大
+        self.pre_fc_bn = nn.BatchNorm1d(final_channels, eps=BN_EPS)
+        
         self.fc = nn.Linear(final_channels, config.num_classes)
 
         # 初始化权重
@@ -796,6 +802,9 @@ class GeneratedNetwork(nn.Module):
         # Output
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
+        
+        x = self.pre_fc_bn(x)  # 新增
+        
         x = self.fc(x)
 
         return x
