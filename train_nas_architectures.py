@@ -160,7 +160,9 @@ def train_architecture(arch_info, train_loader, val_loader, result_dir, device, 
         use_amp=args.use_amp,
         save_freq=args.save_freq,
         save_checkpoints=args.save_checkpoints,
-        grad_clip_max_norm=1.0
+        grad_clip_max_norm=1.0,
+        val_batch_stats_path=os.path.join(arch_result_dir, 'val_batch_stats.csv'),
+        val_batch_stats_anomaly_only=True
     )
 
     # Train

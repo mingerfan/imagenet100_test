@@ -4,6 +4,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
@@ -34,7 +35,13 @@ class Trainer:
         grad_clip_max_norm=1.0,
         poly4_warmup_ratio=0.5,
         gate_reg_lambda=1e-3,
-        nan_debug=False
+        nan_debug=False,
+        val_batch_stats_path=None,
+        val_batch_stats_quantile=0.999,
+        val_batch_stats_anomaly_only=False,
+        val_batch_stats_abs_logit_thresh=None,
+        val_batch_stats_margin_thresh=None,
+        val_batch_stats_loss_p999_thresh=None
     ):
         """
         初始化训练器
@@ -71,6 +78,12 @@ class Trainer:
         self.poly4_warmup_ratio = poly4_warmup_ratio
         self.gate_reg_lambda = gate_reg_lambda
         self.nan_debug = nan_debug
+        self.val_batch_stats_path = val_batch_stats_path
+        self.val_batch_stats_quantile = val_batch_stats_quantile
+        self.val_batch_stats_anomaly_only = val_batch_stats_anomaly_only
+        self.val_batch_stats_abs_logit_thresh = val_batch_stats_abs_logit_thresh
+        self.val_batch_stats_margin_thresh = val_batch_stats_margin_thresh
+        self.val_batch_stats_loss_p999_thresh = val_batch_stats_loss_p999_thresh
         self._nan_debug_running = False
         self._nan_hooks = []
         self._nan_triggered = False
@@ -395,10 +408,37 @@ class Trainer:
         correct = 0
         total = 0
         
+        stats_file = None
+        stats_writer = None
+        if self.val_batch_stats_path:
+            if self.val_batch_stats_anomaly_only:
+                if self.val_batch_stats_abs_logit_thresh is None:
+                    self.val_batch_stats_abs_logit_thresh = 50.0
+                if self.val_batch_stats_margin_thresh is None:
+                    self.val_batch_stats_margin_thresh = 50.0
+                if self.val_batch_stats_loss_p999_thresh is None:
+                    self.val_batch_stats_loss_p999_thresh = 50.0
+            try:
+                write_header = not os.path.exists(self.val_batch_stats_path) or os.path.getsize(self.val_batch_stats_path) == 0
+            except OSError:
+                write_header = True
+            stats_file = open(self.val_batch_stats_path, 'a', newline='')
+            fieldnames = [
+                'epoch',
+                'batch',
+                'num_samples',
+                'max_abs_logit',
+                'max_margin',
+                'loss_p999'
+            ]
+            stats_writer = csv.DictWriter(stats_file, fieldnames=fieldnames)
+            if write_header:
+                stats_writer.writeheader()
+
         with torch.no_grad():
             pbar = tqdm(self.val_loader, desc='Validating', leave=False)
             
-            for images, labels in pbar:
+            for batch_idx, (images, labels) in enumerate(pbar):
                 images = images.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
                 
@@ -443,7 +483,41 @@ class Trainer:
                         print(f"      前10个logits: {logit_preview}")
                     
                     # Skip this batch
+                    if stats_writer is not None:
+                        stats_writer.writerow({
+                            'epoch': epoch if epoch is not None else '',
+                            'batch': batch_idx,
+                            'num_samples': labels.size(0),
+                            'max_abs_logit': float('nan'),
+                            'max_margin': float('nan'),
+                            'loss_p999': float('nan')
+                        })
                     continue
+
+                if stats_writer is not None:
+                    max_abs_logit = outputs_fp32.abs().max().item()
+                    max_logits = outputs_fp32.max(dim=1).values
+                    true_logits = outputs_fp32.gather(1, labels.unsqueeze(1)).squeeze(1)
+                    margins = max_logits - true_logits
+                    max_margin = margins.max().item()
+                    loss_per_sample = F.cross_entropy(outputs_fp32, labels, reduction='none')
+                    loss_p999 = torch.quantile(loss_per_sample.float(), self.val_batch_stats_quantile).item()
+                    is_anomalous = True
+                    if self.val_batch_stats_anomaly_only:
+                        is_anomalous = (
+                            (self.val_batch_stats_abs_logit_thresh is not None and max_abs_logit >= self.val_batch_stats_abs_logit_thresh)
+                            or (self.val_batch_stats_margin_thresh is not None and max_margin >= self.val_batch_stats_margin_thresh)
+                            or (self.val_batch_stats_loss_p999_thresh is not None and loss_p999 >= self.val_batch_stats_loss_p999_thresh)
+                        )
+                    if is_anomalous:
+                        stats_writer.writerow({
+                            'epoch': epoch if epoch is not None else '',
+                            'batch': batch_idx,
+                            'num_samples': labels.size(0),
+                            'max_abs_logit': max_abs_logit,
+                            'max_margin': max_margin,
+                            'loss_p999': loss_p999
+                        })
                 
                 total_loss += loss_value
                 _, predicted = outputs.max(1)
@@ -458,6 +532,8 @@ class Trainer:
         # Safety check: ensure we have valid data
         if total == 0:
             print("\n⚠ Warning: No valid samples in validation!")
+            if stats_file is not None:
+                stats_file.close()
             return float('inf'), 0.0
         
         avg_loss = total_loss / len(self.val_loader)
@@ -468,6 +544,9 @@ class Trainer:
             print(f"\n⚠ Warning: avg_loss is NaN/Inf! Setting to inf.")
             avg_loss = float('inf')
         
+        if stats_file is not None:
+            stats_file.close()
+
         return avg_loss, avg_acc
     
     def save_checkpoint(self, epoch, is_best=False, filename=None):

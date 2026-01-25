@@ -173,7 +173,9 @@ def train_architecture_worker(arch_info, gpu_id, args, result_queue):
         use_amp=args.use_amp,
         save_freq=args.save_freq,
         save_checkpoints=args.save_checkpoints,
-        grad_clip_max_norm=1.0
+        grad_clip_max_norm=1.0,
+        val_batch_stats_path=os.path.join(result_dir, 'val_batch_stats.csv'),
+        val_batch_stats_anomaly_only=True
     )
 
         # Train
