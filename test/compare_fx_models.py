@@ -1,15 +1,21 @@
 import argparse
 import difflib
 import json
+import os
+import sys
 from pathlib import Path
 
 import torch
 from torch.fx import symbolic_trace
 from torch.fx.passes.shape_prop import ShapeProp
 
-from models import get_model
-from network_gen import create_network
-from network_gen.network_config import NetworkConfig
+# Ensure project root is on sys.path when running from elsewhere.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT_DIR))
+
+from models import get_model  # noqa: E402
+from network_gen import create_network  # noqa: E402
+from network_gen.network_config import NetworkConfig  # noqa: E402
 
 
 def _load_json_config(path: Path) -> NetworkConfig:
