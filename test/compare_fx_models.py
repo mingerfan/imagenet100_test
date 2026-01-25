@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import torch
-from torch.fx import symbolic_trace
+from torch.fx import GraphModule, Tracer
 from torch.fx.passes.shape_prop import ShapeProp
 
 # Ensure project root is on sys.path when running from elsewhere.
@@ -55,9 +55,22 @@ def _graph_signatures(gm):
     return [_node_signature(gm, node, idx) for idx, node in enumerate(gm.graph.nodes)]
 
 
-def _trace_with_shapes(model, input_size):
+class _LeafModuleTracer(Tracer):
+    def __init__(self, leaf_module_names):
+        super().__init__()
+        self._leaf_module_names = set(leaf_module_names or [])
+
+    def is_leaf_module(self, m, module_qualified_name):
+        if m.__class__.__name__ in self._leaf_module_names:
+            return True
+        return super().is_leaf_module(m, module_qualified_name)
+
+
+def _trace_with_shapes(model, input_size, leaf_module_names=None):
     model.eval()
-    gm = symbolic_trace(model)
+    tracer = _LeafModuleTracer(leaf_module_names)
+    graph = tracer.trace(model)
+    gm = GraphModule(model, graph)
     dummy = torch.zeros(1, 3, input_size, input_size)
     ShapeProp(gm).propagate(dummy)
     return gm
@@ -73,6 +86,12 @@ def main():
     parser.add_argument("--model", type=str, required=True, help="Registered model name")
     parser.add_argument("--num_classes", type=int, default=100, help="Num classes override")
     parser.add_argument("--input_size", type=int, default=224, help="Input size for tracing")
+    parser.add_argument(
+        "--leaf_modules",
+        type=str,
+        default="SelfGated",
+        help="Comma-separated module class names to treat as leaf during tracing",
+    )
     args = parser.parse_args()
 
     json_path = Path(args.json)
@@ -86,8 +105,9 @@ def main():
     model_json = create_network(config)
     model_gate = get_model(args.model, num_classes=args.num_classes, pretrained=False)
 
-    gm_json = _trace_with_shapes(model_json, args.input_size)
-    gm_gate = _trace_with_shapes(model_gate, args.input_size)
+    leaf_names = [name.strip() for name in args.leaf_modules.split(",") if name.strip()]
+    gm_json = _trace_with_shapes(model_json, args.input_size, leaf_names)
+    gm_gate = _trace_with_shapes(model_gate, args.input_size, leaf_names)
 
     print("=" * 80)
     print("Model Summary")
