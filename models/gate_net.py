@@ -10,7 +10,8 @@ from .gate_net_cmp.block_def import (
     LearnableSwish,
     LearnableRelu,
     StablePoly4,
-    Swish
+    Swish,
+    BN_EPS,
 )
 
 
@@ -25,26 +26,44 @@ class ResNet18Gate(nn.Module):
         first_block_factor: bottleneck 的扩展因子，默认 0.25
     """
     
-    def __init__(self, 
-                 first_block_type: str,
-                 activation,
-                 num_classes: int = 100,
-                 first_block_factor: float = 0.25):
+    def __init__(
+        self,
+        first_block_type: str,
+        activation,
+        num_classes: int = 100,
+        first_block_factor: float = 0.25,
+        stem_activation=None,
+        stem_pool: str = "max",
+        full_activation: bool = False,
+        use_pre_fc_bn: bool = False,
+    ):
         super().__init__()
         
         self.activation = activation
+        self.stem_activation = stem_activation or Relu
+        self.stem_pool = stem_pool
+        self.full_activation = full_activation
+        self.use_pre_fc_bn = use_pre_fc_bn
         
         # 初始层: conv7x7 + bn + relu + maxpool
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.stem_act = self.stem_activation()
+        if self.stem_pool == "max":
+            self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        elif self.stem_pool == "avg":
+            self.pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        elif self.stem_pool == "none":
+            self.pool = nn.Identity()
+        else:
+            raise ValueError(f"Unknown stem_pool: {self.stem_pool}")
         
         # 构建特殊配置：替换 layer1 的第一个 block
         self.special_resnet = self._build_special_resnet(first_block_type, first_block_factor)
         
         # 输出层
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.pre_fc_bn = nn.BatchNorm1d(512, eps=BN_EPS) if self.use_pre_fc_bn else None
         self.fc = nn.Linear(512, num_classes)
         
         # 初始化权重
@@ -61,6 +80,7 @@ class ResNet18Gate(nn.Module):
         - layer4: 2个 BasicBlock (256→512, stride=2)
         """
         
+        later_activation = self.activation if self.full_activation else Relu
         config = [
             # Layer 1: 第一个 block 使用指定类型，第二个保持 basic
             {"block_type": first_block_type, "out_channels": 64, "num_blocks": 1, 
@@ -69,13 +89,13 @@ class ResNet18Gate(nn.Module):
              "activation": self.activation},
             # Layer 2
             {"block_type": "basic", "out_channels": 128, "stride": 2, "num_blocks": 2, 
-             "activation": Relu},
+             "activation": later_activation},
             # Layer 3
             {"block_type": "basic", "out_channels": 256, "stride": 2, "num_blocks": 2, 
-             "activation": Relu},
+             "activation": later_activation},
             # Layer 4
             {"block_type": "basic", "out_channels": 512, "stride": 2, "num_blocks": 2, 
-             "activation": Relu},
+             "activation": later_activation},
         ]
         
         return SpecialResNet(config=config, in_channels=64)
@@ -101,8 +121,8 @@ class ResNet18Gate(nn.Module):
         # 初始层
         x = self.conv1(x)
         x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
+        x = self.stem_act(x)
+        x = self.pool(x)
         
         # 主干网络
         x = self.special_resnet(x)
@@ -110,6 +130,8 @@ class ResNet18Gate(nn.Module):
         # 输出层
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
+        if self.pre_fc_bn is not None:
+            x = self.pre_fc_bn(x)
         x = self.fc(x)
         
         return x
@@ -151,7 +173,16 @@ def resnet_basic_learnableswish(num_classes=100, pretrained=False):
 
 @register_model('resnet-basic-swish-layer1block1')
 def resnet_basic_swish(num_classes=100, pretrained=False):
-    return ResNet18Gate('basic', Swish, num_classes, first_block_factor=0.25)
+    return ResNet18Gate(
+        'basic',
+        Swish,
+        num_classes,
+        first_block_factor=0.25,
+        stem_activation=Swish,
+        stem_pool="avg",
+        full_activation=True,
+        use_pre_fc_bn=True,
+    )
 
 
 @register_model('resnet-basic-learnablerelu-layer1block1')
