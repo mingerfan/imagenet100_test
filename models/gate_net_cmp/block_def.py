@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # 常量定义
 BN_EPS = 1e-3  # 高eps防止验证集统计漂移
@@ -157,10 +158,23 @@ class StablePoly4(nn.Module):
     - 限制高阶项的范围
     """
 
-    def __init__(self, output_scale=0.1, warmup_epochs=30):
+    def __init__(
+        self,
+        output_scale=0.1,
+        warmup_epochs=30,
+        alpha_min=0.02,
+        transition_epochs=10,
+        in_scale_init=-1.0,
+        range_r=2.0,
+        deriv_L=3.0,
+        enable_range_loss=True,
+        enable_deriv_loss=True,
+    ):
         super().__init__()
         self.output_scale = output_scale
         self.warmup_epochs = warmup_epochs
+        self.alpha_min = alpha_min
+        self.transition_epochs = transition_epochs
         self.warmup_act = nn.SiLU()
 
         # 使用更小的初始化值，防止高阶项导致梯度爆炸
@@ -171,8 +185,19 @@ class StablePoly4(nn.Module):
         self.d = nn.Parameter(torch.tensor(0.5))  # 线性项降为0.5
         self.e = nn.Parameter(torch.tensor(0.0))
 
+        # 可学习输入缩放（log-parameterization确保为正）
+        self.log_in_scale = nn.Parameter(torch.tensor(in_scale_init))
+
         # 梯度裁剪阈值
         self.grad_clip_value = 1.0
+
+        # 正则化配置与缓存
+        self.range_r = range_r
+        self.deriv_L = deriv_L
+        self.enable_range_loss = enable_range_loss
+        self.enable_deriv_loss = enable_deriv_loss
+        self.range_loss = torch.tensor(0.0)
+        self.deriv_loss = torch.tensor(0.0)
 
         # 当前epoch（用于控制过渡）
         # 使用 register_buffer 确保 current_epoch 被保存到 state_dict 中
@@ -191,6 +216,27 @@ class StablePoly4(nn.Module):
         """
         self.warmup_epochs = warmup_epochs
 
+    def set_alpha_schedule(self, alpha_min=None, transition_epochs=None):
+        """动态设置 alpha 过渡策略"""
+        if alpha_min is not None:
+            self.alpha_min = float(alpha_min)
+        if transition_epochs is not None:
+            self.transition_epochs = int(transition_epochs)
+
+    def set_range_params(self, range_r=None, enable=None):
+        """动态设置输入范围约束参数"""
+        if range_r is not None:
+            self.range_r = float(range_r)
+        if enable is not None:
+            self.enable_range_loss = bool(enable)
+
+    def set_deriv_params(self, deriv_L=None, enable=None):
+        """动态设置导数约束参数"""
+        if deriv_L is not None:
+            self.deriv_L = float(deriv_L)
+        if enable is not None:
+            self.enable_deriv_loss = bool(enable)
+
     def forward(self, x):
         orig_dtype = x.dtype
         if orig_dtype in (torch.float16, torch.bfloat16):
@@ -201,11 +247,12 @@ class StablePoly4(nn.Module):
         # 计算Swish激活（用于预热）
         swish_out = self.warmup_act(x_work)
 
-        # 计算多项式激活
-        x2 = x_work * x_work
-        x3 = x2 * x_work
-        x4 = x3 * x_work
+        # 输入范围控制：可学习缩放，限制进入多项式的数值范围
+        log_in_scale = torch.clamp(self.log_in_scale, min=-6.0, max=2.0)
+        in_scale = torch.exp(log_in_scale)
+        x_poly = x_work * in_scale
 
+        # 计算多项式激活
         # 对高阶参数进行软约束，防止它们过大
         a_clamped = torch.clamp(self.a, min=-0.01, max=0.01)
         b_clamped = torch.clamp(self.b, min=-0.1, max=0.1)
@@ -213,26 +260,45 @@ class StablePoly4(nn.Module):
         d_clamped = torch.clamp(self.d, min=-5.0, max=5.0)
         e_clamped = torch.clamp(self.e, min=-5.0, max=5.0)
 
+        # Horner 形式计算多项式，数值更稳
         poly_out = (
-            a_clamped * x4
-            + b_clamped * x3
-            + c_clamped * x2
-            + d_clamped * x_work
+            (((a_clamped * x_poly + b_clamped) * x_poly + c_clamped) * x_poly + d_clamped)
+            * x_poly
             + e_clamped
         )
+
+        # 输入范围正则
+        if self.enable_range_loss:
+            range_excess = F.relu(x_poly.abs() - self.range_r)
+            self.range_loss = (range_excess * range_excess).mean()
+        else:
+            self.range_loss = x_poly.new_tensor(0.0)
+
+        # 多项式导数正则（包含 output_scale）
+        if self.enable_deriv_loss:
+            fprime = self.output_scale * (
+                (((4.0 * a_clamped) * x_poly + 3.0 * b_clamped) * x_poly + 2.0 * c_clamped)
+                * x_poly
+                + d_clamped
+            )
+            deriv_excess = F.relu(fprime.abs() - self.deriv_L)
+            self.deriv_loss = (deriv_excess * deriv_excess).mean()
+        else:
+            self.deriv_loss = x_poly.new_tensor(0.0)
 
         # 渐进式过渡：前warmup_epochs个epoch完全使用Swish，然后平滑过渡到多项式
         # 从 buffer 中获取当前 epoch 值
         epoch = self.current_epoch.item()
+        alpha_min = max(0.0, min(1.0, float(self.alpha_min)))
+        transition_epochs = max(0, int(self.transition_epochs))
         if epoch < self.warmup_epochs:
-            # 预热阶段：使用Swish
-            alpha = 0.0
-        elif epoch < self.warmup_epochs + 10:
-            # 过渡阶段（10个epoch）：从Swish平滑过渡到多项式
-            progress = (epoch - self.warmup_epochs) / 10.0
-            alpha = progress
+            # 预热阶段：使用Swish，但保持poly分支有梯度
+            alpha = alpha_min
+        elif transition_epochs > 0 and epoch < self.warmup_epochs + transition_epochs:
+            # 过渡阶段：从alpha_min平滑过渡到1.0
+            progress = (epoch - self.warmup_epochs) / float(transition_epochs)
+            alpha = alpha_min + (1.0 - alpha_min) * progress
         else:
-            # 完全使用多项式
             alpha = 1.0
 
         # 混合Swish和多项式输出
@@ -717,7 +783,7 @@ class GatedDepthwiseConv(nn.Module):
         
         # delta检测(激活后)
         if not self._overflow_warned and not torch.isfinite(delta).all():
-            print(f"\n⚠️ GatedDepthwiseConv检测: 激活函数后产生非有限值!")
+            print("\n⚠️ GatedDepthwiseConv检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.activation).__name__}")
             print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
             self._overflow_warned = True
@@ -729,7 +795,7 @@ class GatedDepthwiseConv(nn.Module):
         
         # feat_gated检测
         if not self._overflow_warned and not torch.isfinite(feat_gated).all():
-            print(f"\n⚠️ GatedDepthwiseConv检测: 门控乘法后产生非有限值!")
+            print("\n⚠️ GatedDepthwiseConv检测: 门控乘法后产生非有限值!")
             print(f"   feat_gated shape: {feat_gated.shape}, dtype: {feat_gated.dtype}")
             finite_mask = torch.isfinite(feat_gated)
             if finite_mask.any():
@@ -743,7 +809,7 @@ class GatedDepthwiseConv(nn.Module):
         
         # 最终输出检测
         if not self._overflow_warned and not torch.isfinite(out).all():
-            print(f"\n⚠️ GatedDepthwiseConv检测: concat后产生非有限值!")
+            print("\n⚠️ GatedDepthwiseConv检测: concat后产生非有限值!")
             print(f"   最终输出shape: {out.shape}, dtype: {out.dtype}")
             finite_mask = torch.isfinite(out)
             if finite_mask.any():
@@ -877,7 +943,7 @@ class MBConvBlock(nn.Module):
         
         # 输入检测
         if not self._overflow_warned and not torch.isfinite(x).all():
-            print(f"\n⚠️ MBConvBlock输入检测: 输入包含非有限值!")
+            print("\n⚠️ MBConvBlock输入检测: 输入包含非有限值!")
             print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
             print(f"   NaN数量: {torch.isnan(x).sum().item()}")
             print(f"   Inf数量: {torch.isinf(x).sum().item()}")
@@ -893,7 +959,7 @@ class MBConvBlock(nn.Module):
             
             # expansion后检测（关键位置！）
             if not self._overflow_warned and not torch.isfinite(out).all():
-                print(f"\n⚠️ MBConvBlock检测: expansion+bn后产生非有限值!")
+                print("\n⚠️ MBConvBlock检测: expansion+bn后产生非有限值!")
                 print(f"   out shape: {out.shape}, dtype: {out.dtype}")
                 finite_mask = torch.isfinite(out)
                 if finite_mask.any():
@@ -906,7 +972,7 @@ class MBConvBlock(nn.Module):
             
             # activation后检测
             if not self._overflow_warned and not torch.isfinite(out).all():
-                print(f"\n⚠️ MBConvBlock检测: expansion激活后产生非有限值!")
+                print("\n⚠️ MBConvBlock检测: expansion激活后产生非有限值!")
                 print(f"   激活函数类型: {type(self.activation).__name__}")
                 print(f"   out shape: {out.shape}, dtype: {out.dtype}")
                 finite_mask = torch.isfinite(out)

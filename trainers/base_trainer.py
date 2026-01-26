@@ -37,6 +37,12 @@ class Trainer:
         resume_path=None,
         resume_strict=True,
         gate_reg_lambda=1e-3,
+        poly4_range_lambda=0.0,
+        poly4_deriv_lambda=0.0,
+        poly4_range_r=2.0,
+        poly4_deriv_L=3.0,
+        poly4_alpha_min=0.02,
+        poly4_transition_epochs=10,
         nan_debug=False,
         val_force_fp32=True,
         val_batch_stats_path=None,
@@ -63,6 +69,12 @@ class Trainer:
             save_freq: 保存检查点的频率
             grad_clip_max_norm: 梯度裁剪的最大范数，用于防止梯度爆炸
             poly4_warmup_ratio: StablePoly4的warmup比例（默认0.5，即50%的epoch用于warmup）
+            poly4_range_lambda: StablePoly4输入范围正则权重
+            poly4_deriv_lambda: StablePoly4导数正则权重
+            poly4_range_r: StablePoly4输入范围阈值
+            poly4_deriv_L: StablePoly4导数阈值
+            poly4_alpha_min: StablePoly4在warmup阶段的最小alpha
+            poly4_transition_epochs: StablePoly4的alpha过渡epoch数
             nan_debug: 是否启用NaN定位钩子（默认关闭）
             val_force_fp32: 验证阶段强制使用FP32（禁用autocast）
         """
@@ -83,6 +95,12 @@ class Trainer:
         self.resume_path = resume_path
         self.resume_strict = resume_strict
         self.gate_reg_lambda = gate_reg_lambda
+        self.poly4_range_lambda = poly4_range_lambda
+        self.poly4_deriv_lambda = poly4_deriv_lambda
+        self.poly4_range_r = poly4_range_r
+        self.poly4_deriv_L = poly4_deriv_L
+        self.poly4_alpha_min = poly4_alpha_min
+        self.poly4_transition_epochs = poly4_transition_epochs
         self.nan_debug = nan_debug
         self.val_force_fp32 = val_force_fp32
         self.val_batch_stats_path = val_batch_stats_path
@@ -101,6 +119,7 @@ class Trainer:
 
         # 自动调整StablePoly4的warmup_epochs
         self._adjust_poly4_warmup()
+        self._configure_poly4_modules()
 
         # 初始化scaler
         self.scaler = GradScaler() if use_amp else None
@@ -246,6 +265,39 @@ class Trainer:
             print(f"  - Warmup epochs: {target_warmup_epochs}")
             print(f"  - 多项式激活将在第 {target_warmup_epochs + 1} epoch开始生效")
 
+    def _configure_poly4_modules(self):
+        """
+        配置StablePoly4的alpha调度与正则项开关/阈值
+        """
+        poly4_count = 0
+        for module in self.model.modules():
+            if hasattr(module, 'set_alpha_schedule') and callable(module.set_alpha_schedule):
+                module.set_alpha_schedule(
+                    alpha_min=self.poly4_alpha_min,
+                    transition_epochs=self.poly4_transition_epochs,
+                )
+            if hasattr(module, 'set_range_params') and callable(module.set_range_params):
+                module.set_range_params(
+                    range_r=self.poly4_range_r,
+                    enable=self.poly4_range_lambda > 0,
+                )
+            if hasattr(module, 'set_deriv_params') and callable(module.set_deriv_params):
+                module.set_deriv_params(
+                    deriv_L=self.poly4_deriv_L,
+                    enable=self.poly4_deriv_lambda > 0,
+                )
+            if hasattr(module, 'set_warmup_epochs') and callable(module.set_warmup_epochs):
+                poly4_count += 1
+
+        if poly4_count > 0:
+            print("✓ StablePoly4正则/调度配置:")
+            print(f"  - alpha_min: {self.poly4_alpha_min}")
+            print(f"  - transition_epochs: {self.poly4_transition_epochs}")
+            if self.poly4_range_lambda > 0:
+                print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")
+            if self.poly4_deriv_lambda > 0:
+                print(f"  - deriv_L: {self.poly4_deriv_L}, lambda_deriv: {self.poly4_deriv_lambda}")
+
     def _load_checkpoint(self, path, strict=True):
         if not os.path.exists(path):
             print(f"Warning: checkpoint not found: {path}")
@@ -368,18 +420,43 @@ class Trainer:
                         print(f"  ❌ 错误: 标签 {labels.max().item()} 超出输出维度 {outputs.shape[1]}!")
                 
                 # 计算正则化损失
-                reg_loss = 0.0
+                reg_loss = outputs_fp32.new_tensor(0.0)
+
                 if self.gate_reg_lambda > 0:
+                    gate_reg = outputs_fp32.new_tensor(0.0)
                     for module in self.model.modules():
                         if hasattr(module, 'gate_reg_loss'):
-                            reg_loss += module.gate_reg_loss
-                    reg_loss = reg_loss * self.gate_reg_lambda
-                
+                            gate_reg = gate_reg + module.gate_reg_loss
+                    reg_loss = reg_loss + gate_reg * self.gate_reg_lambda
+                else:
+                    gate_reg = outputs_fp32.new_tensor(0.0)
+
+                if self.poly4_range_lambda > 0:
+                    range_reg = outputs_fp32.new_tensor(0.0)
+                    for module in self.model.modules():
+                        if hasattr(module, 'range_loss'):
+                            range_reg = range_reg + module.range_loss
+                    reg_loss = reg_loss + range_reg * self.poly4_range_lambda
+                else:
+                    range_reg = outputs_fp32.new_tensor(0.0)
+
+                if self.poly4_deriv_lambda > 0:
+                    deriv_reg = outputs_fp32.new_tensor(0.0)
+                    for module in self.model.modules():
+                        if hasattr(module, 'deriv_loss'):
+                            deriv_reg = deriv_reg + module.deriv_loss
+                    reg_loss = reg_loss + deriv_reg * self.poly4_deriv_lambda
+                else:
+                    deriv_reg = outputs_fp32.new_tensor(0.0)
+
                 loss = self.criterion(outputs_fp32, labels) + reg_loss
                 
                 if first_batch_diagnostic and batch_idx == 0:
                     print(f"\nLoss计算后:")
                     print(f"  Loss value: {loss.item():.6f}")
+                    if self.poly4_range_lambda > 0 or self.poly4_deriv_lambda > 0:
+                        print(f"  Range reg: {range_reg.item():.6f} (λ={self.poly4_range_lambda})")
+                        print(f"  Deriv reg: {deriv_reg.item():.6f} (λ={self.poly4_deriv_lambda})")
                     print(f"  Loss is finite: {torch.isfinite(loss).all().item()}")
                     print(f"{'='*60}\n")
                     first_batch_diagnostic = False  # 只诊断一次
