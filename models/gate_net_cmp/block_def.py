@@ -194,6 +194,9 @@ class StablePoly4(nn.Module):
         self.enable_deriv_loss = enable_deriv_loss
         self.range_loss = torch.tensor(0.0)
         self.deriv_loss = torch.tensor(0.0)
+        self.collect_stats = False
+        self.last_x_poly_stats = None
+        self.last_fprime_stats = None
 
         # 当前epoch（用于控制过渡）
         # 使用 register_buffer 确保 current_epoch 被保存到 state_dict 中
@@ -211,6 +214,10 @@ class StablePoly4(nn.Module):
             warmup_epochs: 新的warmup epoch数量
         """
         self.warmup_epochs = warmup_epochs
+
+    def set_collect_stats(self, enabled: bool):
+        """是否在 forward 中收集诊断统计"""
+        self.collect_stats = bool(enabled)
 
     def set_range_params(self, range_r=None, enable=None):
         """动态设置输入范围约束参数"""
@@ -256,6 +263,9 @@ class StablePoly4(nn.Module):
             + e_clamped
         )
 
+        if self.collect_stats:
+            self.last_x_poly_stats = self._calc_stats(x_poly)
+
         # 输入范围正则
         if self.enable_range_loss:
             range_excess = F.relu(x_poly.abs() - self.range_r)
@@ -264,12 +274,16 @@ class StablePoly4(nn.Module):
             self.range_loss = x_poly.new_tensor(0.0)
 
         # 多项式导数正则（包含 output_scale）
-        if self.enable_deriv_loss:
+        need_fprime = self.enable_deriv_loss or self.collect_stats
+        if need_fprime:
             fprime = self.output_scale * (
                 (((4.0 * a_clamped) * x_poly + 3.0 * b_clamped) * x_poly + 2.0 * c_clamped)
                 * x_poly
                 + d_clamped
             )
+        if self.collect_stats:
+            self.last_fprime_stats = self._calc_stats(fprime)
+        if self.enable_deriv_loss:
             deriv_excess = F.relu(fprime.abs() - self.deriv_L)
             self.deriv_loss = (deriv_excess * deriv_excess).mean()
         else:
@@ -299,6 +313,24 @@ class StablePoly4(nn.Module):
         if out.dtype != orig_dtype:
             out = out.to(orig_dtype)
         return out
+
+    @staticmethod
+    def _calc_stats(tensor):
+        t = tensor.detach()
+        t = t.abs()
+        finite_mask = torch.isfinite(t)
+        if finite_mask.any():
+            t = t[finite_mask]
+            t = t.float()
+            qs = torch.tensor([0.5, 0.9, 0.99], device=t.device)
+            qv = torch.quantile(t, qs)
+            return {
+                "p50": float(qv[0].item()),
+                "p90": float(qv[1].item()),
+                "p99": float(qv[2].item()),
+                "max": float(t.max().item()),
+            }
+        return {"p50": float("nan"), "p90": float("nan"), "p99": float("nan"), "max": float("nan")}
 
 
 class BasicBlock(nn.Module):
