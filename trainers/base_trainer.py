@@ -333,6 +333,40 @@ class Trainer:
             if hasattr(module, 'set_epoch') and callable(module.set_epoch):
                 # 调用 set_epoch 方法
                 module.set_epoch(epoch)
+
+    def _log_poly4_params(self, epoch=None):
+        """进入验证时打印 StablePoly4 的关键参数"""
+        header = f"StablePoly4参数 (Epoch {epoch})" if epoch is not None else "StablePoly4参数"
+        printed = 0
+        for name, module in self.model.named_modules():
+            if not all(hasattr(module, attr) for attr in ('a', 'b', 'c', 'd', 'e', 'log_in_scale')):
+                continue
+            try:
+                a = module.a.detach().float().cpu().item()
+                b = module.b.detach().float().cpu().item()
+                c = module.c.detach().float().cpu().item()
+                d = module.d.detach().float().cpu().item()
+                e = module.e.detach().float().cpu().item()
+                log_in = module.log_in_scale.detach().float().cpu().item()
+                log_in_clamped = max(-6.0, min(2.0, log_in))
+                in_scale = float(torch.exp(torch.tensor(log_in_clamped)))
+                out_scale = float(getattr(module, "output_scale", 1.0))
+                warmup_epochs = int(getattr(module, "warmup_epochs", 0))
+                cur_epoch = int(module.current_epoch.item()) if hasattr(module, "current_epoch") else None
+            except Exception:
+                continue
+            if printed == 0:
+                print(f"\n{header}:")
+            printed += 1
+            print(
+                f"  - {name}: "
+                f"a={a:.4g} b={b:.4g} c={c:.4g} d={d:.4g} e={e:.4g} "
+                f"log_in_scale={log_in:.4g} in_scale≈{in_scale:.4g} "
+                f"output_scale={out_scale:.4g} warmup_epochs={warmup_epochs}"
+                + (f" current_epoch={cur_epoch}" if cur_epoch is not None else "")
+            )
+        if printed == 0:
+            print("\nStablePoly4参数: 未检测到 StablePoly4 模块")
     
     def train_one_epoch(self, epoch):
         """
@@ -510,6 +544,9 @@ class Trainer:
             avg_acc: 平均准确率
         """
         self.model.eval()
+
+        # 进入验证时打印 StablePoly4 参数
+        self._log_poly4_params(epoch=epoch)
         
         total_loss = 0.0
         correct = 0
