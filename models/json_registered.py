@@ -7,7 +7,6 @@ import os
 from typing import Any, Dict
 
 from .registry import register_model
-from network_gen import NetworkConfig, create_network
 
 
 def _load_config_dict(json_path: str) -> Dict[str, Any]:
@@ -42,6 +41,10 @@ def nas_json_model(
     """
     _ = pretrained
     _ = kwargs
+    # Local import to avoid circular dependency during package initialization
+    from network_gen.network_config import NetworkConfig
+    from network_gen.network_generator import create_network
+
     config_dict = _load_config_dict(json_path)
     config = NetworkConfig.from_dict(config_dict)
     if num_classes is not None:
