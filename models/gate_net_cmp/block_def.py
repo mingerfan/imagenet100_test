@@ -423,24 +423,27 @@ class SelfGated(nn.Module):
             self._overflow_warned = True
         
         # 结构性预缩放：缩小输入幅度
-        gate = gate * 0.125
+        delta = gate * 0.125
         
-        # delta = φ(raw)  (扰动项)
-        delta = self.act(gate)
+        # delta = φ(gate * 0.125)  (扰动项)
+        delta = self.act(delta)
         
         # 计算激活正则化损失 (L2) - 改为对delta约束
         self.gate_reg_loss = (delta ** 2).mean()
         
-        # gate检测(激活后)
+        # delta检测(激活后)
         if not self._overflow_warned and not torch.isfinite(delta).all():
             print("\n⚠️ SelfGated检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.act).__name__}")
             print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
             self._overflow_warned = True
 
-        # 门控残差化: feat_generated = gate_scale * (u ⊙ delta)
-        gated_res = _safe_gated_mul(feat_intrinsic, delta)
-        feat_generated = self.gate_scale * gated_res
+        # u ⊙ delta
+        gated_res_1 = _safe_gated_mul(feat_intrinsic, delta)
+        # v = gate, (1-delta) ⊙ v
+        gated_res_2 = _safe_gated_mul(gate, (1 - delta))
+
+        feat_generated = self.gate_scale * (gated_res_1 + gated_res_2)
         
         # feat_generated检测
         if not self._overflow_warned and not torch.isfinite(feat_generated).all():
@@ -457,7 +460,7 @@ class SelfGated(nn.Module):
         
         # concat检测
         if not self._overflow_warned and not torch.isfinite(out).all():
-            print(f"\n⚠️ SelfGated检测: concat后产生非有限值!")
+            print("\n⚠️ SelfGated检测: concat后产生非有限值!")
             print(f"   out shape: {out.shape}, dtype: {out.dtype}")
             self._overflow_warned = True
 
@@ -465,7 +468,7 @@ class SelfGated(nn.Module):
         
         # 最终输出检测
         if not self._overflow_warned and not torch.isfinite(out).all():
-            print(f"\n⚠️ SelfGated检测: conv_out+bn后产生非有限值!")
+            print("\n⚠️ SelfGated检测: conv_out+bn后产生非有限值!")
             print(f"   最终输出shape: {out.shape}, dtype: {out.dtype}")
             finite_mask = torch.isfinite(out)
             if finite_mask.any():
