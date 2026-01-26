@@ -618,7 +618,8 @@ class GatedDepthwiseConv(nn.Module):
     结构：
     - 主分支：3x3深度卷积 + BN
     - 门控分支：5x5深度卷积 + 激活函数
-    - 输出：cat([主分支, 主分支 * gate])
+    - 输出：cat([主分支, gate_branch])
+    - gate_branch = gate_scale * (u ⊙ delta + gate ⊙ (1 - delta))
 
     Args:
         channels: 减半后的通道数
@@ -706,24 +707,25 @@ class GatedDepthwiseConv(nn.Module):
             self._overflow_warned = True
         
         # 结构性预缩放
-        gate = gate * 0.125
+        delta = gate * 0.125
         
         # delta = activation(raw)
-        delta = self.activation(gate)
+        delta = self.activation(delta)
         
         # 计算激活正则化损失
         self.gate_reg_loss = (delta ** 2).mean()
         
-        # gate检测(激活后)
+        # delta检测(激活后)
         if not self._overflow_warned and not torch.isfinite(delta).all():
             print(f"\n⚠️ GatedDepthwiseConv检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.activation).__name__}")
             print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
             self._overflow_warned = True
 
-        # 生成门控特征 (残差化)
-        gated_res = _safe_gated_mul(feat_intrinsic, delta)
-        feat_gated = self.gate_scale * gated_res
+        # 生成门控特征 (SelfGated结构)
+        gated_res_1 = _safe_gated_mul(feat_intrinsic, delta)
+        gated_res_2 = _safe_gated_mul(gate, (1.0 - delta))
+        feat_gated = self.gate_scale * (gated_res_1 + gated_res_2)
         
         # feat_gated检测
         if not self._overflow_warned and not torch.isfinite(feat_gated).all():
