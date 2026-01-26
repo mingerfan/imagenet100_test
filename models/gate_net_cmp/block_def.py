@@ -162,8 +162,6 @@ class StablePoly4(nn.Module):
         self,
         output_scale=0.1,
         warmup_epochs=30,
-        alpha_min=0.02,
-        transition_epochs=10,
         in_scale_init=-1.0,
         range_r=2.0,
         deriv_L=3.0,
@@ -173,8 +171,6 @@ class StablePoly4(nn.Module):
         super().__init__()
         self.output_scale = output_scale
         self.warmup_epochs = warmup_epochs
-        self.alpha_min = alpha_min
-        self.transition_epochs = transition_epochs
         self.warmup_act = nn.SiLU()
 
         # 使用更小的初始化值，防止高阶项导致梯度爆炸
@@ -215,13 +211,6 @@ class StablePoly4(nn.Module):
             warmup_epochs: 新的warmup epoch数量
         """
         self.warmup_epochs = warmup_epochs
-
-    def set_alpha_schedule(self, alpha_min=None, transition_epochs=None):
-        """动态设置 alpha 过渡策略"""
-        if alpha_min is not None:
-            self.alpha_min = float(alpha_min)
-        if transition_epochs is not None:
-            self.transition_epochs = int(transition_epochs)
 
     def set_range_params(self, range_r=None, enable=None):
         """动态设置输入范围约束参数"""
@@ -289,15 +278,13 @@ class StablePoly4(nn.Module):
         # 渐进式过渡：前warmup_epochs个epoch完全使用Swish，然后平滑过渡到多项式
         # 从 buffer 中获取当前 epoch 值
         epoch = self.current_epoch.item()
-        alpha_min = max(0.0, min(1.0, float(self.alpha_min)))
-        transition_epochs = max(0, int(self.transition_epochs))
         if epoch < self.warmup_epochs:
             # 预热阶段：使用Swish，但保持poly分支有梯度
-            alpha = alpha_min
-        elif transition_epochs > 0 and epoch < self.warmup_epochs + transition_epochs:
-            # 过渡阶段：从alpha_min平滑过渡到1.0
-            progress = (epoch - self.warmup_epochs) / float(transition_epochs)
-            alpha = alpha_min + (1.0 - alpha_min) * progress
+            alpha = 0.0
+        elif epoch < self.warmup_epochs + 10:
+            # 过渡阶段（10个epoch）：从Swish平滑过渡到多项式
+            progress = (epoch - self.warmup_epochs) / 10.0
+            alpha = progress
         else:
             alpha = 1.0
 

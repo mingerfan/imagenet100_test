@@ -41,8 +41,6 @@ class Trainer:
         poly4_deriv_lambda=0.0,
         poly4_range_r=2.0,
         poly4_deriv_L=3.0,
-        poly4_alpha_min=0.02,
-        poly4_transition_epochs=10,
         nan_debug=False,
         val_force_fp32=True,
         val_batch_stats_path=None,
@@ -73,8 +71,6 @@ class Trainer:
             poly4_deriv_lambda: StablePoly4导数正则权重
             poly4_range_r: StablePoly4输入范围阈值
             poly4_deriv_L: StablePoly4导数阈值
-            poly4_alpha_min: StablePoly4在warmup阶段的最小alpha
-            poly4_transition_epochs: StablePoly4的alpha过渡epoch数
             nan_debug: 是否启用NaN定位钩子（默认关闭）
             val_force_fp32: 验证阶段强制使用FP32（禁用autocast）
         """
@@ -99,8 +95,6 @@ class Trainer:
         self.poly4_deriv_lambda = poly4_deriv_lambda
         self.poly4_range_r = poly4_range_r
         self.poly4_deriv_L = poly4_deriv_L
-        self.poly4_alpha_min = poly4_alpha_min
-        self.poly4_transition_epochs = poly4_transition_epochs
         self.nan_debug = nan_debug
         self.val_force_fp32 = val_force_fp32
         self.val_batch_stats_path = val_batch_stats_path
@@ -271,11 +265,6 @@ class Trainer:
         """
         poly4_count = 0
         for module in self.model.modules():
-            if hasattr(module, 'set_alpha_schedule') and callable(module.set_alpha_schedule):
-                module.set_alpha_schedule(
-                    alpha_min=self.poly4_alpha_min,
-                    transition_epochs=self.poly4_transition_epochs,
-                )
             if hasattr(module, 'set_range_params') and callable(module.set_range_params):
                 module.set_range_params(
                     range_r=self.poly4_range_r,
@@ -291,8 +280,6 @@ class Trainer:
 
         if poly4_count > 0:
             print("✓ StablePoly4正则/调度配置:")
-            print(f"  - alpha_min: {self.poly4_alpha_min}")
-            print(f"  - transition_epochs: {self.poly4_transition_epochs}")
             if self.poly4_range_lambda > 0:
                 print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")
             if self.poly4_deriv_lambda > 0:
