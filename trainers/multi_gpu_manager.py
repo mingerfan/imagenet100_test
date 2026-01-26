@@ -309,6 +309,7 @@ class MultiGPUManager:
         save_checkpoints = model_config.get('save_checkpoints', True)
         save_freq = model_config.get('save_freq', 10)
         use_amp = model_config.get('use_amp', True)
+        val_force_fp32 = model_config.get('val_force_fp32', True)
         resume_path = self._resolve_resume_path(model_config, model_result_dir)
         if (model_config.get('resume', False) or model_config.get('resume_path')) and not resume_path:
             print("Resume enabled but no checkpoint found. Starting from scratch.")
@@ -328,6 +329,7 @@ class MultiGPUManager:
             'save_checkpoints',
             'grad_clip_max_norm',
             'resume_path',
+            'val_force_fp32',
         ):
             trainer_kwargs.pop(key, None)
         
@@ -342,6 +344,7 @@ class MultiGPUManager:
             epochs=epochs,
             scheduler=scheduler,
             use_amp=use_amp,
+            val_force_fp32=val_force_fp32,
             save_freq=save_freq,
             save_checkpoints=save_checkpoints,
             grad_clip_max_norm=grad_clip_max_norm,

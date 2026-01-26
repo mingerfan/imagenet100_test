@@ -67,6 +67,7 @@ def build_nas_model_configs(
             'save_checkpoints': training_config.get('save_checkpoints', True),
             'save_freq': training_config.get('save_freq', 10),
             'use_amp': training_config.get('use_amp', True),
+            'val_force_fp32': training_config.get('val_force_fp32', True),
             'result_dir': result_dir,
             'trainer_kwargs': {
                 'val_batch_stats_path': os.path.join(result_dir, 'val_batch_stats.csv'),

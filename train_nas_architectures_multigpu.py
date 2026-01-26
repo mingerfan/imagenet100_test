@@ -48,6 +48,8 @@ def apply_yaml_config(args):
             args.save_freq = int(training_config.get("save_freq"))
         except (TypeError, ValueError):
             print("Warning: invalid save_freq in config; using CLI/default.")
+    if "val_force_fp32" in training_config and "--val_fp32" not in sys.argv and "--no_val_fp32" not in sys.argv:
+        args.val_force_fp32 = _coerce_bool(training_config.get("val_force_fp32"))
 
 
 def parse_args():
@@ -88,6 +90,10 @@ def parse_args():
                        help='Use automatic mixed precision')
     parser.add_argument('--no_use_amp', dest='use_amp', action='store_false',
                        help='Disable automatic mixed precision')
+    parser.add_argument('--val_fp32', dest='val_force_fp32', action='store_true', default=True,
+                       help='Force FP32 in validation (disable autocast)')
+    parser.add_argument('--no_val_fp32', dest='val_force_fp32', action='store_false',
+                       help='Allow AMP in validation')
     parser.add_argument('--use_memory_fs', action='store_true', default=True,
                        help='Use memory filesystem for faster data loading')
     parser.add_argument('--no_memory_fs', dest='use_memory_fs', action='store_false',
@@ -196,6 +202,7 @@ def main():
         'save_checkpoints': args.save_checkpoints,
         'save_freq': args.save_freq,
         'use_amp': args.use_amp,
+        'val_force_fp32': args.val_force_fp32,
     }
 
     result_root = os.path.join(args.nas_results, 'trained_models')

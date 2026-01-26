@@ -38,6 +38,7 @@ class Trainer:
         resume_strict=True,
         gate_reg_lambda=1e-3,
         nan_debug=False,
+        val_force_fp32=True,
         val_batch_stats_path=None,
         val_batch_stats_quantile=0.999,
         val_batch_stats_anomaly_only=False,
@@ -63,6 +64,7 @@ class Trainer:
             grad_clip_max_norm: 梯度裁剪的最大范数，用于防止梯度爆炸
             poly4_warmup_ratio: StablePoly4的warmup比例（默认0.5，即50%的epoch用于warmup）
             nan_debug: 是否启用NaN定位钩子（默认关闭）
+            val_force_fp32: 验证阶段强制使用FP32（禁用autocast）
         """
         self.model = model
         self.train_loader = train_loader
@@ -82,6 +84,7 @@ class Trainer:
         self.resume_strict = resume_strict
         self.gate_reg_lambda = gate_reg_lambda
         self.nan_debug = nan_debug
+        self.val_force_fp32 = val_force_fp32
         self.val_batch_stats_path = val_batch_stats_path
         self.val_batch_stats_quantile = val_batch_stats_quantile
         self.val_batch_stats_anomaly_only = val_batch_stats_anomaly_only
@@ -481,14 +484,21 @@ class Trainer:
             for batch_idx, (images, labels) in enumerate(pbar):
                 images = images.to(self.device, non_blocking=True)
                 labels = labels.to(self.device, non_blocking=True)
-                
+
+                if self.val_force_fp32 and images.dtype != torch.float32:
+                    images = images.float()
+
                 device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
-                with autocast(device_type=device_type, enabled=self.use_amp):
+                use_autocast = self.use_amp and not self.val_force_fp32
+                with autocast(device_type=device_type, enabled=use_autocast):
                     outputs = self.model(images)
                 
                 # 重要：将 outputs 转回 float32 再计算 loss
                 # AMP 下 outputs 可能是 float16，大的 logits 值会导致 log_softmax 溢出
-                outputs_fp32 = outputs.float() if self.use_amp else outputs
+                if self.val_force_fp32:
+                    outputs_fp32 = outputs
+                else:
+                    outputs_fp32 = outputs.float() if self.use_amp else outputs
                 loss = self.criterion(outputs_fp32, labels)
                 
                 # Check for NaN/Inf in loss and outputs
@@ -649,6 +659,7 @@ class Trainer:
         print(f"初始学习率: {self.optimizer.param_groups[0]['lr']:.6f}")
         print(f"批次大小: {self.train_loader.batch_size}")
         print(f"混合精度训练: {self.use_amp}")
+        print(f"验证强制FP32: {self.val_force_fp32}")
         print(f"结果保存目录: {self.result_dir}")
 
         if self.start_epoch > 1:

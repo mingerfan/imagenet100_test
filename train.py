@@ -101,6 +101,19 @@ def parse_args():
         help='Disable automatic mixed precision'
     )
     parser.add_argument(
+        '--val_fp32',
+        dest='val_force_fp32',
+        action='store_true',
+        default=True,
+        help='Force FP32 in validation (disable autocast)'
+    )
+    parser.add_argument(
+        '--no_val_fp32',
+        dest='val_force_fp32',
+        action='store_false',
+        help='Allow AMP in validation'
+    )
+    parser.add_argument(
         '--resume',
         action='store_true',
         help='Resume training from checkpoint if available'
@@ -275,6 +288,7 @@ def main():
         if args.save_freq is not None:
             model_config['save_freq'] = args.save_freq
         model_config['use_amp'] = args.use_amp
+        model_config['val_force_fp32'] = args.val_force_fp32
         if args.resume:
             model_config['resume'] = True
         if args.resume_mode:
