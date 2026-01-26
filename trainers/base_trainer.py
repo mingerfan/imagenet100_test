@@ -34,6 +34,8 @@ class Trainer:
         save_checkpoints=True,
         grad_clip_max_norm=1.0,
         poly4_warmup_ratio=0.5,
+        resume_path=None,
+        resume_strict=True,
         gate_reg_lambda=1e-3,
         nan_debug=False,
         val_batch_stats_path=None,
@@ -76,6 +78,8 @@ class Trainer:
         self.save_checkpoints = save_checkpoints
         self.grad_clip_max_norm = grad_clip_max_norm
         self.poly4_warmup_ratio = poly4_warmup_ratio
+        self.resume_path = resume_path
+        self.resume_strict = resume_strict
         self.gate_reg_lambda = gate_reg_lambda
         self.nan_debug = nan_debug
         self.val_batch_stats_path = val_batch_stats_path
@@ -99,6 +103,7 @@ class Trainer:
         self.scaler = GradScaler() if use_amp else None
 
         # 训练历史
+        self.start_epoch = 1
         self.history = {
             'epoch': [],
             'train_loss': [],
@@ -111,6 +116,9 @@ class Trainer:
 
         # 最佳准确率
         self.best_acc = 0.0
+
+        if self.resume_path:
+            self._load_checkpoint(self.resume_path, strict=self.resume_strict)
 
     def _find_nonfinite_tensor(self, obj):
         if torch.is_tensor(obj):
@@ -234,6 +242,38 @@ class Trainer:
             print(f"  - Warmup比例: {self.poly4_warmup_ratio:.1%}")
             print(f"  - Warmup epochs: {target_warmup_epochs}")
             print(f"  - 多项式激活将在第 {target_warmup_epochs + 1} epoch开始生效")
+
+    def _load_checkpoint(self, path, strict=True):
+        if not os.path.exists(path):
+            print(f"Warning: checkpoint not found: {path}")
+            return
+        checkpoint = torch.load(path, map_location=self.device)
+
+        model_state = checkpoint.get('model_state_dict')
+        if model_state is not None:
+            self.model.load_state_dict(model_state, strict=strict)
+
+        optim_state = checkpoint.get('optimizer_state_dict')
+        if optim_state is not None and self.optimizer is not None:
+            self.optimizer.load_state_dict(optim_state)
+
+        sched_state = checkpoint.get('scheduler_state_dict')
+        if sched_state is not None and self.scheduler is not None:
+            try:
+                self.scheduler.load_state_dict(sched_state)
+            except Exception as exc:
+                print(f"Warning: failed to load scheduler state: {exc}")
+
+        self.best_acc = checkpoint.get('best_acc', self.best_acc)
+
+        history = checkpoint.get('history')
+        if isinstance(history, dict):
+            self.history = history
+
+        epoch = checkpoint.get('epoch')
+        if isinstance(epoch, int):
+            self.start_epoch = max(1, epoch + 1)
+            print(f"Resumed from epoch {epoch}. Next epoch: {self.start_epoch}")
 
     def _set_epoch_for_model(self, epoch):
         """
@@ -611,13 +651,16 @@ class Trainer:
         print(f"混合精度训练: {self.use_amp}")
         print(f"结果保存目录: {self.result_dir}")
 
+        if self.start_epoch > 1:
+            print(f"Resuming training from epoch {self.start_epoch}")
+
         start_time = time.time()
 
         if self.nan_debug and not self._nan_debug_active:
             self._register_nan_hooks()
 
         try:
-            for epoch in range(1, self.epochs + 1):
+            for epoch in range(self.start_epoch, self.epochs + 1):
                 # 为所有需要 epoch 信息的模块更新 epoch
                 self._set_epoch_for_model(epoch)
                 

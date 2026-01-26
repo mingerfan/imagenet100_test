@@ -6,6 +6,7 @@ import yaml
 import os
 import re
 from typing import Dict, List
+from pathlib import Path
 
 
 def load_config(config_path: str) -> Dict:
@@ -38,6 +39,19 @@ def save_config(config: Dict, save_path: str):
         yaml.dump(config, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
+def _get_default_config(config: Dict) -> Dict:
+    global_config = config.get('global', {})
+    return {
+        'num_classes': global_config.get('num_classes', 100),
+        'pretrained': False,
+        'epochs': global_config.get('default_epochs', 60),
+        'batch_size': global_config.get('default_batch_size', 128),
+        'learning_rate': global_config.get('default_learning_rate', 0.001),
+        'num_workers': global_config.get('default_num_workers', 16),
+        'save_freq': global_config.get('default_save_freq', 10),
+    }
+
+
 def get_model_configs(config: Dict, registered_models: List[str] = None) -> List[Dict]:
     """
     从配置中获取模型列表，支持正则匹配
@@ -57,15 +71,7 @@ def get_model_configs(config: Dict, registered_models: List[str] = None) -> List
         return models
     
     # 获取全局设置作为默认值
-    global_config = config.get('global', {})
-    default_config = {
-        'num_classes': global_config.get('num_classes', 100),
-        'pretrained': False,
-        'epochs': global_config.get('default_epochs', 60),
-        'batch_size': global_config.get('default_batch_size', 128),
-        'learning_rate': global_config.get('default_learning_rate', 0.001),
-        'num_workers': global_config.get('default_num_workers', 16)
-    }
+    default_config = _get_default_config(config)
     
     # 收集所有显式指定的模型名称
     explicit_model_names = set(m['name'] for m in models)
@@ -114,4 +120,82 @@ def get_model_configs(config: Dict, registered_models: List[str] = None) -> List
             models.append(model_config)
             explicit_model_names.add(model_name)
     
+    return models
+
+
+def _collect_json_paths(json_root: str) -> List[Path]:
+    root = Path(json_root)
+    if root.is_file():
+        return [root]
+    if not root.exists():
+        return []
+    return [p for p in root.rglob("*.json") if p.is_file()]
+
+
+def get_json_model_configs(config: Dict) -> List[Dict]:
+    """Build model configs from JSON files (explicit list or regex patterns)."""
+    default_config = _get_default_config(config)
+    json_models = config.get('json_models', []) or []
+    json_patterns = config.get('json_model_patterns', []) or []
+    models: List[Dict] = []
+
+    # Explicit JSON list
+    for item in json_models:
+        json_path = item.get('json_path') or item.get('path')
+        if not json_path:
+            print("Warning: json_models entry missing json_path")
+            continue
+        model_name = item.get('name') or Path(json_path).stem
+        model_config = {
+            'name': model_name,
+            'class': item.get('class', 'nas-json'),
+            **default_config,
+            **{k: v for k, v in item.items() if k not in ('json_path', 'path', 'class', 'name')}
+        }
+        params = dict(model_config.get('params', {}) or {})
+        params.setdefault('num_classes', default_config['num_classes'])
+        params['json_path'] = json_path
+        model_config['params'] = params
+        models.append(model_config)
+
+    # Regex-based JSON patterns
+    for pattern_config in json_patterns:
+        pattern = pattern_config.get('pattern')
+        if not pattern:
+            print("Warning: json_model_patterns entry missing pattern")
+            continue
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            print(f"Warning: invalid regex '{pattern}': {e}")
+            continue
+
+        json_root = pattern_config.get('json_root') or pattern_config.get('json_dir')
+        if not json_root:
+            print(f"Warning: json_model_patterns '{pattern}' missing json_root")
+            continue
+
+        json_paths = _collect_json_paths(json_root)
+        if not json_paths:
+            print(f"Warning: no json files found in {json_root}")
+            continue
+
+        name_prefix = pattern_config.get('name_prefix', '')
+        for path in json_paths:
+            rel = str(path.relative_to(json_root).as_posix())
+            if not (regex.search(path.name) or regex.search(rel)):
+                continue
+            model_name = f"{name_prefix}{path.stem}" if name_prefix else path.stem
+            model_config = {
+                'name': model_name,
+                'class': pattern_config.get('class', 'nas-json'),
+                **default_config,
+                **{k: v for k, v in pattern_config.items() if k not in ('pattern', 'json_root', 'json_dir', 'name_prefix', 'class')}
+            }
+            params = dict(model_config.get('params', {}) or {})
+            params.setdefault('num_classes', default_config['num_classes'])
+            params['json_path'] = str(path)
+            model_config['params'] = params
+            models.append(model_config)
+
     return models

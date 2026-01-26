@@ -14,6 +14,7 @@ from utils import set_random_seed
 from typing import List, Dict, Optional
 import threading
 import queue
+import os
 
 
 def create_smart_optimizer(model, lr=0.001):
@@ -144,6 +145,48 @@ class MultiGPUManager:
                 print(f"⚠ GPU {gpu_id} 不可用: {e}")
         
         return available
+
+    def _find_latest_checkpoint(self, model_result_dir: str) -> Optional[str]:
+        if not os.path.isdir(model_result_dir):
+            return None
+        candidates = []
+        for name in os.listdir(model_result_dir):
+            if name.startswith('checkpoint_epoch_') and name.endswith('.pth'):
+                try:
+                    epoch_str = name[len('checkpoint_epoch_'):-4]
+                    epoch = int(epoch_str)
+                except ValueError:
+                    continue
+                candidates.append((epoch, os.path.join(model_result_dir, name)))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        return candidates[-1][1]
+
+    def _resolve_resume_path(self, model_config: Dict, model_result_dir: str) -> Optional[str]:
+        resume_path = model_config.get('resume_path')
+        resume_enabled = bool(model_config.get('resume', False) or resume_path)
+        if not resume_enabled:
+            return None
+
+        resume_mode = model_config.get('resume_mode', 'auto')
+        if not resume_path:
+            best_path = os.path.join(model_result_dir, 'best_model.pth')
+            latest_path = self._find_latest_checkpoint(model_result_dir)
+            if resume_mode == 'best':
+                resume_path = best_path
+            elif resume_mode == 'last':
+                resume_path = latest_path
+            else:
+                resume_path = best_path if os.path.exists(best_path) else latest_path
+
+        if resume_path and not os.path.exists(resume_path):
+            print(f"Warning: resume checkpoint not found: {resume_path}")
+            return None
+
+        if resume_path:
+            print(f"Resume enabled. Using checkpoint: {resume_path}")
+        return resume_path
     
     def is_model_trained(self, model_name: str, model_result_dir: Optional[str] = None) -> bool:
         """
@@ -266,6 +309,9 @@ class MultiGPUManager:
         save_checkpoints = model_config.get('save_checkpoints', True)
         save_freq = model_config.get('save_freq', 10)
         use_amp = model_config.get('use_amp', True)
+        resume_path = self._resolve_resume_path(model_config, model_result_dir)
+        if (model_config.get('resume', False) or model_config.get('resume_path')) and not resume_path:
+            print("Resume enabled but no checkpoint found. Starting from scratch.")
         trainer_kwargs = dict(model_config.get('trainer_kwargs', {}) or {})
         for key in (
             'model',
@@ -281,6 +327,7 @@ class MultiGPUManager:
             'save_freq',
             'save_checkpoints',
             'grad_clip_max_norm',
+            'resume_path',
         ):
             trainer_kwargs.pop(key, None)
         
@@ -298,6 +345,7 @@ class MultiGPUManager:
             save_freq=save_freq,
             save_checkpoints=save_checkpoints,
             grad_clip_max_norm=grad_clip_max_norm,
+            resume_path=resume_path,
             **trainer_kwargs,
         )
         

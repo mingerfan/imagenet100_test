@@ -1,0 +1,31 @@
+# configs/train_best_and_baselines.yaml
+
+global:
+  num_classes: 100
+  default_epochs: 60
+  default_batch_size: 512
+  default_learning_rate: 0.002
+  default_num_workers: 8
+  default_save_freq: 30
+
+# Explicit baseline models
+models:
+  - name: "resnet18"
+    class: "resnet18"
+    params:
+      num_classes: 100
+      pretrained: false
+
+  - name: "efficientnet-b0"
+    class: "efficientnet-b0"
+    params:
+      num_classes: 100
+      pretrained: false
+
+# JSON best model(s) by regex
+json_model_patterns:
+  - pattern: "rank.*\\.json"   # adjust if your best model filename differs
+    json_root: "/root/autodl-tmp/imagenet100_test/nas_results/best_models"
+    name_prefix: "best-"
+    params:
+      num_classes: 100

@@ -6,8 +6,9 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 from trainers import MultiGPUManager
-from utils import load_config, get_model_configs, set_random_seed
+from utils import load_config, get_model_configs, get_json_model_configs, set_random_seed
 from models import MODEL_REGISTRY
 from data import get_dataset_info, normalize_dataset_name
 
@@ -81,6 +82,42 @@ def parse_args():
         help='禁用检查点保存（仅保存最佳模型）'
     )
     parser.set_defaults(save_checkpoints=True)
+    parser.add_argument(
+        '--save_freq',
+        type=int,
+        default=None,
+        help='Checkpoint save frequency (epochs)'
+    )
+    parser.add_argument(
+        '--use_amp',
+        action='store_true',
+        default=True,
+        help='Enable automatic mixed precision'
+    )
+    parser.add_argument(
+        '--no_use_amp',
+        dest='use_amp',
+        action='store_false',
+        help='Disable automatic mixed precision'
+    )
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Resume training from checkpoint if available'
+    )
+    parser.add_argument(
+        '--resume_mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'best', 'last'],
+        help='Checkpoint selection mode'
+    )
+    parser.add_argument(
+        '--resume_path',
+        type=str,
+        default=None,
+        help='Explicit checkpoint path to resume from'
+    )
     parser.add_argument(
         '--use_memory_fs',
         action='store_true',
@@ -180,6 +217,9 @@ def main():
     else:
         print(f"\n加载配置文件: {args.config}")
         config = load_config(args.config)
+        # Use per-config result subfolder
+        config_tag = Path(args.config).stem
+        args.result_dir = os.path.join(args.result_dir, config_tag)
     
     # 获取已注册的模型列表（用于正则匹配）
     registered_models = MODEL_REGISTRY.list_models()
@@ -189,14 +229,19 @@ def main():
     
     # 获取模型配置（传入已注册模型列表以支持正则匹配）
     model_configs = get_model_configs(config, registered_models)
+    json_model_configs = get_json_model_configs(config)
+    if json_model_configs:
+        model_configs.extend(json_model_configs)
     
     # 过滤特定模型（如果指定）
     if args.models:
         print(f"\n只训练指定的模型: {args.models}")
         model_configs = [m for m in model_configs if m['name'] in args.models]
         if not model_configs:
+            all_candidates = get_model_configs(config, registered_models)
+            all_candidates.extend(get_json_model_configs(config))
             print(f"⚠ 未找到指定的模型: {args.models}")
-            print(f"可用的模型: {[m['name'] for m in get_model_configs(config)]}")
+            print(f"可用的模型: {[m['name'] for m in all_candidates]}")
             sys.exit(1)
     
     # 显示将要训练的模型
@@ -222,8 +267,20 @@ def main():
         sys.exit(1)
     
     # 应用save_checkpoints到所有模型配置
+    if args.resume_path and len(model_configs) > 1:
+        print("Warning: resume_path is set for multiple models; the same path will be applied to all models.")
+
     for model_config in model_configs:
         model_config['save_checkpoints'] = args.save_checkpoints
+        if args.save_freq is not None:
+            model_config['save_freq'] = args.save_freq
+        model_config['use_amp'] = args.use_amp
+        if args.resume:
+            model_config['resume'] = True
+        if args.resume_mode:
+            model_config['resume_mode'] = args.resume_mode
+        if args.resume_path:
+            model_config['resume_path'] = args.resume_path
     
     if not args.save_checkpoints:
         print("\n⚠ 检查点保存已禁用（仅保存最佳模型）")
@@ -280,3 +337,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
