@@ -34,18 +34,116 @@ def prepare_poly4_eval(model: torch.nn.Module) -> None:
     prepare_poly4_for_evaluation(model)
 
 
+def _load_json_dict(path: str) -> dict:
+    import json
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and isinstance(data.get("config"), dict):
+        return data["config"]
+    if isinstance(data, dict):
+        return data
+    raise ValueError("JSON root must be an object or contain a 'config' object")
+
+
+def _expand_block_choices(block_choices: List[int], num_blocks: int) -> List[int]:
+    if len(block_choices) == num_blocks:
+        return block_choices
+    try:
+        from network_gen.network_generator import HierarchicalBlockSelector
+
+        selector = HierarchicalBlockSelector()
+        expanded = selector.expand_choices(block_choices, num_blocks)
+        return expanded
+    except Exception:
+        raise ValueError(
+            f"block_choices length {len(block_choices)} does not match num_blocks {num_blocks}"
+        )
+
+
+def _build_config_from_dict(config_dict: dict, input_size: int) -> "NetworkConfig":
+    from network_gen.network_config import NetworkConfig, BlockConfig
+    from network_gen.search_space import StrideEncoder, ChannelCalculator
+
+    if "blocks" in config_dict:
+        return NetworkConfig.from_dict(config_dict)
+
+    required = ["stem_code", "second_ds_code", "stride_code", "ct_policies", "block_choices"]
+    missing = [k for k in required if k not in config_dict]
+    if missing:
+        raise KeyError(f"Missing keys in json config: {missing}")
+
+    stem_code = config_dict["stem_code"]
+    second_ds_code = config_dict["second_ds_code"]
+    stride_code = config_dict["stride_code"]
+    ct_policies = list(config_dict["ct_policies"])
+    block_choices = list(config_dict["block_choices"])
+    initial_ct_count = config_dict.get("initial_ct_count", 1)
+
+    ct_slots = config_dict.get("ct_slots", 32768)
+    config_input_size = int(config_dict.get("input_size", input_size))
+
+    stride_encoder = StrideEncoder()
+    num_blocks, stride_positions = stride_encoder.decode(stride_code)
+    strides = stride_encoder.get_strides_list(num_blocks, stride_positions)
+
+    if len(ct_policies) < 3:
+        ct_policies = ct_policies + ["keep"] * (3 - len(ct_policies))
+
+    block_ids = _expand_block_choices(block_choices, num_blocks)
+
+    channel_calculator = ChannelCalculator(ct_slots, config_input_size)
+    channels, _, _ = channel_calculator.compute_channels_sequence(
+        strides=strides,
+        ct_policies=ct_policies,
+        initial_ct_count=initial_ct_count,
+    )
+
+    stem_out_channels = channel_calculator.get_initial_channels(initial_ct_count)
+    blocks = []
+    for i in range(num_blocks):
+        in_channels = stem_out_channels if i == 0 else blocks[-1].out_channels
+        out_channels = channels[i]
+        blocks.append(
+            BlockConfig(
+                block_id=block_ids[i],
+                in_channels=in_channels,
+                out_channels=out_channels,
+                stride=strides[i],
+            )
+        )
+
+    return NetworkConfig(
+        stem_code=stem_code,
+        second_ds_code=second_ds_code,
+        stride_code=stride_code,
+        ct_policies=ct_policies,
+        block_choices=block_ids,
+        blocks=blocks,
+        initial_ct_count=initial_ct_count,
+        stem_out_channels=stem_out_channels,
+        num_classes=config_dict.get("num_classes", 100),
+        name=config_dict.get("name"),
+        description=config_dict.get("description"),
+        created_at=config_dict.get("created_at"),
+    )
+
+
 def load_model(
     model_name: Optional[str],
     json_config: Optional[str],
     num_classes: int,
     pretrained: bool,
     checkpoint: Optional[str],
+    input_size: int,
 ) -> torch.nn.Module:
     if json_config:
-        from network_gen.network_config import NetworkConfig
         from network_gen.network_generator import create_network
 
-        config = NetworkConfig.load(json_config)
+        config_dict = _load_json_dict(json_config)
+        config = _build_config_from_dict(config_dict, input_size=input_size)
+        if num_classes is not None:
+            config.num_classes = num_classes
         model = create_network(config)
     else:
         if not model_name:
@@ -204,6 +302,7 @@ def main() -> None:
         num_classes=args.num_classes,
         pretrained=args.pretrained,
         checkpoint=args.ckpt,
+        input_size=args.input_size,
     ).to(device)
     model.eval()
 
