@@ -578,8 +578,8 @@ class Trainer:
 
         # 进入验证时打印 StablePoly4 参数
         self._log_poly4_params(epoch=epoch)
+        # 启用统计，若发现 NaN 将打印对应 batch 的 |x_poly| / |f'|
         self._set_poly4_collect_stats(True)
-        poly4_stats_printed = False
         
         total_loss = 0.0
         correct = 0
@@ -626,11 +626,6 @@ class Trainer:
                 use_autocast = self.use_amp and not self.val_force_fp32
                 with autocast(device_type=device_type, enabled=use_autocast):
                     outputs = self.model(images)
-
-                if not poly4_stats_printed:
-                    self._log_poly4_stats(epoch=epoch)
-                    self._set_poly4_collect_stats(False)
-                    poly4_stats_printed = True
                 
                 # 重要：将 outputs 转回 float32 再计算 loss
                 # AMP 下 outputs 可能是 float16，大的 logits 值会导致 log_softmax 溢出
@@ -643,6 +638,8 @@ class Trainer:
                 # Check for NaN/Inf in loss and outputs
                 loss_value = loss.item()
                 if not torch.isfinite(loss).all() or not torch.isfinite(outputs).all():
+                    # 打印当前 batch 的 StablePoly4 统计
+                    self._log_poly4_stats(epoch=epoch)
                     # 详细诊断信息
                     out_min = outputs.min().item() if torch.isfinite(outputs.min()) else float('nan')
                     out_max = outputs.max().item() if torch.isfinite(outputs.max()) else float('nan')
@@ -723,6 +720,7 @@ class Trainer:
             print("\n⚠ Warning: No valid samples in validation!")
             if stats_file is not None:
                 stats_file.close()
+            self._set_poly4_collect_stats(False)
             return float('inf'), 0.0
         
         avg_loss = total_loss / len(self.val_loader)
@@ -735,6 +733,7 @@ class Trainer:
         
         if stats_file is not None:
             stats_file.close()
+        self._set_poly4_collect_stats(False)
 
         return avg_loss, avg_acc
     
