@@ -145,7 +145,7 @@ class MultiGPUManager:
         
         return available
     
-    def is_model_trained(self, model_name: str) -> bool:
+    def is_model_trained(self, model_name: str, model_result_dir: Optional[str] = None) -> bool:
         """
         检查模型是否已经训练过
         
@@ -156,7 +156,8 @@ class MultiGPUManager:
             是否已训练
         """
         import os
-        model_result_dir = f"{self.result_dir}/{model_name}"
+        if model_result_dir is None:
+            model_result_dir = f"{self.result_dir}/{model_name}"
         best_model_path = f"{model_result_dir}/best_model.pth"
         
         if os.path.exists(best_model_path):
@@ -168,7 +169,8 @@ class MultiGPUManager:
         self,
         model_config: Dict,
         gpu_id: int,
-        force: bool = False
+        force: bool = False,
+        return_details: bool = False
     ) -> Optional[float]:
         """
         在指定GPU上训练单个模型
@@ -182,9 +184,11 @@ class MultiGPUManager:
             最佳验证准确率，如果跳过则返回None
         """
         model_name = model_config['name']
+        model_class = model_config.get('class', model_name)
+        model_result_dir = model_config.get('result_dir', f"{self.result_dir}/{model_name}")
         
         # 检查是否已训练
-        if not force and self.is_model_trained(model_name):
+        if not force and self.is_model_trained(model_name, model_result_dir=model_result_dir):
             return None
         
         print(f"\n{'=' * 60}")
@@ -192,7 +196,10 @@ class MultiGPUManager:
         print(f"{'=' * 60}")
         
         # 检测是否使用 StablePoly4 激活函数
-        uses_stablepoly = 'stablepoly' in model_name.lower()
+        uses_stablepoly = (
+            'stablepoly' in model_name.lower()
+            or 'stablepoly' in str(model_class).lower()
+        )
         if uses_stablepoly:
             print("⚠ 检测到 StablePoly4 激活函数，将使用更严格的梯度裁剪")
         
@@ -223,7 +230,7 @@ class MultiGPUManager:
         model_params = model_config.get('params', {})
         model_params['num_classes'] = model_params.get('num_classes', self.num_classes)
         
-        model = get_model(model_name, **model_params)
+        model = get_model(model_class, **model_params)
         model = model.to(device)
         
         # 打印模型信息
@@ -246,15 +253,36 @@ class MultiGPUManager:
         )
         
         # 结果保存目录
-        model_result_dir = f"{self.result_dir}/{model_name}"
+        # model_result_dir 已在上方解析（支持按模型覆盖）
         
         # 创建训练器
         # 对于 StablePoly4 模型，使用更严格的梯度裁剪
-        grad_clip_max_norm = 0.5 if uses_stablepoly else 1.0
+        grad_clip_max_norm = model_config.get(
+            'grad_clip_max_norm',
+            0.5 if uses_stablepoly else 1.0
+        )
         
         # 从配置中获取是否保存检查点（默认True）
         save_checkpoints = model_config.get('save_checkpoints', True)
         save_freq = model_config.get('save_freq', 10)
+        use_amp = model_config.get('use_amp', True)
+        trainer_kwargs = dict(model_config.get('trainer_kwargs', {}) or {})
+        for key in (
+            'model',
+            'train_loader',
+            'val_loader',
+            'criterion',
+            'optimizer',
+            'device',
+            'result_dir',
+            'epochs',
+            'scheduler',
+            'use_amp',
+            'save_freq',
+            'save_checkpoints',
+            'grad_clip_max_norm',
+        ):
+            trainer_kwargs.pop(key, None)
         
         trainer = Trainer(
             model=model,
@@ -266,15 +294,24 @@ class MultiGPUManager:
             result_dir=model_result_dir,
             epochs=epochs,
             scheduler=scheduler,
-            use_amp=True,
+            use_amp=use_amp,
             save_freq=save_freq,
             save_checkpoints=save_checkpoints,
-            grad_clip_max_norm=grad_clip_max_norm
+            grad_clip_max_norm=grad_clip_max_norm,
+            **trainer_kwargs,
         )
         
         # 开始训练
         try:
             best_acc = trainer.train()
+            if return_details:
+                return {
+                    'best_acc': best_acc,
+                    'train_time': sum(trainer.history['epoch_time']) if trainer.history['epoch_time'] else 0,
+                    'final_train_loss': trainer.history['train_loss'][-1] if trainer.history['train_loss'] else 0,
+                    'final_val_loss': trainer.history['val_loss'][-1] if trainer.history['val_loss'] else 0,
+                    'epochs': epochs,
+                }
             return best_acc
         except Exception as e:
             print(f"❌ 训练失败: {model_name}")
@@ -287,7 +324,8 @@ class MultiGPUManager:
         self,
         model_configs: List[Dict],
         force: bool = False,
-        parallel: bool = True
+        parallel: bool = True,
+        return_details: bool = False
     ) -> Dict[str, Dict]:
         """
         训练多个模型
@@ -301,6 +339,8 @@ class MultiGPUManager:
             包含成功、失败、跳过模型信息的字典
         """
         results = {'success': {}, 'failed': {}, 'skipped': {}}
+        if return_details:
+            results['details'] = {}
         
         if not self.available_gpus:
             print("⚠ 没有可用的GPU，将使用CPU训练")
@@ -309,9 +349,18 @@ class MultiGPUManager:
             for model_config in model_configs:
                 model_name = model_config['name']
                 try:
-                    best_acc = self.train_model(model_config, None, force)
-                    if best_acc is not None:
-                        results['success'][model_name] = best_acc
+                    detail = self.train_model(
+                        model_config,
+                        None,
+                        force,
+                        return_details=return_details
+                    )
+                    if detail is not None:
+                        if return_details:
+                            results['success'][model_name] = detail['best_acc']
+                            results['details'][model_name] = detail
+                        else:
+                            results['success'][model_name] = detail
                     else:
                         results['skipped'][model_name] = '已训练'
                 except Exception as e:
@@ -335,8 +384,13 @@ class MultiGPUManager:
                         model_config = task_queue.get(timeout=1)
                         model_name = model_config['name']
                         try:
-                            best_acc = self.train_model(model_config, gpu_id, force)
-                            result_queue.put(('success', model_name, best_acc))
+                            detail = self.train_model(
+                                model_config,
+                                gpu_id,
+                                force,
+                                return_details=return_details
+                            )
+                            result_queue.put(('success', model_name, detail))
                         except Exception as e:
                             result_queue.put(('failed', model_name, str(e)))
                         task_queue.task_done()
@@ -360,7 +414,11 @@ class MultiGPUManager:
                 status, model_name, value = result_queue.get()
                 if status == 'success':
                     if value is not None:
-                        results['success'][model_name] = value
+                        if return_details:
+                            results['success'][model_name] = value['best_acc']
+                            results['details'][model_name] = value
+                        else:
+                            results['success'][model_name] = value
                     else:
                         results['skipped'][model_name] = '已训练'
                 elif status == 'failed':
@@ -373,13 +431,18 @@ class MultiGPUManager:
             for model_config in model_configs:
                 model_name = model_config['name']
                 try:
-                    best_acc = self.train_model(
+                    detail = self.train_model(
                         model_config,
                         self.available_gpus[0] if self.available_gpus else None,
-                        force
+                        force,
+                        return_details=return_details
                     )
-                    if best_acc is not None:
-                        results['success'][model_name] = best_acc
+                    if detail is not None:
+                        if return_details:
+                            results['success'][model_name] = detail['best_acc']
+                            results['details'][model_name] = detail
+                        else:
+                            results['success'][model_name] = detail
                     else:
                         results['skipped'][model_name] = '已训练'
                 except Exception as e:

@@ -1,307 +1,22 @@
 #!/usr/bin/env python3
-"""Train NAS architectures on multiple GPUs in parallel
-
-This script distributes NAS architectures across multiple GPUs for parallel training.
-"""
+"""Train NAS architectures on multiple GPUs (via shared training framework)."""
 
 import argparse
-import json
 import os
 import sys
-from pathlib import Path
-import torch
-import torch.nn as nn
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from datetime import datetime
-import csv
-import threading
-import queue
-import time
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from network_gen import create_network
-from network_gen.network_config import NetworkConfig
-from trainers import Trainer
-from trainers.multi_gpu_manager import create_smart_optimizer
-from data import create_dataloaders, get_dataset_info, normalize_dataset_name
+from trainers import MultiGPUManager
+from data import get_dataset_info, normalize_dataset_name
 from utils import set_random_seed, load_config
-
-
-def load_nas_architectures(nas_result_dir: str):
-    """Load all NAS architectures from result directory"""
-    architectures = []
-
-    for category in ['best', 'middle', 'worst']:
-        model_dir = Path(nas_result_dir) / f'{category}_models'
-        if not model_dir.exists():
-            continue
-
-        for json_file in sorted(model_dir.glob('*.json')):
-            with open(json_file) as f:
-                data = json.load(f)
-
-            arch_id = json_file.stem
-
-            architectures.append({
-                'category': category,
-                'arch_id': arch_id,
-                'config': data['config'],
-                'scores': data['scores'],
-                'aznas_fitness': data.get('aznas_fitness', 0.0),
-                'generation': data.get('generation', 0)
-            })
-
-    return architectures
-
-
-def train_architecture_worker(arch_info, gpu_id, args, result_queue):
-    """Worker function to train a single architecture on a specific GPU
-
-    Args:
-        arch_info: Architecture information dict
-        gpu_id: GPU device ID
-        args: Command line arguments
-        result_queue: Queue to put results
-    """
-    try:
-        category = arch_info['category']
-        arch_id = arch_info['arch_id']
-
-        print(f"\n[GPU {gpu_id}] {'='*70}")
-        print(f"[GPU {gpu_id}] Training: {category}/{arch_id}")
-        print(f"[GPU {gpu_id}] {'='*70}")
-        print(f"[GPU {gpu_id}] AZ-NAS Fitness: {arch_info['aznas_fitness']:.4f}")
-        print(f"[GPU {gpu_id}] FHE Latency: {arch_info['scores']['fhe_latency']:.0f}")
-
-        # Set device
-        device = torch.device(f'cuda:{gpu_id}')
-
-        # Create data loaders (each GPU worker creates its own)
-        train_loader, val_loader, _, _ = create_dataloaders(
-            train_dir=args.train_dir,
-            val_dir=args.val_dir,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            pin_memory=True,
-            use_memory_fs=args.use_memory_fs,
-            dataset=args.dataset,
-            download=args.download,
-            input_size=args.input_size,
-            seed=args.seed
-        )
-        
-        # 检查标签范围
-        print(f"[GPU {gpu_id}] 检查数据集标签范围...")
-        sample_labels = []
-        for i, (_, labels) in enumerate(val_loader):
-            sample_labels.extend(labels.tolist())
-            if i >= 2:  # 只检查前3个batch
-                break
-        
-        if sample_labels:
-            min_label = min(sample_labels)
-            max_label = max(sample_labels)
-            unique_labels = len(set(sample_labels))
-            print(f"[GPU {gpu_id}]   标签范围: [{min_label}, {max_label}]")
-            print(f"[GPU {gpu_id}]   前3个batch的唯一标签数: {unique_labels}")
-            print(f"[GPU {gpu_id}]   期望范围: [0, {args.dataset_num_classes - 1}]")
-            
-            if max_label >= args.dataset_num_classes:
-                print(f"[GPU {gpu_id}]   ❌ 警告: 标签 {max_label} 超出类别数 {args.dataset_num_classes}!")
-            else:
-                print(f"[GPU {gpu_id}]   ✓ 标签范围正常")
-
-        # Create model from config
-        config = NetworkConfig.from_dict(arch_info['config'])
-        
-        print(f"\n[GPU {gpu_id}] {'='*60}")
-        print(f"[GPU {gpu_id}] 配置诊断:")
-        print(f"[GPU {gpu_id}]   JSON中的num_classes: {config.num_classes}")
-        print(f"[GPU {gpu_id}]   目标dataset: {args.dataset}")
-        print(f"[GPU {gpu_id}]   目标num_classes: {args.dataset_num_classes}")
-        
-        if args.dataset_num_classes and config.num_classes != args.dataset_num_classes:
-            print(f"[GPU {gpu_id}]   ⚠ 调整num_classes: {config.num_classes} -> {args.dataset_num_classes}")
-            config.num_classes = args.dataset_num_classes
-            
-        model = create_network(config)
-        model = model.to(device)
-        
-        # 验证分类头
-        fc_layer = model.fc
-        print(f"\n[GPU {gpu_id}] 分类头验证:")
-        print(f"[GPU {gpu_id}]   FC layer: {fc_layer}")
-        print(f"[GPU {gpu_id}]   输入特征数: {fc_layer.in_features}")
-        print(f"[GPU {gpu_id}]   输出类别数: {fc_layer.out_features}")
-        print(f"[GPU {gpu_id}]   期望类别数: {args.dataset_num_classes}")
-        
-        if fc_layer.out_features != args.dataset_num_classes:
-            print(f"[GPU {gpu_id}]   ❌ 分类头类别数不匹配！")
-        else:
-            print(f"[GPU {gpu_id}]   ✓ 分类头类别数正确")
-
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f"[GPU {gpu_id}]   模型参数: {n_params:,}")
-        print(f"[GPU {gpu_id}] {'='*60}\n")
-
-        # Setup training
-        criterion = nn.CrossEntropyLoss()
-        optimizer = create_smart_optimizer(model, lr=args.learning_rate)
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=args.epochs,
-            eta_min=args.learning_rate * 0.01
-        )
-
-        # Create result directory
-        result_dir = os.path.join(args.nas_results, 'trained_models', category, arch_id)
-        os.makedirs(result_dir, exist_ok=True)
-
-        # Create trainer
-        trainer = Trainer(
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            criterion=criterion,
-            optimizer=optimizer,
-            device=device,
-            result_dir=result_dir,
-            epochs=args.epochs,
-            scheduler=scheduler,
-        use_amp=args.use_amp,
-        save_freq=args.save_freq,
-        save_checkpoints=args.save_checkpoints,
-        grad_clip_max_norm=1.0,
-        val_batch_stats_path=os.path.join(result_dir, 'val_batch_stats.csv'),
-        val_batch_stats_anomaly_only=True
-    )
-
-        # Train
-        trainer.train()
-        best_acc = trainer.best_acc
-
-        print(f"[GPU {gpu_id}] ✓ {category}/{arch_id} completed: {best_acc:.2f}%")
-
-        # Prepare result
-        result = {
-            'category': category,
-            'arch_id': arch_id,
-            'aznas_fitness': arch_info['aznas_fitness'],
-            'scores': arch_info['scores'],
-            'generation': arch_info['generation'],
-            'best_val_acc': best_acc,
-            'train_time': sum(trainer.history['epoch_time']) if trainer.history['epoch_time'] else 0,
-            'final_train_loss': trainer.history['train_loss'][-1] if trainer.history['train_loss'] else 0,
-            'final_val_loss': trainer.history['val_loss'][-1] if trainer.history['val_loss'] else 0,
-        }
-
-        result_queue.put(('success', result))
-
-    except Exception as e:
-        print(f"[GPU {gpu_id}] ❌ Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        result_queue.put(('error', {
-            'category': arch_info['category'],
-            'arch_id': arch_info['arch_id'],
-            'error': str(e)
-        }))
-
-
-def gpu_worker(gpu_id, task_queue, result_queue, args):
-    """Worker thread for a single GPU
-
-    Args:
-        gpu_id: GPU device ID
-        task_queue: Queue of architectures to train
-        result_queue: Queue to put results
-        args: Command line arguments
-    """
-    print(f"[GPU {gpu_id}] Worker started")
-
-    while True:
-        try:
-            # Get next architecture to train (with timeout)
-            arch_info = task_queue.get(timeout=1)
-
-            if arch_info is None:  # Poison pill to stop worker
-                print(f"[GPU {gpu_id}] Worker stopping")
-                break
-
-            # Train the architecture
-            train_architecture_worker(arch_info, gpu_id, args, result_queue)
-
-            # Mark task as done
-            task_queue.task_done()
-
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"[GPU {gpu_id}] Worker error: {e}")
-            import traceback
-            traceback.print_exc()
-
-
-def save_results(results, nas_result_dir):
-    """Save training results to CSV"""
-    csv_path = os.path.join(nas_result_dir, 'training_results.csv')
-
-    with open(csv_path, 'w', newline='') as f:
-        fieldnames = [
-            'category', 'arch_id', 'aznas_fitness',
-            'expressivity', 'progressivity', 'trainability', 'fhe_latency',
-            'fhe_boot_count', 'fhe_max_depth',
-            'generation', 'best_val_acc', 'train_time',
-            'final_train_loss', 'final_val_loss'
-        ]
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for result in results:
-            writer.writerow({
-                'category': result['category'],
-                'arch_id': result['arch_id'],
-                'aznas_fitness': result['aznas_fitness'],
-                'expressivity': result['scores'].get('expressivity', 0.0),
-                'progressivity': result['scores'].get('progressivity', 0.0),
-                'trainability': result['scores'].get('trainability', 0.0),
-                'fhe_latency': result['scores'].get('fhe_latency', 0.0),
-                'fhe_boot_count': result['scores'].get('fhe_boot_count', 0),
-                'fhe_max_depth': result['scores'].get('fhe_max_depth', 0),
-                'generation': result['generation'],
-                'best_val_acc': result['best_val_acc'],
-                'train_time': result['train_time'],
-                'final_train_loss': result['final_train_loss'],
-                'final_val_loss': result['final_val_loss']
-            })
-
-    print(f"\n✓ Results saved to: {csv_path}")
-
-    # Save summary
-    import numpy as np
-    summary = {
-        'total_architectures': len(results),
-        'by_category': {},
-        'timestamp': datetime.now().isoformat()
-    }
-
-    for category in ['best', 'middle', 'worst']:
-        cat_results = [r for r in results if r['category'] == category]
-        if cat_results:
-            summary['by_category'][category] = {
-                'count': len(cat_results),
-                'mean_accuracy': float(np.mean([r['best_val_acc'] for r in cat_results])),
-                'best_accuracy': float(np.max([r['best_val_acc'] for r in cat_results])),
-                'worst_accuracy': float(np.min([r['best_val_acc'] for r in cat_results]))
-            }
-
-    json_path = os.path.join(nas_result_dir, 'training_summary.json')
-    with open(json_path, 'w') as f:
-        json.dump(summary, f, indent=2)
-
-    print(f"✓ Summary saved to: {json_path}")
+from utils.nas_training import (
+    load_nas_architectures,
+    build_nas_model_configs,
+    build_nas_results,
+    save_results,
+)
 
 
 def _coerce_bool(value):
@@ -422,7 +137,7 @@ def main():
         elif dataset_name in ('cifar10', 'cifar100'):
             args.train_dir = './data'
         else:
-            print("❌ ImageNet-1k requires --train_dir")
+            print("ImageNet-1k requires --train_dir")
             sys.exit(1)
 
     if args.val_dir is None:
@@ -431,48 +146,29 @@ def main():
         elif dataset_name in ('cifar10', 'cifar100'):
             args.val_dir = args.train_dir
         else:
-            print("❌ ImageNet-1k requires --val_dir")
+            print("ImageNet-1k requires --val_dir")
             sys.exit(1)
 
     # Check paths
     if not os.path.exists(args.nas_results):
-        print(f"❌ NAS results directory not found: {args.nas_results}")
+        print(f"NAS results directory not found: {args.nas_results}")
         sys.exit(1)
 
     if dataset_info['type'] == 'imagefolder':
         if not os.path.exists(args.train_dir):
-            print(f"❌ Training directory not found: {args.train_dir}")
+            print(f"Training directory not found: {args.train_dir}")
             sys.exit(1)
         if not os.path.exists(args.val_dir):
-            print(f"❌ Validation directory not found: {args.val_dir}")
+            print(f"Validation directory not found: {args.val_dir}")
             sys.exit(1)
     elif not os.path.exists(args.train_dir) and not args.download:
-        print(f"❌ CIFAR root directory not found: {args.train_dir}")
-        print("提示: 使用 --download 允许自动下载")
+        print(f"CIFAR root directory not found: {args.train_dir}")
+        print("Hint: use --download to allow automatic download")
         sys.exit(1)
-
-    # Check GPUs
-    available_gpus = []
-    for gpu_id in args.gpus:
-        if torch.cuda.is_available() and gpu_id < torch.cuda.device_count():
-            available_gpus.append(gpu_id)
-            props = torch.cuda.get_device_properties(gpu_id)
-            print(f"✓ GPU {gpu_id}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
-        else:
-            print(f"⚠ GPU {gpu_id} not available")
-
-    if not available_gpus:
-        print("❌ No GPUs available")
-        sys.exit(1)
-
-    print(f"\nUsing {len(available_gpus)} GPUs: {available_gpus}")
 
     # Load architectures
     print(f"\nLoading architectures from {args.nas_results}...")
-    architectures = load_nas_architectures(args.nas_results)
-
-    # Filter by category
-    architectures = [a for a in architectures if a['category'] in args.categories]
+    architectures = load_nas_architectures(args.nas_results, args.categories)
 
     # Limit per category if specified
     if args.max_per_category:
@@ -488,104 +184,91 @@ def main():
         if count > 0:
             print(f"  - {category}: {count}")
 
-    # Create task queue
-    task_queue = queue.Queue()
-    for arch in architectures:
-        task_queue.put(arch)
+    if not architectures:
+        print("No architectures found. Exiting.")
+        return
 
-    # Create result queue
-    result_queue = queue.Queue()
+    training_cfg = {
+        'epochs': args.epochs,
+        'batch_size': args.batch_size,
+        'learning_rate': args.learning_rate,
+        'num_workers': args.num_workers,
+        'save_checkpoints': args.save_checkpoints,
+        'save_freq': args.save_freq,
+        'use_amp': args.use_amp,
+    }
 
-    # Start GPU workers
-    print(f"\n{'='*80}")
-    print(f"Starting {len(available_gpus)} GPU workers")
-    print(f"{'='*80}")
+    result_root = os.path.join(args.nas_results, 'trained_models')
+    os.makedirs(result_root, exist_ok=True)
 
-    workers = []
-    for gpu_id in available_gpus:
-        worker = threading.Thread(
-            target=gpu_worker,
-            args=(gpu_id, task_queue, result_queue, args),
-            daemon=True
-        )
-        worker.start()
-        workers.append(worker)
-        time.sleep(0.5)  # Stagger startup
+    model_configs, arch_map = build_nas_model_configs(
+        architectures,
+        args.dataset_num_classes,
+        training_cfg,
+        result_root,
+    )
 
-    # Monitor progress
-    total_tasks = len(architectures)
-    completed = 0
-    results = []
-    errors = []
+    manager = MultiGPUManager(
+        train_dir=args.train_dir,
+        val_dir=args.val_dir,
+        result_dir=result_root,
+        gpus=args.gpus,
+        num_classes=args.dataset_num_classes,
+        default_epochs=args.epochs,
+        default_batch_size=args.batch_size,
+        default_lr=args.learning_rate,
+        default_num_workers=args.num_workers,
+        use_memory_fs=args.use_memory_fs,
+        dataset=args.dataset,
+        download=args.download,
+        input_size=args.input_size,
+        seed=args.seed,
+    )
 
-    print(f"\nTraining progress: 0/{total_tasks}")
+    results = manager.train_models(
+        model_configs=model_configs,
+        force=True,
+        parallel=True,
+        return_details=True,
+    )
 
-    while completed < total_tasks:
-        try:
-            status, result = result_queue.get(timeout=5)
-
-            if status == 'success':
-                results.append(result)
-                completed += 1
-                print(f"\n{'='*80}")
-                print(f"Progress: {completed}/{total_tasks} completed")
-                print(f"Latest: {result['category']}/{result['arch_id']} → {result['best_val_acc']:.2f}%")
-                print(f"{'='*80}")
-            elif status == 'error':
-                errors.append(result)
-                completed += 1
-                print(f"\n⚠ Error in {result['category']}/{result['arch_id']}")
-
-        except queue.Empty:
-            # Check if all workers are done
-            if task_queue.empty() and all(not w.is_alive() for w in workers):
-                break
-            continue
-
-    # Stop workers
-    print("\nStopping workers...")
-    for _ in available_gpus:
-        task_queue.put(None)  # Poison pill
-
-    for worker in workers:
-        worker.join(timeout=5)
-
-    # Save results
     print(f"\n{'='*80}")
     print("Training Complete")
     print(f"{'='*80}")
 
-    success_count = len(results)
-    error_count = len(errors)
-    
-    print(f"\n总计: {total_tasks} 个架构")
-    print(f"  ✓ 成功: {success_count}")
-    print(f"  ✗ 失败: {error_count}")
-    
-    if errors:
-        print(f"\n训练失败的架构:")
-        for err in errors:
-            print(f"  ✗ {err['category']}/{err['arch_id']}")
-            print(f"     错误: {err['error'][:100]}...")  # 截断长错误信息
+    total = len(model_configs)
+    success_count = len(results.get('success', {}))
+    failed_count = len(results.get('failed', {}))
 
-    if results:
-        save_results(results, args.nas_results)
+    print(f"\nTotal: {total} architectures")
+    print(f"  Success: {success_count}")
+    print(f"  Failed: {failed_count}")
 
-        # Print summary
-        print("\nAccuracy by Category:")
-        import numpy as np
-        for category in ['best', 'middle', 'worst']:
-            cat_results = [r for r in results if r['category'] == category]
-            if cat_results:
-                mean_acc = np.mean([r['best_val_acc'] for r in cat_results])
-                print(f"  {category:8s}: {mean_acc:.2f}% (n={len(cat_results)})")
+    if results.get('failed'):
+        print("\nFailed architectures:")
+        for model_name, error in results['failed'].items():
+            print(f"  - {model_name}")
+            print(f"    Error: {error[:100]}...")
 
-        print(f"\nResults saved in: {args.nas_results}")
-        print("  - training_results.csv: Detailed results")
-        print("  - training_summary.json: Summary statistics")
-        print(f"  - trained_models/: Model checkpoints and logs")
+    details = results.get('details', {})
+    nas_results = build_nas_results(details, arch_map)
+
+    if nas_results:
+        save_results(nas_results, args.nas_results)
     else:
-        print("\n⚠ 没有成功训练的架构，跳过结果保存")
+        print("\nNo successful architectures; skipping result export")
+
+    print("\nAccuracy by Category:")
+    for category in ['best', 'middle', 'worst']:
+        cat_results = [r for r in nas_results if r['category'] == category]
+        if cat_results:
+            mean_acc = sum(r['best_val_acc'] for r in cat_results) / len(cat_results)
+            print(f"  {category:8s}: {mean_acc:.2f}% (n={len(cat_results)})")
+
+    print(f"\nResults saved in: {args.nas_results}")
+    print("  - training_results.csv: Detailed results")
+    print("  - training_summary.json: Summary statistics")
+    print("  - trained_models/: Model checkpoints and logs")
 
 
 if __name__ == '__main__':

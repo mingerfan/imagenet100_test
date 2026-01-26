@@ -385,7 +385,7 @@ class SelfGated(nn.Module):
     def forward(self, x):
         # 输入检测
         if not self._overflow_warned and not torch.isfinite(x).all():
-            print(f"\n⚠️ SelfGated输入检测: 输入包含非有限值!")
+            print("\n⚠️ SelfGated输入检测: 输入包含非有限值!")
             print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
             print(f"   NaN数量: {torch.isnan(x).sum().item()}")
             print(f"   Inf数量: {torch.isinf(x).sum().item()}")
@@ -399,7 +399,7 @@ class SelfGated(nn.Module):
         
         # feat_intrinsic检测
         if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
-            print(f"\n⚠️ SelfGated检测: conv_3x3+bn后产生非有限值!")
+            print("\n⚠️ SelfGated检测: conv_3x3+bn后产生非有限值!")
             print(f"   feat_intrinsic shape: {feat_intrinsic.shape}, dtype: {feat_intrinsic.dtype}")
             finite_mask = torch.isfinite(feat_intrinsic)
             if finite_mask.any():
@@ -413,7 +413,7 @@ class SelfGated(nn.Module):
         
         # gate检测(激活前)
         if not self._overflow_warned and not torch.isfinite(gate).all():
-            print(f"\n⚠️ SelfGated检测: conv_gate+bn后产生非有限值!")
+            print("\n⚠️ SelfGated检测: conv_gate+bn后产生非有限值!")
             print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
             finite_mask = torch.isfinite(gate)
             if finite_mask.any():
@@ -433,7 +433,7 @@ class SelfGated(nn.Module):
         
         # gate检测(激活后)
         if not self._overflow_warned and not torch.isfinite(delta).all():
-            print(f"\n⚠️ SelfGated检测: 激活函数后产生非有限值!")
+            print("\n⚠️ SelfGated检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.act).__name__}")
             print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
             self._overflow_warned = True
@@ -444,7 +444,7 @@ class SelfGated(nn.Module):
         
         # feat_generated检测
         if not self._overflow_warned and not torch.isfinite(feat_generated).all():
-            print(f"\n⚠️ SelfGated检测: 门控乘法后产生非有限值!")
+            print("\n⚠️ SelfGated检测: 门控乘法后产生非有限值!")
             print(f"   feat_generated shape: {feat_generated.shape}, dtype: {feat_generated.dtype}")
             finite_mask = torch.isfinite(feat_generated)
             if finite_mask.any():
