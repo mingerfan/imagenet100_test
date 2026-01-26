@@ -5,6 +5,8 @@ import sys
 from typing import Iterable, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
 
 
 # Ensure repo root is on path
@@ -162,6 +164,224 @@ def load_model(
     return model
 
 
+class _LimitedLoader:
+    def __init__(self, loader, max_batches: int):
+        self.loader = loader
+        self.max_batches = max_batches
+
+    def __iter__(self):
+        for i, batch in enumerate(self.loader):
+            if i >= self.max_batches:
+                break
+            yield batch
+
+    def __len__(self):
+        try:
+            return min(len(self.loader), self.max_batches)
+        except Exception:
+            return self.max_batches
+
+
+class SineGratingDataset(Dataset):
+    def __init__(
+        self,
+        freqs: List[float],
+        angles: List[float],
+        samples_per_class: int,
+        size: int,
+        amplitude: float,
+        normalize: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]],
+        noise_std: float,
+        noise_type: str,
+        hf_cutoff: float,
+        label_mode: str,
+        seed: int,
+    ):
+        self.freqs = freqs
+        self.angles = angles
+        self.samples_per_class = samples_per_class
+        self.size = size
+        self.amplitude = amplitude
+        self.normalize = normalize
+        self.noise_std = noise_std
+        self.noise_type = noise_type
+        self.hf_cutoff = hf_cutoff
+        self.label_mode = label_mode
+        self.rng = torch.Generator()
+        self.rng.manual_seed(seed)
+
+        if label_mode not in ("freq", "angle", "freq_angle"):
+            raise ValueError("label_mode must be freq, angle, or freq_angle")
+
+        self.class_pairs = []
+        for f in self.freqs:
+            for a in self.angles:
+                self.class_pairs.append((f, a))
+
+    def __len__(self):
+        return len(self.class_pairs) * self.samples_per_class
+
+    def _label_for_pair(self, f: float, a: float) -> int:
+        if self.label_mode == "freq":
+            return self.freqs.index(f)
+        if self.label_mode == "angle":
+            return self.angles.index(a)
+        # freq_angle
+        return self.class_pairs.index((f, a))
+
+    def __getitem__(self, idx):
+        class_idx = idx // self.samples_per_class
+        f, a = self.class_pairs[class_idx]
+        x = make_sine_batch(
+            batch_size=1,
+            size=self.size,
+            freq=f,
+            angle_deg=a,
+            amplitude=self.amplitude,
+            device=torch.device("cpu"),
+            phase_random=True,
+        )[0]
+
+        if self.noise_std > 0:
+            x, _ = add_noise(x.unsqueeze(0), self.noise_std, self.noise_type, self.hf_cutoff)
+            x = x[0]
+
+        if self.normalize is not None:
+            mean, std = self.normalize
+            x = normalize_batch(x.unsqueeze(0), mean, std)[0]
+
+        y = self._label_for_pair(f, a)
+        return x, y
+
+
+def build_sine_dataloaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader, int]:
+    if args.sine_label_mode == "freq":
+        num_classes = len(args.sine_freqs)
+    elif args.sine_label_mode == "angle":
+        num_classes = len(args.sine_angles)
+    else:
+        num_classes = len(args.sine_freqs) * len(args.sine_angles)
+
+    normalize = None
+    if args.normalize == "imagenet":
+        normalize = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    elif args.normalize == "cifar10":
+        normalize = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+
+    dataset = SineGratingDataset(
+        freqs=args.sine_freqs,
+        angles=args.sine_angles,
+        samples_per_class=args.sine_samples_per_class,
+        size=args.input_size,
+        amplitude=args.sine_amplitude,
+        normalize=normalize,
+        noise_std=args.sine_train_noise_std,
+        noise_type=args.sine_train_noise_type,
+        hf_cutoff=args.sine_train_hf_cutoff,
+        label_mode=args.sine_label_mode,
+        seed=args.seed,
+    )
+
+    val_samples = max(1, int(args.sine_samples_per_class * args.sine_val_ratio))
+    val_dataset = SineGratingDataset(
+        freqs=args.sine_freqs,
+        angles=args.sine_angles,
+        samples_per_class=val_samples,
+        size=args.input_size,
+        amplitude=args.sine_amplitude,
+        normalize=normalize,
+        noise_std=args.sine_val_noise_std,
+        noise_type=args.sine_val_noise_type,
+        hf_cutoff=args.sine_val_hf_cutoff,
+        label_mode=args.sine_label_mode,
+        seed=args.seed + 123,
+    )
+
+    train_loader = DataLoader(
+        dataset,
+        batch_size=args.train_batch_size or args.batch_size,
+        shuffle=True,
+        num_workers=args.train_num_workers,
+        pin_memory=not args.cpu,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.train_batch_size or args.batch_size,
+        shuffle=False,
+        num_workers=args.train_num_workers,
+        pin_memory=not args.cpu,
+    )
+    return train_loader, val_loader, num_classes
+
+
+def maybe_train(
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> None:
+    if args.train_epochs <= 0:
+        return
+
+    from trainers.base_trainer import Trainer
+    from trainers.multi_gpu_manager import create_smart_optimizer
+
+    if args.train_on_sine:
+        train_loader, val_loader, sine_num_classes = build_sine_dataloaders(args)
+        if model.classifier is not None:
+            pass
+        if args.num_classes != sine_num_classes:
+            print(
+                f"WARN num_classes={args.num_classes} != sine classes {sine_num_classes}, "
+                "ensure model output matches."
+            )
+    else:
+        from data import create_dataloaders
+
+        if args.dataset in ("imagenet100", "imagenet1k", "imagenet"):
+            if not args.train_dir or not args.val_dir:
+                raise ValueError("ImageFolder 数据集需要提供 --train-dir 和 --val-dir")
+
+        train_bs = args.train_batch_size or args.batch_size
+        train_loader, val_loader, _, _ = create_dataloaders(
+            train_dir=args.train_dir,
+            val_dir=args.val_dir,
+            batch_size=train_bs,
+            num_workers=args.train_num_workers,
+            pin_memory=not args.cpu,
+            use_memory_fs=args.use_memory_fs,
+            dataset=args.dataset,
+            download=args.download,
+            input_size=args.input_size,
+            seed=args.seed,
+        )
+
+    if args.train_max_batches and args.train_max_batches > 0:
+        train_loader = _LimitedLoader(train_loader, args.train_max_batches)
+        val_loader = _LimitedLoader(val_loader, args.train_max_batches)
+
+    optimizer = create_smart_optimizer(model, lr=args.train_lr)
+    criterion = nn.CrossEntropyLoss()
+
+    trainer = Trainer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        result_dir=args.train_out,
+        epochs=args.train_epochs,
+        scheduler=None,
+        use_amp=not args.train_no_amp,
+        save_freq=0,
+        save_checkpoints=False,
+        grad_clip_max_norm=args.grad_clip_max_norm,
+        poly4_warmup_ratio=args.poly4_warmup_ratio,
+    )
+
+    trainer.train()
+
+
 def build_grid(size: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     ys = torch.linspace(0.0, 1.0, steps=size, device=device)
     xs = torch.linspace(0.0, 1.0, steps=size, device=device)
@@ -291,10 +511,49 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--csv", type=str, default=None, help="Optional CSV output path")
+    parser.add_argument("--train-epochs", type=int, default=0, help="Train for N epochs before eval")
+    parser.add_argument("--train-dir", type=str, default=None, help="Training data directory")
+    parser.add_argument("--val-dir", type=str, default=None, help="Validation data directory")
+    parser.add_argument("--dataset", type=str, default="imagenet100")
+    parser.add_argument("--train-batch-size", type=int, default=None)
+    parser.add_argument("--train-num-workers", type=int, default=8)
+    parser.add_argument("--train-lr", type=float, default=0.001)
+    parser.add_argument("--train-no-amp", action="store_true")
+    parser.add_argument("--train-out", type=str, default="tmp/freq_response_train")
+    parser.add_argument("--train-max-batches", type=int, default=0)
+    parser.add_argument("--use-memory-fs", action="store_true")
+    parser.add_argument("--download", action="store_true")
+    parser.add_argument("--grad-clip-max-norm", type=float, default=1.0)
+    parser.add_argument("--poly4-warmup-ratio", type=float, default=0.5)
+    parser.add_argument("--train-on-sine", action="store_true", help="Train on synthetic sine gratings")
+    parser.add_argument("--sine-freqs", type=str, default="1,2,4,8,16")
+    parser.add_argument("--sine-angles", type=str, default="0,45,90")
+    parser.add_argument("--sine-samples-per-class", type=int, default=128)
+    parser.add_argument("--sine-val-ratio", type=float, default=0.25)
+    parser.add_argument("--sine-amplitude", type=float, default=1.0)
+    parser.add_argument("--sine-label-mode", type=str, default="freq_angle", choices=["freq", "angle", "freq_angle"])
+    parser.add_argument("--sine-train-noise-std", type=float, default=0.0)
+    parser.add_argument("--sine-train-noise-type", type=str, default="gaussian", choices=["gaussian", "hf"])
+    parser.add_argument("--sine-train-hf-cutoff", type=float, default=0.25)
+    parser.add_argument("--sine-val-noise-std", type=float, default=0.0)
+    parser.add_argument("--sine-val-noise-type", type=str, default="gaussian", choices=["gaussian", "hf"])
+    parser.add_argument("--sine-val-hf-cutoff", type=float, default=0.25)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
+
+    args.sine_freqs = parse_list(args.sine_freqs, float)
+    args.sine_angles = parse_list(args.sine_angles, float)
+
+    if args.train_on_sine:
+        if args.sine_label_mode == "freq":
+            sine_classes = len(args.sine_freqs)
+        elif args.sine_label_mode == "angle":
+            sine_classes = len(args.sine_angles)
+        else:
+            sine_classes = len(args.sine_freqs) * len(args.sine_angles)
+        args.num_classes = sine_classes
 
     model = load_model(
         model_name=args.model_name,
@@ -304,6 +563,8 @@ def main() -> None:
         checkpoint=args.ckpt,
         input_size=args.input_size,
     ).to(device)
+
+    maybe_train(model, args, device)
     model.eval()
 
     if args.poly4_eval:
