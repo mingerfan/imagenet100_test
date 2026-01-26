@@ -322,6 +322,11 @@ class StablePoly4(nn.Module):
         if finite_mask.any():
             t = t[finite_mask]
             t = t.float()
+            # 限制采样数量，避免 quantile 对超大张量报错/过慢
+            max_samples = 10_000
+            if t.numel() > max_samples:
+                idx = torch.randint(0, t.numel(), (max_samples,), device=t.device)
+                t = t.view(-1)[idx]
             qs = torch.tensor([0.5, 0.9, 0.99], device=t.device)
             qv = torch.quantile(t, qs)
             return {
