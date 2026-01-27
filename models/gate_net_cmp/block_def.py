@@ -7,6 +7,16 @@ BN_EPS = 1e-3  # 高eps防止验证集统计漂移
 GATE_SCALE_INIT = 1e-3  # 门控缩放初始值
 
 
+try:
+    from torch.fx.proxy import Proxy as _FxProxy
+except Exception:  # pragma: no cover
+    _FxProxy = None
+
+
+def _is_fx_proxy(x) -> bool:
+    return _FxProxy is not None and isinstance(x, _FxProxy)
+
+
 def _safe_gated_mul(feat, gate):
     if not torch.is_tensor(feat):
         return feat * gate
@@ -474,7 +484,7 @@ class SelfGated(nn.Module):
 
     def forward(self, x):
         # 输入检测
-        if not self._overflow_warned and not torch.isfinite(x).all():
+        if (not _is_fx_proxy(x)) and (not self._overflow_warned) and (not torch.isfinite(x).all()):
             print("\n⚠️ SelfGated输入检测: 输入包含非有限值!")
             print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
             print(f"   NaN数量: {torch.isnan(x).sum().item()}")
@@ -488,7 +498,7 @@ class SelfGated(nn.Module):
         feat_intrinsic = _safe_bn_output(feat_intrinsic, max_feature_val=1000.0)
         
         # feat_intrinsic检测
-        if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
+        if (not _is_fx_proxy(feat_intrinsic)) and (not self._overflow_warned) and (not torch.isfinite(feat_intrinsic).all()):
             print("\n⚠️ SelfGated检测: conv_3x3+bn后产生非有限值!")
             print(f"   feat_intrinsic shape: {feat_intrinsic.shape}, dtype: {feat_intrinsic.dtype}")
             finite_mask = torch.isfinite(feat_intrinsic)
@@ -502,7 +512,7 @@ class SelfGated(nn.Module):
         gate = self.bn_gate(gate)
         
         # gate检测(激活前)
-        if not self._overflow_warned and not torch.isfinite(gate).all():
+        if (not _is_fx_proxy(gate)) and (not self._overflow_warned) and (not torch.isfinite(gate).all()):
             print("\n⚠️ SelfGated检测: conv_gate+bn后产生非有限值!")
             print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
             finite_mask = torch.isfinite(gate)
@@ -522,7 +532,7 @@ class SelfGated(nn.Module):
         self.gate_reg_loss = (delta ** 2).mean()
         
         # delta检测(激活后)
-        if not self._overflow_warned and not torch.isfinite(delta).all():
+        if (not _is_fx_proxy(delta)) and (not self._overflow_warned) and (not torch.isfinite(delta).all()):
             print("\n⚠️ SelfGated检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.act).__name__}")
             print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
@@ -536,7 +546,7 @@ class SelfGated(nn.Module):
         feat_generated = self.gate_scale * (gated_res_1 + gated_res_2)
         
         # feat_generated检测
-        if not self._overflow_warned and not torch.isfinite(feat_generated).all():
+        if (not _is_fx_proxy(feat_generated)) and (not self._overflow_warned) and (not torch.isfinite(feat_generated).all()):
             print("\n⚠️ SelfGated检测: 门控乘法后产生非有限值!")
             print(f"   feat_generated shape: {feat_generated.shape}, dtype: {feat_generated.dtype}")
             finite_mask = torch.isfinite(feat_generated)
@@ -549,7 +559,7 @@ class SelfGated(nn.Module):
         out = torch.cat([feat_intrinsic, feat_generated], dim=1)
         
         # concat检测
-        if not self._overflow_warned and not torch.isfinite(out).all():
+        if (not _is_fx_proxy(out)) and (not self._overflow_warned) and (not torch.isfinite(out).all()):
             print("\n⚠️ SelfGated检测: concat后产生非有限值!")
             print(f"   out shape: {out.shape}, dtype: {out.dtype}")
             self._overflow_warned = True
@@ -557,7 +567,7 @@ class SelfGated(nn.Module):
         out = _safe_conv_bn(self.conv_out, self.bn_out, out)
         
         # 最终输出检测
-        if not self._overflow_warned and not torch.isfinite(out).all():
+        if (not _is_fx_proxy(out)) and (not self._overflow_warned) and (not torch.isfinite(out).all()):
             print("\n⚠️ SelfGated检测: conv_out+bn后产生非有限值!")
             print(f"   最终输出shape: {out.shape}, dtype: {out.dtype}")
             finite_mask = torch.isfinite(out)
@@ -757,7 +767,7 @@ class GatedDepthwiseConv(nn.Module):
 
     def forward(self, x):
         # 输入检测
-        if not self._overflow_warned and not torch.isfinite(x).all():
+        if (not _is_fx_proxy(x)) and (not self._overflow_warned) and (not torch.isfinite(x).all()):
             print(f"\n⚠️ GatedDepthwiseConv输入检测: 输入包含非有限值!")
             print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
             print(f"   NaN数量: {torch.isnan(x).sum().item()}")
@@ -772,7 +782,7 @@ class GatedDepthwiseConv(nn.Module):
         feat_intrinsic = _safe_bn_output(feat_intrinsic, max_feature_val=1000.0)
         
         # feat_intrinsic检测
-        if not self._overflow_warned and not torch.isfinite(feat_intrinsic).all():
+        if (not _is_fx_proxy(feat_intrinsic)) and (not self._overflow_warned) and (not torch.isfinite(feat_intrinsic).all()):
             print(f"\n⚠️ GatedDepthwiseConv检测: dw_conv+bn后产生非有限值!")
             print(f"   feat_intrinsic shape: {feat_intrinsic.shape}, dtype: {feat_intrinsic.dtype}")
             finite_mask = torch.isfinite(feat_intrinsic)
@@ -786,7 +796,7 @@ class GatedDepthwiseConv(nn.Module):
         gate = self.bn_gate(gate) # Added
         
         # gate检测(激活前)
-        if not self._overflow_warned and not torch.isfinite(gate).all():
+        if (not _is_fx_proxy(gate)) and (not self._overflow_warned) and (not torch.isfinite(gate).all()):
             print(f"\n⚠️ GatedDepthwiseConv检测: gate_conv+bn后产生非有限值!")
             print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
             finite_mask = torch.isfinite(gate)
@@ -806,7 +816,7 @@ class GatedDepthwiseConv(nn.Module):
         self.gate_reg_loss = (delta ** 2).mean()
         
         # delta检测(激活后)
-        if not self._overflow_warned and not torch.isfinite(delta).all():
+        if (not _is_fx_proxy(delta)) and (not self._overflow_warned) and (not torch.isfinite(delta).all()):
             print("\n⚠️ GatedDepthwiseConv检测: 激活函数后产生非有限值!")
             print(f"   激活函数类型: {type(self.activation).__name__}")
             print(f"   delta shape: {delta.shape}, dtype: {delta.dtype}")
@@ -818,7 +828,7 @@ class GatedDepthwiseConv(nn.Module):
         feat_gated = self.gate_scale * (gated_res_1 + gated_res_2)
         
         # feat_gated检测
-        if not self._overflow_warned and not torch.isfinite(feat_gated).all():
+        if (not _is_fx_proxy(feat_gated)) and (not self._overflow_warned) and (not torch.isfinite(feat_gated).all()):
             print("\n⚠️ GatedDepthwiseConv检测: 门控乘法后产生非有限值!")
             print(f"   feat_gated shape: {feat_gated.shape}, dtype: {feat_gated.dtype}")
             finite_mask = torch.isfinite(feat_gated)
@@ -832,7 +842,7 @@ class GatedDepthwiseConv(nn.Module):
         out = torch.cat([feat_intrinsic, feat_gated], dim=1)
         
         # 最终输出检测
-        if not self._overflow_warned and not torch.isfinite(out).all():
+        if (not _is_fx_proxy(out)) and (not self._overflow_warned) and (not torch.isfinite(out).all()):
             print("\n⚠️ GatedDepthwiseConv检测: concat后产生非有限值!")
             print(f"   最终输出shape: {out.shape}, dtype: {out.dtype}")
             finite_mask = torch.isfinite(out)
@@ -966,7 +976,7 @@ class MBConvBlock(nn.Module):
         identity = x
         
         # 输入检测
-        if not self._overflow_warned and not torch.isfinite(x).all():
+        if (not _is_fx_proxy(x)) and (not self._overflow_warned) and (not torch.isfinite(x).all()):
             print("\n⚠️ MBConvBlock输入检测: 输入包含非有限值!")
             print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
             print(f"   NaN数量: {torch.isnan(x).sum().item()}")
@@ -982,7 +992,7 @@ class MBConvBlock(nn.Module):
             out = _safe_bn_output(out, max_feature_val=1000.0)
             
             # expansion后检测（关键位置！）
-            if not self._overflow_warned and not torch.isfinite(out).all():
+            if (not _is_fx_proxy(out)) and (not self._overflow_warned) and (not torch.isfinite(out).all()):
                 print("\n⚠️ MBConvBlock检测: expansion+bn后产生非有限值!")
                 print(f"   out shape: {out.shape}, dtype: {out.dtype}")
                 finite_mask = torch.isfinite(out)
@@ -995,7 +1005,7 @@ class MBConvBlock(nn.Module):
             out = self.activation(out)
             
             # activation后检测
-            if not self._overflow_warned and not torch.isfinite(out).all():
+            if (not _is_fx_proxy(out)) and (not self._overflow_warned) and (not torch.isfinite(out).all()):
                 print("\n⚠️ MBConvBlock检测: expansion激活后产生非有限值!")
                 print(f"   激活函数类型: {type(self.activation).__name__}")
                 print(f"   out shape: {out.shape}, dtype: {out.dtype}")
