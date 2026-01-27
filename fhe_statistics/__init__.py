@@ -34,6 +34,13 @@ from .orion_statistics_fn import (
     analyze_model_orion,
 )
 
+from .fhe_mp_cnn_latency import (
+    FheMpCnnLatencyReport,
+    parse_fhe_mp_cnn_log,
+    analyze_fhe_mp_cnn_result_dir,
+    summarize_fhe_mp_cnn_reports,
+)
+
 from .boot_optimizer import BootOptimizer, NodeInfo
 
 __version__ = "1.0.0"
@@ -45,6 +52,10 @@ __all__ = [
     "analyze_model_fhelipe",
     "OrionInfo",
     "analyze_model_orion",
+    "FheMpCnnLatencyReport",
+    "parse_fhe_mp_cnn_log",
+    "analyze_fhe_mp_cnn_result_dir",
+    "summarize_fhe_mp_cnn_reports",
     "BootOptimizer",
     "NodeInfo",
 ]

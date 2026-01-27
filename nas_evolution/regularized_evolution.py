@@ -353,7 +353,7 @@ class RegularizedEvolution:
         total = len(sorted_history)
 
         # Top k architectures
-        top_archs = sorted_history[:min(top_k, total)]
+        top_archs = self._unique_top_architectures(sorted_history, top_k)
 
         # Middle k architectures (from middle 50%)
         middle_start = total // 4
@@ -379,6 +379,50 @@ class RegularizedEvolution:
             'middle': middle_archs,
             'worst': worst_archs
         }
+
+    def _unique_top_architectures(self, individuals, k: int):
+        """Select top-k unique architectures based on full config signature."""
+        unique = []
+        seen = set()
+        for ind in individuals:
+            sig = self._config_signature(ind.config)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            unique.append(ind)
+            if len(unique) >= k:
+                break
+        unique_count = len(unique)
+        if unique_count < k:
+            for ind in individuals:
+                if ind in unique:
+                    continue
+                unique.append(ind)
+                if len(unique) >= k:
+                    break
+            if getattr(self, "logger", None):
+                self.logger.log_message(
+                    f"Top-{k} unique only {unique_count}; filled {k - unique_count} duplicates to reach {k}."
+                )
+        return unique
+
+    def _config_signature(self, config):
+        """Build a stable signature for architecture uniqueness."""
+        block_sig = []
+        if hasattr(config, 'blocks') and config.blocks:
+            for block in config.blocks:
+                block_sig.append((block.block_id, block.stride))
+        else:
+            block_sig = list(getattr(config, 'block_choices', []))
+
+        return (
+            getattr(config, 'stem_code', None),
+            getattr(config, 'second_ds_code', None),
+            getattr(config, 'stride_code', None),
+            tuple(getattr(config, 'ct_policies', [])),
+            getattr(config, 'initial_ct_count', None),
+            tuple(block_sig),
+        )
 
 
 def main():
