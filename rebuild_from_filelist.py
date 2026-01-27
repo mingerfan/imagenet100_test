@@ -114,12 +114,21 @@ def rebuild_from_filelist(
         src_class_path = imagenet1k_path / class_name
         dst_class_path = output_path / class_name
         
-        # 使用 os.path.isdir 确保正确识别
+        # 首先尝试直接路径
         if not os.path.isdir(str(src_class_path)):
-            print(f"⚠  类不存在: {class_name}")
-            stats["missing"] += 1
-            stats["errors"].append(f"Missing class: {class_name}")
-            continue
+            # 如果不存在，尝试 train/class 和 val/class
+            train_class_path = imagenet1k_path / "train" / class_name
+            val_class_path = imagenet1k_path / "val" / class_name
+            
+            if os.path.isdir(str(train_class_path)):
+                src_class_path = train_class_path
+            elif os.path.isdir(str(val_class_path)):
+                src_class_path = val_class_path
+            else:
+                print(f"⚠  类不存在: {class_name}")
+                stats["missing"] += 1
+                stats["errors"].append(f"Missing class: {class_name}")
+                continue
         
         stats["total_classes"] += 1
         
