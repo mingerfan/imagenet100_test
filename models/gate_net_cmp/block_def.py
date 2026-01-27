@@ -768,7 +768,7 @@ class GatedDepthwiseConv(nn.Module):
     def forward(self, x):
         # 输入检测
         if (not _is_fx_proxy(x)) and (not self._overflow_warned) and (not torch.isfinite(x).all()):
-            print(f"\n⚠️ GatedDepthwiseConv输入检测: 输入包含非有限值!")
+            print("\n⚠️ GatedDepthwiseConv输入检测: 输入包含非有限值!")
             print(f"   输入shape: {x.shape}, dtype: {x.dtype}")
             print(f"   NaN数量: {torch.isnan(x).sum().item()}")
             print(f"   Inf数量: {torch.isinf(x).sum().item()}")
@@ -783,7 +783,7 @@ class GatedDepthwiseConv(nn.Module):
         
         # feat_intrinsic检测
         if (not _is_fx_proxy(feat_intrinsic)) and (not self._overflow_warned) and (not torch.isfinite(feat_intrinsic).all()):
-            print(f"\n⚠️ GatedDepthwiseConv检测: dw_conv+bn后产生非有限值!")
+            print("\n⚠️ GatedDepthwiseConv检测: dw_conv+bn后产生非有限值!")
             print(f"   feat_intrinsic shape: {feat_intrinsic.shape}, dtype: {feat_intrinsic.dtype}")
             finite_mask = torch.isfinite(feat_intrinsic)
             if finite_mask.any():
@@ -797,7 +797,7 @@ class GatedDepthwiseConv(nn.Module):
         
         # gate检测(激活前)
         if (not _is_fx_proxy(gate)) and (not self._overflow_warned) and (not torch.isfinite(gate).all()):
-            print(f"\n⚠️ GatedDepthwiseConv检测: gate_conv+bn后产生非有限值!")
+            print("\n⚠️ GatedDepthwiseConv检测: gate_conv+bn后产生非有限值!")
             print(f"   gate shape: {gate.shape}, dtype: {gate.dtype}")
             finite_mask = torch.isfinite(gate)
             if finite_mask.any():

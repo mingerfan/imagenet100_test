@@ -29,6 +29,10 @@ from .fhelipe_statistics_fn import (
     FhelipeInfo,
     analyze_model_fhelipe,
 )
+from .orion_statistics_fn import (
+    OrionInfo,
+    analyze_model_orion,
+)
 
 from .boot_optimizer import BootOptimizer, NodeInfo
 
@@ -39,6 +43,8 @@ __all__ = [
     "compare_networks",
     "FhelipeInfo",
     "analyze_model_fhelipe",
+    "OrionInfo",
+    "analyze_model_orion",
     "BootOptimizer",
     "NodeInfo",
 ]
