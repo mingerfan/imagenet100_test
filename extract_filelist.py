@@ -14,7 +14,9 @@ def extract_filelist(imagenet100_root, output_file="imagenet100_filelist.txt"):
     """
     提取ImageNet100的完整文件清单
     格式：每行一个相对路径
-    正确处理符号链接
+    支持两种结构：
+    1. ImageNet_100/ -> n01234567/ -> images.jpg
+    2. ImageNet_100/ -> train/val -> n01234567/ -> images.jpg
     """
     imagenet100_root = Path(imagenet100_root)
     
@@ -25,33 +27,69 @@ def extract_filelist(imagenet100_root, output_file="imagenet100_filelist.txt"):
     files = []
     classes = []
     
-    # 遍历所有类和文件，follow_symlinks=True 确保跟随符号链接
+    # 检查第一层是否是 train/val 结构
     try:
         entries = list(imagenet100_root.iterdir())
     except Exception as e:
         print(f"❌ 无法读取目录: {e}")
         return False
     
-    for class_dir in sorted(entries):
-        # 使用 os.path.isdir 而非 Path.is_dir()，确保跟随符号链接
-        if not os.path.isdir(str(class_dir)):
-            continue
-        
-        class_name = class_dir.name
-        classes.append(class_name)
-        
-        try:
-            img_files = list(class_dir.iterdir())
-        except Exception as e:
-            print(f"⚠  无法读取类目录 {class_name}: {e}")
-            continue
-        
-        for img_file in sorted(img_files):
-            # 使用 os.path.isfile 而非 Path.is_file()，确保正确识别
-            if os.path.isfile(str(img_file)):
-                # 保存相对路径
-                rel_path = f"{class_name}/{img_file.name}"
-                files.append(rel_path)
+    # 判断是否为 train/val 结构
+    first_level_dirs = [e for e in entries if os.path.isdir(str(e))]
+    first_level_names = {d.name for d in first_level_dirs}
+    
+    is_train_val_structure = first_level_names == {"train", "val"} or \
+                             first_level_names == {"train"} or \
+                             first_level_names == {"val"}
+    
+    if is_train_val_structure:
+        # 遍历 train/val 子目录
+        print(f"📁 检测到 train/val 结构，正在遍历...")
+        for subset_dir in sorted(first_level_dirs):
+            try:
+                class_dirs = list(subset_dir.iterdir())
+            except Exception as e:
+                print(f"⚠  无法读取子集目录 {subset_dir.name}: {e}")
+                continue
+            
+            for class_dir in sorted(class_dirs):
+                if not os.path.isdir(str(class_dir)):
+                    continue
+                
+                class_name = class_dir.name
+                if class_name not in classes:
+                    classes.append(class_name)
+                
+                try:
+                    img_files = list(class_dir.iterdir())
+                except Exception as e:
+                    print(f"⚠  无法读取类目录 {subset_dir.name}/{class_name}: {e}")
+                    continue
+                
+                for img_file in sorted(img_files):
+                    if os.path.isfile(str(img_file)):
+                        rel_path = f"{subset_dir.name}/{class_name}/{img_file.name}"
+                        files.append(rel_path)
+    else:
+        # 直接遍历第一层作为类目录
+        print(f"📁 检测到直接结构，正在遍历...")
+        for class_dir in sorted(entries):
+            if not os.path.isdir(str(class_dir)):
+                continue
+            
+            class_name = class_dir.name
+            classes.append(class_name)
+            
+            try:
+                img_files = list(class_dir.iterdir())
+            except Exception as e:
+                print(f"⚠  无法读取类目录 {class_name}: {e}")
+                continue
+            
+            for img_file in sorted(img_files):
+                if os.path.isfile(str(img_file)):
+                    rel_path = f"{class_name}/{img_file.name}"
+                    files.append(rel_path)
     
     # 保存为可复制的文本格式
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -92,9 +130,10 @@ def extract_filelist(imagenet100_root, output_file="imagenet100_filelist.txt"):
 
 def extract_filelist_compact(imagenet100_root, output_file="imagenet100_filelist_compact.txt"):
     """
-    提取紧凑格式的文件清单（仅类名和文件数）
-    更容易手工验证
-    正确处理符号链接
+    提取紧凑格式的文件清单
+    支持两种结构：
+    1. ImageNet_100/ -> n01234567/ -> images.jpg
+    2. ImageNet_100/ -> train/val -> n01234567/ -> images.jpg
     """
     imagenet100_root = Path(imagenet100_root)
     
@@ -110,20 +149,52 @@ def extract_filelist_compact(imagenet100_root, output_file="imagenet100_filelist
         print(f"❌ 无法读取目录: {e}")
         return False
     
-    for class_dir in sorted(entries):
-        # 使用 os.path.isdir 而非 Path.is_dir()，确保跟随符号链接
-        if not os.path.isdir(str(class_dir)):
-            continue
-        
-        class_name = class_dir.name
-        
-        try:
-            img_files = [f.name for f in class_dir.iterdir() if os.path.isfile(str(f))]
-            if img_files:
-                class_info[class_name] = sorted(img_files)
-        except Exception as e:
-            print(f"⚠  无法读取类目录 {class_name}: {e}")
-            continue
+    # 判断是否为 train/val 结构
+    first_level_dirs = [e for e in entries if os.path.isdir(str(e))]
+    first_level_names = {d.name for d in first_level_dirs}
+    
+    is_train_val_structure = first_level_names == {"train", "val"} or \
+                             first_level_names == {"train"} or \
+                             first_level_names == {"val"}
+    
+    if is_train_val_structure:
+        # 遍历 train/val 子目录
+        print(f"📁 检测到 train/val 结构，正在遍历...")
+        for subset_dir in sorted(first_level_dirs):
+            try:
+                class_dirs = list(subset_dir.iterdir())
+            except Exception as e:
+                print(f"⚠  无法读取子集目录 {subset_dir.name}: {e}")
+                continue
+            
+            for class_dir in sorted(class_dirs):
+                if not os.path.isdir(str(class_dir)):
+                    continue
+                
+                class_name = class_dir.name
+                
+                try:
+                    img_files = [f.name for f in class_dir.iterdir() if os.path.isfile(str(f))]
+                    if img_files:
+                        if class_name not in class_info:
+                            class_info[class_name] = []
+                        class_info[class_name].extend(sorted(img_files))
+                except Exception as e:
+                    print(f"⚠  无法读取类目录 {subset_dir.name}/{class_name}: {e}")
+                    continue
+    else:
+        # 直接遍历第一层作为类目录
+        print(f"📁 检测到直接结构，正在遍历...")
+        for class_dir in sorted(first_level_dirs):
+            class_name = class_dir.name
+            
+            try:
+                img_files = [f.name for f in class_dir.iterdir() if os.path.isfile(str(f))]
+                if img_files:
+                    class_info[class_name] = sorted(img_files)
+            except Exception as e:
+                print(f"⚠  无法读取类目录 {class_name}: {e}")
+                continue
     
     # 保存为JSON（易于粘贴和处理）
     with open(output_file, 'w', encoding='utf-8') as f:

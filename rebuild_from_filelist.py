@@ -21,6 +21,9 @@ def rebuild_from_filelist(
 ):
     """
     从文件清单重建ImageNet100
+    支持两种清单格式：
+    1. {"class_id": ["file1.jpg", "file2.jpg"]} 
+    2. {"class_id": ["train/file1.jpg", "val/file2.jpg"]}
     
     Args:
         filelist_file: 文件清单JSON文件
@@ -81,7 +84,7 @@ def rebuild_from_filelist(
         src_class_path = imagenet1k_path / class_name
         dst_class_path = output_path / class_name
         
-        # 使用 os.path.isdir 而非 Path.is_dir()，确保跟随符号链接
+        # 使用 os.path.isdir 确保正确识别
         if not os.path.isdir(str(src_class_path)):
             print(f"⚠  类不存在: {class_name}")
             stats["missing"] += 1
@@ -95,8 +98,14 @@ def rebuild_from_filelist(
         
         # 处理每个文件
         for filename in files:
-            src_file = src_class_path / filename
-            dst_file = dst_class_path / filename
+            # 处理可能包含子目录的路径（train/class/file.jpg 或 class/file.jpg）
+            filename_parts = Path(filename)
+            
+            # 如果文件路径包含多层（如 train/n01234567.jpg），只取最后的文件名
+            actual_filename = filename_parts.name
+            
+            src_file = src_class_path / actual_filename
+            dst_file = dst_class_path / actual_filename
             
             stats["total_files"] += 1
             
@@ -108,13 +117,12 @@ def rebuild_from_filelist(
                 
                 # 检查源文件
                 if not os.path.isfile(str(src_file)):
-                    print(f"⚠  文件不存在: {class_name}/{filename}")
-                    stats["errors"].append(f"Missing file: {class_name}/{filename}")
+                    print(f"⚠  文件不存在: {class_name}/{actual_filename}")
+                    stats["errors"].append(f"Missing file: {class_name}/{actual_filename}")
                     continue
                 
                 # 使用指定的链接方式
                 if link_method == "symlink":
-                    # 使用相对路径的符号链接
                     os.symlink(src_file, dst_file)
                 elif link_method == "hardlink":
                     os.link(src_file, dst_file)
@@ -125,9 +133,9 @@ def rebuild_from_filelist(
                 stats["success"] += 1
                 
             except Exception as e:
-                print(f"❌ 处理失败: {class_name}/{filename}")
+                print(f"❌ 处理失败: {class_name}/{actual_filename}")
                 print(f"   错误: {e}")
-                stats["errors"].append(f"Error: {class_name}/{filename} - {str(e)}")
+                stats["errors"].append(f"Error: {class_name}/{actual_filename} - {str(e)}")
     
     # 打印总结
     print("\n" + "="*50)
