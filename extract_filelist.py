@@ -113,15 +113,26 @@ def extract_filelist(imagenet100_root, output_file="imagenet100_filelist.txt"):
     print(f"  输出文件: {output_file}")
     print(f"\n🔹 下一步: 复制 {output_file} 的内容到剪贴板，粘贴到目标服务器")
     
-    # 同时保存JSON格式用于编程访问
+    # 同时保存JSON格式用于编程访问（与紧凑格式相同）
+    # 构建类别到文件的映射
+    class_file_map = {}
+    for file_path in files:
+        # 解析路径获取类名
+        parts = file_path.split('/')
+        if len(parts) >= 2:
+            # train/val 结构
+            class_name = parts[-2]
+        else:
+            # 直接结构
+            class_name = parts[0]
+        
+        if class_name not in class_file_map:
+            class_file_map[class_name] = []
+        class_file_map[class_name].append(file_path)
+    
     json_file = output_file.replace('.txt', '.json')
     with open(json_file, 'w', encoding='utf-8') as f:
-        json.dump({
-            "classes": classes,
-            "files": files,
-            "total_classes": len(classes),
-            "total_files": len(files)
-        }, f, indent=2)
+        json.dump(class_file_map, f, indent=2, ensure_ascii=False)
     
     print(f"  JSON版本: {json_file}")
     

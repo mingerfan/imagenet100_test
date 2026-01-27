@@ -52,7 +52,37 @@ def rebuild_from_filelist(
     
     # 读取清单
     with open(filelist_path, 'r', encoding='utf-8') as f:
-        file_dict = json.load(f)
+        data = json.load(f)
+    
+    # 兼容两种JSON格式
+    if isinstance(data, dict):
+        # 检查是否是旧格式（包含 "classes" 和 "files" 字段）
+        if "classes" in data and "files" in data:
+            # 旧格式：转换为新格式
+            print(f"📋 检测到旧JSON格式，正在转换...")
+            classes = data.get("classes", [])
+            files = data.get("files", [])
+            
+            file_dict = {}
+            for file_path in files:
+                # 解析路径获取类名
+                parts = file_path.split('/')
+                if len(parts) >= 2:
+                    # train/val 结构
+                    class_name = parts[-2]
+                else:
+                    # 直接结构
+                    class_name = parts[0]
+                
+                if class_name not in file_dict:
+                    file_dict[class_name] = []
+                file_dict[class_name].append(file_path)
+        else:
+            # 新格式：直接使用
+            file_dict = data
+    else:
+        print(f"❌ JSON格式错误")
+        return False
     
     print(f"📋 读取清单: {len(file_dict)} 个类")
     print(f"📁 源ImageNet1K: {imagenet1k_root}")
