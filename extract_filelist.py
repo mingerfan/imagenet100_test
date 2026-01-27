@@ -14,6 +14,7 @@ def extract_filelist(imagenet100_root, output_file="imagenet100_filelist.txt"):
     """
     提取ImageNet100的完整文件清单
     格式：每行一个相对路径
+    正确处理符号链接
     """
     imagenet100_root = Path(imagenet100_root)
     
@@ -24,16 +25,30 @@ def extract_filelist(imagenet100_root, output_file="imagenet100_filelist.txt"):
     files = []
     classes = []
     
-    # 遍历所有类和文件
-    for class_dir in sorted(imagenet100_root.iterdir()):
-        if not class_dir.is_dir():
+    # 遍历所有类和文件，follow_symlinks=True 确保跟随符号链接
+    try:
+        entries = list(imagenet100_root.iterdir())
+    except Exception as e:
+        print(f"❌ 无法读取目录: {e}")
+        return False
+    
+    for class_dir in sorted(entries):
+        # 使用 os.path.isdir 而非 Path.is_dir()，确保跟随符号链接
+        if not os.path.isdir(str(class_dir)):
             continue
         
         class_name = class_dir.name
         classes.append(class_name)
         
-        for img_file in sorted(class_dir.iterdir()):
-            if img_file.is_file():
+        try:
+            img_files = list(class_dir.iterdir())
+        except Exception as e:
+            print(f"⚠  无法读取类目录 {class_name}: {e}")
+            continue
+        
+        for img_file in sorted(img_files):
+            # 使用 os.path.isfile 而非 Path.is_file()，确保正确识别
+            if os.path.isfile(str(img_file)):
                 # 保存相对路径
                 rel_path = f"{class_name}/{img_file.name}"
                 files.append(rel_path)
@@ -79,6 +94,7 @@ def extract_filelist_compact(imagenet100_root, output_file="imagenet100_filelist
     """
     提取紧凑格式的文件清单（仅类名和文件数）
     更容易手工验证
+    正确处理符号链接
     """
     imagenet100_root = Path(imagenet100_root)
     
@@ -88,13 +104,26 @@ def extract_filelist_compact(imagenet100_root, output_file="imagenet100_filelist
     
     class_info = {}
     
-    for class_dir in sorted(imagenet100_root.iterdir()):
-        if not class_dir.is_dir():
+    try:
+        entries = list(imagenet100_root.iterdir())
+    except Exception as e:
+        print(f"❌ 无法读取目录: {e}")
+        return False
+    
+    for class_dir in sorted(entries):
+        # 使用 os.path.isdir 而非 Path.is_dir()，确保跟随符号链接
+        if not os.path.isdir(str(class_dir)):
             continue
         
         class_name = class_dir.name
-        files = [f.name for f in class_dir.iterdir() if f.is_file()]
-        class_info[class_name] = sorted(files)
+        
+        try:
+            img_files = [f.name for f in class_dir.iterdir() if os.path.isfile(str(f))]
+            if img_files:
+                class_info[class_name] = sorted(img_files)
+        except Exception as e:
+            print(f"⚠  无法读取类目录 {class_name}: {e}")
+            continue
     
     # 保存为JSON（易于粘贴和处理）
     with open(output_file, 'w', encoding='utf-8') as f:

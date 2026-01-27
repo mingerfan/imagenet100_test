@@ -81,8 +81,8 @@ def rebuild_from_filelist(
         src_class_path = imagenet1k_path / class_name
         dst_class_path = output_path / class_name
         
-        # 检查源类是否存在
-        if not src_class_path.exists():
+        # 使用 os.path.isdir 而非 Path.is_dir()，确保跟随符号链接
+        if not os.path.isdir(str(src_class_path)):
             print(f"⚠  类不存在: {class_name}")
             stats["missing"] += 1
             stats["errors"].append(f"Missing class: {class_name}")
@@ -107,7 +107,7 @@ def rebuild_from_filelist(
                     continue
                 
                 # 检查源文件
-                if not src_file.exists():
+                if not os.path.isfile(str(src_file)):
                     print(f"⚠  文件不存在: {class_name}/{filename}")
                     stats["errors"].append(f"Missing file: {class_name}/{filename}")
                     continue
