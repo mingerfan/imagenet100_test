@@ -135,16 +135,19 @@ def rebuild_from_filelist(
         # 创建目标类目录
         dst_class_path.mkdir(parents=True, exist_ok=True)
         
-        # 处理每个文件
-        for filename in files:
-            # 处理可能包含子目录的路径（train/class/file.jpg 或 class/file.jpg）
-            filename_parts = Path(filename)
+        # 直接复制类目录下的所有文件，不按清单逐个匹配
+        try:
+            all_files_in_class = list(src_class_path.iterdir())
+        except Exception as e:
+            print(f"⚠  无法读取类目录 {class_name}: {e}")
+            continue
+        
+        for src_file in sorted(all_files_in_class):
+            if not os.path.isfile(str(src_file)):
+                continue
             
-            # 如果文件路径包含多层（如 train/n01234567.jpg），只取最后的文件名
-            actual_filename = filename_parts.name
-            
-            src_file = src_class_path / actual_filename
-            dst_file = dst_class_path / actual_filename
+            filename = src_file.name
+            dst_file = dst_class_path / filename
             
             stats["total_files"] += 1
             
@@ -152,12 +155,6 @@ def rebuild_from_filelist(
                 # 如果目标文件已存在则跳过
                 if dst_file.exists():
                     stats["success"] += 1
-                    continue
-                
-                # 检查源文件
-                if not os.path.isfile(str(src_file)):
-                    print(f"⚠  文件不存在: {class_name}/{actual_filename}")
-                    stats["errors"].append(f"Missing file: {class_name}/{actual_filename}")
                     continue
                 
                 # 使用指定的链接方式
@@ -172,9 +169,9 @@ def rebuild_from_filelist(
                 stats["success"] += 1
                 
             except Exception as e:
-                print(f"❌ 处理失败: {class_name}/{actual_filename}")
+                print(f"❌ 处理失败: {class_name}/{filename}")
                 print(f"   错误: {e}")
-                stats["errors"].append(f"Error: {class_name}/{actual_filename} - {str(e)}")
+                stats["errors"].append(f"Error: {class_name}/{filename} - {str(e)}")
     
     # 打印总结
     print("\n" + "="*50)
