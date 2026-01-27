@@ -4,7 +4,7 @@
 # Search Configuration
 search:
   population_size: 200           # Size of population (FIFO queue)
-  num_generations: 300           # Number of evolution generations
+  num_generations: 1500           # Number of evolution generations
   sample_size: 25                # Tournament selection sample size
   mutation_rate: 1.0             # Probability of mutation per offspring (always mutate)
   diversity_quota: 0.01          # Minimum fraction to preserve per depth (1% = 2 individuals)
