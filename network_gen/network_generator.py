@@ -216,6 +216,7 @@ class RandomNetworkGenerator:
         # Apply position-specific block constraints
         block_ids = self._apply_block_constraints(block_ids)
         block_ids = self._apply_poly4_tail_constraint(block_ids)
+        block_ids = self._apply_last_two_no_selfgated(block_ids)
         block_choices = block_ids
 
         # 6. 选择初始CT数量并计算通道数
@@ -458,6 +459,15 @@ class RandomNetworkGenerator:
     def _filter_non_poly4_block_ids(self, allowed_ids: List[int]) -> List[int]:
         return [block_id for block_id in allowed_ids if not self._is_poly4_block_id(block_id)]
 
+    def _is_selfgated_block_id(self, block_id: int) -> bool:
+        spec = UNIFIED_BLOCKS[block_id]
+        if getattr(spec, "use_gated_dw", False):
+            return True
+        return spec.block_class in (BasicSelfGatedBlock, FullGatedBasicBlock)
+
+    def _filter_non_selfgated_block_ids(self, allowed_ids: List[int]) -> List[int]:
+        return [block_id for block_id in allowed_ids if not self._is_selfgated_block_id(block_id)]
+
     def _apply_poly4_tail_constraint(self, block_ids: List[int]) -> List[int]:
         """Apply poly4 tail constraint respecting group sharing."""
         if not block_ids:
@@ -501,6 +511,48 @@ class RandomNetworkGenerator:
                     new_block = random.choice(allowed_ids)
                     for i in range(group_start, group_end + 1):
                         block_ids[i] = new_block
+
+            idx = group_end + 1
+
+        return block_ids
+
+    def _apply_last_two_no_selfgated(self, block_ids: List[int]) -> List[int]:
+        """Force last two blocks to be non-selfgated, respecting group sharing."""
+        if not block_ids or len(block_ids) < 2:
+            return block_ids
+
+        num_blocks = len(block_ids)
+        block_ids = block_ids.copy()
+        num_individual = self.block_selector.NUM_INDIVIDUAL
+        group_size = self.block_selector.GROUP_SIZE
+        last_two = {num_blocks - 2, num_blocks - 1}
+
+        idx = 0
+        while idx < num_blocks:
+            if idx < num_individual:
+                group_start, group_end = idx, idx
+            else:
+                group_idx = (idx - num_individual) // group_size
+                group_start = num_individual + (group_idx * group_size)
+                group_end = min(group_start + group_size - 1, num_blocks - 1)
+
+            group_indices = set(range(group_start, group_end + 1))
+            if group_indices.isdisjoint(last_two):
+                idx = group_end + 1
+                continue
+
+            allowed_ids = self._get_allowed_block_ids(position=group_start)
+            allowed_ids = self._filter_non_poly4_block_ids(allowed_ids)
+            allowed_ids = self._filter_non_selfgated_block_ids(allowed_ids)
+            if not allowed_ids:
+                raise ValueError(
+                    f"No non-selfgated block IDs available for positions {group_start}-{group_end}"
+                )
+
+            if any(self._is_selfgated_block_id(block_ids[i]) for i in range(group_start, group_end + 1)):
+                new_block = random.choice(allowed_ids)
+                for i in range(group_start, group_end + 1):
+                    block_ids[i] = new_block
 
             idx = group_end + 1
 

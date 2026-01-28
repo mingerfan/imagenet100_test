@@ -14,7 +14,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from network_gen.search_space import UNIFIED_BLOCKS
-from models.gate_net_cmp.block_def import StablePoly4
+from models.gate_net_cmp.block_def import StablePoly4, BasicSelfGatedBlock, FullGatedBasicBlock
 
 
 class MutationOperator:
@@ -101,6 +101,7 @@ class MutationOperator:
             self._mutate_initial_ct_count(config)
 
         self._enforce_tail_no_poly4(config)
+        self._enforce_last_two_no_selfgated(config)
         self._sync_blocks_from_choices(config)
         return config
 
@@ -133,6 +134,7 @@ class MutationOperator:
 
         config.block_choices = block_choices
         self._enforce_tail_no_poly4(config)
+        self._enforce_last_two_no_selfgated(config)
         self._sync_blocks_from_choices(config)
 
     def _ensure_block_choices(self, config) -> List[int]:
@@ -164,8 +166,17 @@ class MutationOperator:
     def _is_poly4_block_id(self, block_id: int) -> bool:
         return UNIFIED_BLOCKS[block_id].activation_class is StablePoly4
 
+    def _is_selfgated_block_id(self, block_id: int) -> bool:
+        spec = UNIFIED_BLOCKS[block_id]
+        if getattr(spec, "use_gated_dw", False):
+            return True
+        return spec.block_class in (BasicSelfGatedBlock, FullGatedBasicBlock)
+
     def _non_poly4_block_ids(self, block_ids: List[int]) -> List[int]:
         return [block_id for block_id in block_ids if not self._is_poly4_block_id(block_id)]
+
+    def _non_selfgated_block_ids(self, block_ids: List[int]) -> List[int]:
+        return [block_id for block_id in block_ids if not self._is_selfgated_block_id(block_id)]
 
     def _tail_start(self, num_blocks: int) -> int:
         return num_blocks // 2
@@ -194,6 +205,38 @@ class MutationOperator:
             group_in_tail = group_end >= tail_start
             if group_in_tail and any(self._is_poly4_block_id(block_choices[i]) for i in range(group_start, group_end + 1)):
                 new_block = random.choice(non_poly4_ids)
+                for i in range(group_start, group_end + 1):
+                    block_choices[i] = new_block
+            idx = group_end + 1
+
+        config.block_choices = block_choices
+
+    def _enforce_last_two_no_selfgated(self, config) -> None:
+        block_choices = self._ensure_block_choices(config)
+        if not block_choices or len(block_choices) < 2:
+            return
+
+        num_blocks = len(block_choices)
+        tail_start = self._tail_start(num_blocks)
+        last_two = {num_blocks - 2, num_blocks - 1}
+
+        idx = 0
+        while idx < num_blocks:
+            group_start, group_end = self._group_bounds(idx, num_blocks)
+            group_indices = set(range(group_start, group_end + 1))
+            if group_indices.isdisjoint(last_two):
+                idx = group_end + 1
+                continue
+
+            candidate_ids = self._all_block_ids()
+            if group_end >= tail_start:
+                candidate_ids = self._non_poly4_block_ids(candidate_ids)
+            candidate_ids = self._non_selfgated_block_ids(candidate_ids)
+            if not candidate_ids:
+                raise ValueError("No non-selfgated block IDs available for last-two constraint")
+
+            if any(self._is_selfgated_block_id(block_choices[i]) for i in range(group_start, group_end + 1)):
+                new_block = random.choice(candidate_ids)
                 for i in range(group_start, group_end + 1):
                     block_choices[i] = new_block
             idx = group_end + 1
