@@ -330,7 +330,7 @@ class StablePoly4(nn.Module):
         
         # 始终检查并处理 NaN/Inf，防止数值不稳定传播
         out = torch.nan_to_num(out, nan=0.0, posinf=100.0, neginf=-100.0)
-        
+
         if out.dtype != orig_dtype:
             out = out.to(orig_dtype)
         return out
@@ -465,15 +465,15 @@ class SelfGated(nn.Module):
         # 使用谱归一化限制Lipschitz常数，防止Gate值爆炸
         # 移除BN：BN会破坏SpectralNorm的Lipschitz约束，导致验证集上数值爆炸
         # 启用bias：因为移除了BN，需要卷积层自己学习偏置
-        self.conv_gate = nn.utils.spectral_norm(nn.Conv2d(
-            mid_channels, mid_channels, kernel_size=5, stride=1, padding=2, bias=True
-        ))
+        self.conv_gate = nn.Conv2d(
+            mid_channels, mid_channels, kernel_size=5, stride=1, padding=2, bias=False
+        )
         # 移除BN层
-        self.bn_gate = nn.Identity()
+        self.bn_gate = nn.BatchNorm2d(mid_channels, eps=BN_EPS)
 
         self.act = activation()
 
-        self.conv_out = nn.Conv2d(out_channels, out_channels, kernel_size=1)
+        self.conv_out = nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False)
         self.bn_out = nn.BatchNorm2d(out_channels, eps=BN_EPS)
         
         # 门控缩放参数 (LayerScale/ReZero思想)
@@ -757,18 +757,17 @@ class GatedDepthwiseConv(nn.Module):
         # 门控分支：5x5深度卷积 + 谱归一化
         # 移除BN：BN会破坏SpectralNorm的Lipschitz约束
         # 启用bias：需卷积层自己学习偏置
-        self.gate_conv = nn.utils.spectral_norm(nn.Conv2d(
+        self.gate_conv = nn.Conv2d(
             channels, channels,
             kernel_size=5, stride=1, padding=2,
-            groups=channels, bias=True
-        ))
+            groups=channels, bias=False
+        )
         # 移除BN
-        self.bn_gate = nn.Identity()
+        self.bn_gate = nn.BatchNorm2d(channels, eps=BN_EPS)
         
         self.activation = activation()
         
-        # 门控缩放参数
-        self.gate_scale = nn.Parameter(torch.tensor(GATE_SCALE_INIT))
+        self.gate_norm = nn.BatchNorm2d(channels, eps=BN_EPS)
         
         # 用于检测溢出的标志
         self._overflow_warned = False
@@ -836,7 +835,7 @@ class GatedDepthwiseConv(nn.Module):
         # 生成门控特征 (SelfGated结构)
         gated_res_1 = _safe_gated_mul(feat_intrinsic, delta)
         gated_res_2 = _safe_gated_mul(gate, (1.0 - delta))
-        feat_gated = self.gate_scale * (gated_res_1 + gated_res_2)
+        feat_gated =  self.gate_norm(gated_res_1 + gated_res_2)
         
         # feat_gated检测
         if (not _is_fx_proxy(feat_gated)) and (not self._overflow_warned) and (not torch.isfinite(feat_gated).all()):
