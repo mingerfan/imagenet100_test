@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import torch.multiprocessing as mp
 from .base_trainer import Trainer
 from models import get_model
 from data import create_dataloaders
@@ -57,27 +56,6 @@ def create_smart_optimizer(model, lr=0.001):
     )
     
     return optimizer
-
-
-def _mp_train_worker(manager, gpu_id, task_q, result_q, force_flag, return_detail_flag):
-    if gpu_id is not None and torch.cuda.is_available():
-        torch.cuda.set_device(gpu_id)
-    set_random_seed(manager.seed)
-    while True:
-        model_config = task_q.get()
-        if model_config is None:
-            break
-        model_name = model_config['name']
-        try:
-            detail = manager.train_model(
-                model_config,
-                gpu_id,
-                force_flag,
-                return_details=return_detail_flag
-            )
-            result_q.put(('success', model_name, detail))
-        except Exception as e:
-            result_q.put(('failed', model_name, str(e)))
 
 
 class MultiGPUManager:
@@ -455,110 +433,62 @@ class MultiGPUManager:
                     results['failed'][model_name] = str(e)
         elif parallel and len(self.available_gpus) > 1:
             # 并行训练
-            backend = os.environ.get("MULTI_GPU_PARALLEL_BACKEND", "process").lower()
-            if backend not in ("process", "thread"):
-                backend = "process"
-            print(f"\n并行训练模式，使用 {len(self.available_gpus)} 个GPU (backend={backend})")
-
-            if backend == "process":
-                # 进程并行：避免 DataLoader 在线程中创建导致的死锁
-                ctx = mp.get_context("spawn")
-                task_queue = ctx.Queue()
-                result_queue = ctx.Queue()
-
-                # 添加任务到队列
-                for model_config in model_configs:
-                    task_queue.put(model_config)
-
-                # 使用 None 作为结束信号
-                worker_count = min(len(self.available_gpus), len(model_configs))
-                for _ in range(worker_count):
-                    task_queue.put(None)
-
-                processes = []
-                try:
-                    for i, gpu_id in enumerate(self.available_gpus[:worker_count]):
-                        proc = ctx.Process(
-                            target=_mp_train_worker,
-                            args=(self, gpu_id, task_queue, result_queue, force, return_details)
-                        )
-                        proc.start()
-                        processes.append(proc)
-
-                    for proc in processes:
-                        proc.join()
-                except KeyboardInterrupt:
-                    print("\n⚠ 检测到中断，正在终止所有训练进程...")
-                    for proc in processes:
-                        proc.terminate()
-                    for proc in processes:
-                        proc.join()
-                    raise
-
-                # 收集结果
-                while not result_queue.empty():
-                    status, model_name, value = result_queue.get()
-                    if status == 'success':
-                        if value is not None:
-                            if return_details:
-                                results['success'][model_name] = value['best_acc']
-                                results['details'][model_name] = value
-                            else:
-                                results['success'][model_name] = value
-                        else:
-                            results['skipped'][model_name] = '已训练'
-                    elif status == 'failed':
-                        results['failed'][model_name] = value
-            else:
-                # 线程并行（兼容模式）
-                task_queue = queue.Queue()
-                result_queue = queue.Queue()
-
-                for model_config in model_configs:
-                    task_queue.put(model_config)
-
-                def worker(gpu_id):
-                    while not task_queue.empty():
+            print(f"\n并行训练模式，使用 {len(self.available_gpus)} 个GPU")
+            
+            # 任务队列
+            task_queue = queue.Queue()
+            result_queue = queue.Queue()
+            
+            # 添加任务到队列
+            for model_config in model_configs:
+                task_queue.put(model_config)
+            
+            # 工作线程函数
+            def worker(gpu_id):
+                while not task_queue.empty():
+                    try:
+                        model_config = task_queue.get(timeout=1)
+                        model_name = model_config['name']
                         try:
-                            model_config = task_queue.get(timeout=1)
-                            model_name = model_config['name']
-                            try:
-                                detail = self.train_model(
-                                    model_config,
-                                    gpu_id,
-                                    force,
-                                    return_details=return_details
-                                )
-                                result_queue.put(('success', model_name, detail))
-                            except Exception as e:
-                                result_queue.put(('failed', model_name, str(e)))
-                            task_queue.task_done()
-                        except queue.Empty:
-                            break
-
-                threads = []
-                for i, gpu_id in enumerate(self.available_gpus):
-                    if i < len(model_configs):
-                        thread = threading.Thread(target=worker, args=(gpu_id,), daemon=True)
-                        thread.start()
-                        threads.append(thread)
-
-                for thread in threads:
-                    thread.join()
-
-                while not result_queue.empty():
-                    status, model_name, value = result_queue.get()
-                    if status == 'success':
-                        if value is not None:
-                            if return_details:
-                                results['success'][model_name] = value['best_acc']
-                                results['details'][model_name] = value
-                            else:
-                                results['success'][model_name] = value
+                            detail = self.train_model(
+                                model_config,
+                                gpu_id,
+                                force,
+                                return_details=return_details
+                            )
+                            result_queue.put(('success', model_name, detail))
+                        except Exception as e:
+                            result_queue.put(('failed', model_name, str(e)))
+                        task_queue.task_done()
+                    except queue.Empty:
+                        break
+            
+            # 创建工作线程
+            threads = []
+            for i, gpu_id in enumerate(self.available_gpus):
+                if i < len(model_configs):
+                    thread = threading.Thread(target=worker, args=(gpu_id,))
+                    thread.start()
+                    threads.append(thread)
+            
+            # 等待所有线程完成
+            for thread in threads:
+                thread.join()
+            
+            # 收集结果
+            while not result_queue.empty():
+                status, model_name, value = result_queue.get()
+                if status == 'success':
+                    if value is not None:
+                        if return_details:
+                            results['success'][model_name] = value['best_acc']
+                            results['details'][model_name] = value
                         else:
-                            results['skipped'][model_name] = '已训练'
-                    elif status == 'failed':
-                        results['failed'][model_name] = value
+                            results['success'][model_name] = value
+                    else:
+                        results['skipped'][model_name] = '已训练'
+                elif status == 'failed':
+                    results['failed'][model_name] = value
         
         else:
             # 串行训练
