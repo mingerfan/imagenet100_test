@@ -212,10 +212,19 @@ class StablePoly4(nn.Module):
         # 使用 register_buffer 确保 current_epoch 被保存到 state_dict 中
         # 这样推理时加载模型后能正确使用多项式激活
         self.register_buffer("current_epoch", torch.tensor(0, dtype=torch.long))
+        # 细粒度进度（用于 step 级平滑过渡）
+        self.register_buffer("current_step", torch.tensor(0, dtype=torch.long))
+        self.register_buffer("steps_per_epoch", torch.tensor(1, dtype=torch.long))
 
     def set_epoch(self, epoch):
         """设置当前epoch，用于控制ReLU到多项式的过渡"""
         self.current_epoch.fill_(epoch)
+
+    def set_epoch_progress(self, epoch, step_idx, steps_per_epoch):
+        """设置当前epoch与step进度，用于 step 级平滑过渡"""
+        self.current_epoch.fill_(int(epoch))
+        self.current_step.fill_(int(step_idx))
+        self.steps_per_epoch.fill_(max(1, int(steps_per_epoch)))
 
     def set_warmup_epochs(self, warmup_epochs):
         """动态设置warmup epoch数量
@@ -300,22 +309,24 @@ class StablePoly4(nn.Module):
             self.deriv_loss = x_poly.new_tensor(0.0)
 
         # 渐进式过渡：前warmup_epochs个epoch完全使用Swish，然后平滑过渡到多项式
-        # 从 buffer 中获取当前 epoch 值
-        epoch = self.current_epoch.item()
-        if epoch < self.warmup_epochs:
+        # 使用 step 级进度（epoch 小数）进行平滑过渡
+        epoch = float(self.current_epoch.item())
+        step = float(self.current_step.item())
+        steps_per_epoch = float(self.steps_per_epoch.item())
+        epoch_progress = epoch + (step / max(1.0, steps_per_epoch))
+        if epoch_progress < self.warmup_epochs:
             # 预热阶段：使用Swish，但保持poly分支有梯度
             alpha = 0.0
-        elif epoch < self.warmup_epochs + 10:
+        elif epoch_progress < self.warmup_epochs + 10:
             # 过渡阶段（10个epoch）：从Swish平滑过渡到多项式
-            progress = (epoch - self.warmup_epochs) / 10.0
+            progress = (epoch_progress - self.warmup_epochs) / 10.0
             alpha = progress
         else:
             alpha = 1.0
 
         # 混合Swish和多项式输出
-        out = (1 - alpha) * swish_out + alpha * poly_out
-
-        out = out * self.output_scale
+        # warmup 期间保持 swish 为 1.0 缩放，逐步过渡到 poly 的输出缩放
+        out = (1 - alpha) * swish_out + alpha * (poly_out * self.output_scale)
         
         # 始终检查并处理 NaN/Inf，防止数值不稳定传播
         out = torch.nan_to_num(out, nan=0.0, posinf=100.0, neginf=-100.0)

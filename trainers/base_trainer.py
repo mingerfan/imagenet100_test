@@ -334,6 +334,19 @@ class Trainer:
                 # 调用 set_epoch 方法
                 module.set_epoch(epoch)
 
+    def _set_epoch_progress_for_model(self, epoch, step_idx, steps_per_epoch):
+        """
+        递归地为模型中所有需要 epoch 进度信息的模块设置细粒度进度
+
+        Args:
+            epoch: 当前 epoch 编号（1-based）
+            step_idx: 当前 batch 索引（0-based）
+            steps_per_epoch: 每个 epoch 的 batch 数
+        """
+        for module in self.model.modules():
+            if hasattr(module, 'set_epoch_progress') and callable(module.set_epoch_progress):
+                module.set_epoch_progress(epoch, step_idx, steps_per_epoch)
+
     def _log_poly4_params(self, epoch=None):
         """进入验证时打印 StablePoly4 的关键参数"""
         header = f"StablePoly4参数 (Epoch {epoch})" if epoch is not None else "StablePoly4参数"
@@ -424,6 +437,7 @@ class Trainer:
         first_batch_diagnostic = (epoch == 1)
         
         for batch_idx, (images, labels) in enumerate(pbar):
+            self._set_epoch_progress_for_model(epoch, batch_idx, len(self.train_loader))
             images = images.to(self.device, non_blocking=True)
             labels = labels.to(self.device, non_blocking=True)
             
