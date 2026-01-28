@@ -357,6 +357,10 @@ def create_dataloaders(
         worker_init_fn = _seed_worker
 
     is_worker_thread = threading.current_thread() is not threading.main_thread()
+    allow_workers_in_thread = os.environ.get("ALLOW_DATALOADER_WORKERS_IN_THREAD", "").lower() in ("1", "true", "yes")
+    if is_worker_thread and num_workers > 0 and not allow_workers_in_thread:
+        print("  ⚠ DataLoader创建于工作线程，强制 num_workers=0 以避免卡住")
+        num_workers = 0
     if num_workers > 0:
         if multiprocessing_context is None and is_worker_thread and os.name != 'nt':
             multiprocessing_context = 'spawn'
