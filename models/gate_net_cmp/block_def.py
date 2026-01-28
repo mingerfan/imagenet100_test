@@ -128,6 +128,15 @@ class Relu(Activation):
         return self.relu(x)
 
 
+class Sigmoid(Activation):
+    def __init__(self):
+        super().__init__()
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        return self.sigmoid(x)
+
+
 class LearnableSwish(nn.Module):
     def __init__(self):
         super().__init__()
@@ -172,6 +181,7 @@ class StablePoly4(nn.Module):
         self,
         output_scale=0.1,
         warmup_epochs=30,
+        warmup_act="swish",
         in_scale_init=-1.0,
         range_r=2.0,
         deriv_L=3.0,
@@ -181,7 +191,8 @@ class StablePoly4(nn.Module):
         super().__init__()
         self.output_scale = output_scale
         self.warmup_epochs = warmup_epochs
-        self.warmup_act = nn.SiLU()
+        self.warmup_act = self._build_warmup_act(warmup_act)
+        self.warmup_act_name = self._normalize_warmup_act_name(warmup_act)
 
         # 使用更小的初始化值，防止高阶项导致梯度爆炸
         # a, b, c 初始化为接近0的小值
@@ -234,6 +245,11 @@ class StablePoly4(nn.Module):
         """
         self.warmup_epochs = warmup_epochs
 
+    def set_warmup_act(self, warmup_act):
+        """动态设置warmup阶段的激活函数"""
+        self.warmup_act = self._build_warmup_act(warmup_act)
+        self.warmup_act_name = self._normalize_warmup_act_name(warmup_act)
+
     def set_collect_stats(self, enabled: bool):
         """是否在 forward 中收集诊断统计"""
         self.collect_stats = bool(enabled)
@@ -251,6 +267,41 @@ class StablePoly4(nn.Module):
             self.deriv_L = float(deriv_L)
         if enable is not None:
             self.enable_deriv_loss = bool(enable)
+
+    @staticmethod
+    def _build_warmup_act(warmup_act):
+        if warmup_act is None:
+            return nn.Identity()
+        if isinstance(warmup_act, nn.Module):
+            return warmup_act
+        if isinstance(warmup_act, str):
+            key = warmup_act.strip().lower()
+            if key in ("swish", "silu"):
+                return nn.SiLU()
+            if key in ("sigmoid", "sig"):
+                return nn.Sigmoid()
+            if key == "relu":
+                return nn.ReLU()
+            if key == "tanh":
+                return nn.Tanh()
+            raise ValueError(f"Unsupported warmup_act: {warmup_act}")
+        if isinstance(warmup_act, type) and issubclass(warmup_act, nn.Module):
+            return warmup_act()
+        if callable(warmup_act):
+            return warmup_act()
+        raise ValueError(f"Unsupported warmup_act: {warmup_act}")
+
+    @staticmethod
+    def _normalize_warmup_act_name(warmup_act):
+        if warmup_act is None:
+            return "identity"
+        if isinstance(warmup_act, str):
+            return warmup_act.strip().lower()
+        if isinstance(warmup_act, nn.Module):
+            return warmup_act.__class__.__name__.lower()
+        if isinstance(warmup_act, type) and issubclass(warmup_act, nn.Module):
+            return warmup_act.__name__.lower()
+        return str(warmup_act)
 
     def forward(self, x):
         orig_dtype = x.dtype
@@ -742,7 +793,10 @@ class GatedDepthwiseConv(nn.Module):
         self,
         channels: int,
         stride: int,
-        activation: Activation
+        activation: Activation,
+        eps_reg_a: float = 0.1,
+        enable_eps_reg: bool = True,
+        poly_warmup_act: str = "sigmoid"
     ):
         super().__init__()
 
@@ -766,6 +820,8 @@ class GatedDepthwiseConv(nn.Module):
         self.bn_gate = nn.BatchNorm2d(channels, eps=BN_EPS)
         
         self.activation = activation()
+        if hasattr(self.activation, "set_warmup_act") and poly_warmup_act is not None:
+            self.activation.set_warmup_act(poly_warmup_act)
         
         self.gate_norm = nn.BatchNorm2d(channels, eps=BN_EPS)
         
@@ -774,6 +830,9 @@ class GatedDepthwiseConv(nn.Module):
         
         # 正则化损失缓存
         self.gate_reg_loss = torch.tensor(0.0)
+        self.eps_reg_loss = torch.tensor(0.0)
+        self.eps_reg_a = float(eps_reg_a)
+        self.enable_eps_reg = bool(enable_eps_reg)
 
     def forward(self, x):
         # 输入检测
@@ -804,6 +863,19 @@ class GatedDepthwiseConv(nn.Module):
         # 门控分支
         gate = self.gate_conv(feat_intrinsic)
         gate = self.bn_gate(gate) # Added
+
+        # epsilon 正则: u - v, w = 1 + a * v^2
+        if self.enable_eps_reg and self.eps_reg_a > 0:
+            v_reg = feat_intrinsic
+            u_reg = gate
+            if v_reg.dtype in (torch.float16, torch.bfloat16):
+                v_reg = v_reg.float()
+                u_reg = u_reg.float()
+            eps = u_reg - v_reg
+            w = 1.0 + self.eps_reg_a * (v_reg * v_reg)
+            self.eps_reg_loss = (w * (eps * eps)).mean()
+        else:
+            self.eps_reg_loss = feat_intrinsic.new_tensor(0.0)
         
         # gate检测(激活前)
         if (not _is_fx_proxy(gate)) and (not self._overflow_warned) and (not torch.isfinite(gate).all()):

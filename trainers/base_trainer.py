@@ -37,6 +37,7 @@ class Trainer:
         resume_path=None,
         resume_strict=True,
         gate_reg_lambda=1e-3,
+        eps_reg_lambda=0.0,
         poly4_range_lambda=0.0,
         poly4_deriv_lambda=0.0,
         poly4_range_r=2.0,
@@ -67,6 +68,8 @@ class Trainer:
             save_freq: 保存检查点的频率
             grad_clip_max_norm: 梯度裁剪的最大范数，用于防止梯度爆炸
             poly4_warmup_ratio: StablePoly4的warmup比例（默认0.5，即50%的epoch用于warmup）
+            gate_reg_lambda: 门控正则化权重
+            eps_reg_lambda: epsilon正则化权重（u-v约束）
             poly4_range_lambda: StablePoly4输入范围正则权重
             poly4_deriv_lambda: StablePoly4导数正则权重
             poly4_range_r: StablePoly4输入范围阈值
@@ -91,6 +94,7 @@ class Trainer:
         self.resume_path = resume_path
         self.resume_strict = resume_strict
         self.gate_reg_lambda = gate_reg_lambda
+        self.eps_reg_lambda = eps_reg_lambda
         self.poly4_range_lambda = poly4_range_lambda
         self.poly4_deriv_lambda = poly4_deriv_lambda
         self.poly4_range_r = poly4_range_r
@@ -244,6 +248,7 @@ class Trainer:
 
         # 确保warmup不超过总epoch数的80%
         target_warmup_epochs = min(target_warmup_epochs, int(self.epochs * 0.8))
+        self.poly4_warmup_epochs = target_warmup_epochs
 
         poly4_count = 0
         for module in self.model.modules():
@@ -284,6 +289,23 @@ class Trainer:
                 print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")
             if self.poly4_deriv_lambda > 0:
                 print(f"  - deriv_L: {self.poly4_deriv_L}, lambda_deriv: {self.poly4_deriv_lambda}")
+
+    def _calc_eps_reg_weight(self, epoch, batch_idx, steps_per_epoch):
+        if self.eps_reg_lambda <= 0:
+            return 0.0
+        warmup_end = getattr(self, "poly4_warmup_epochs", None)
+        if warmup_end is None:
+            warmup_end = int(self.epochs * self.poly4_warmup_ratio)
+            warmup_end = max(0, min(warmup_end, self.epochs))
+        if self.epochs <= warmup_end:
+            return 0.0
+        steps = max(1, int(steps_per_epoch))
+        epoch_progress = (epoch - 1) + (batch_idx + 1) / steps
+        if epoch_progress <= warmup_end:
+            return 0.0
+        if epoch_progress >= self.epochs:
+            return 1.0
+        return (epoch_progress - warmup_end) / (self.epochs - warmup_end)
 
     def _load_checkpoint(self, path, strict=True):
         if not os.path.exists(path):
@@ -515,6 +537,17 @@ class Trainer:
                 else:
                     deriv_reg = outputs_fp32.new_tensor(0.0)
 
+                if self.eps_reg_lambda > 0:
+                    eps_reg = outputs_fp32.new_tensor(0.0)
+                    for module in self.model.modules():
+                        if hasattr(module, 'eps_reg_loss'):
+                            eps_reg = eps_reg + module.eps_reg_loss
+                    eps_weight = self._calc_eps_reg_weight(epoch, batch_idx, len(self.train_loader))
+                    reg_loss = reg_loss + eps_reg * self.eps_reg_lambda * eps_weight
+                else:
+                    eps_reg = outputs_fp32.new_tensor(0.0)
+                    eps_weight = 0.0
+
                 loss = self.criterion(outputs_fp32, labels) + reg_loss
                 
                 if first_batch_diagnostic and batch_idx == 0:
@@ -523,6 +556,8 @@ class Trainer:
                     if self.poly4_range_lambda > 0 or self.poly4_deriv_lambda > 0:
                         print(f"  Range reg: {range_reg.item():.6f} (λ={self.poly4_range_lambda})")
                         print(f"  Deriv reg: {deriv_reg.item():.6f} (λ={self.poly4_deriv_lambda})")
+                    if self.eps_reg_lambda > 0:
+                        print(f"  Eps reg: {eps_reg.item():.6f} (λ={self.eps_reg_lambda}, w={eps_weight:.3f})")
                     print(f"  Loss is finite: {torch.isfinite(loss).all().item()}")
                     print(f"{'='*60}\n")
                     first_batch_diagnostic = False  # 只诊断一次
