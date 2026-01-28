@@ -458,7 +458,7 @@ class SelfGated(nn.Module):
         mid_channels = out_channels // 2  # 使用拼接的方式恢复通道数
 
         self.conv_3x3 = nn.Conv2d(
-            in_channels, mid_channels, kernel_size=3, stride=stride, padding=1
+            in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False
         )
         self.bn_3x3 = nn.BatchNorm2d(mid_channels, eps=BN_EPS)
 
@@ -767,7 +767,7 @@ class GatedDepthwiseConv(nn.Module):
         
         self.activation = activation()
         
-        self.gate_norm = nn.BatchNorm2d(channels, eps=BN_EPS)
+        self.gate_scale = nn.Parameter(torch.tensor(GATE_SCALE_INIT))
         
         # 用于检测溢出的标志
         self._overflow_warned = False
@@ -835,7 +835,7 @@ class GatedDepthwiseConv(nn.Module):
         # 生成门控特征 (SelfGated结构)
         gated_res_1 = _safe_gated_mul(feat_intrinsic, delta)
         gated_res_2 = _safe_gated_mul(gate, (1.0 - delta))
-        feat_gated =  self.gate_norm(gated_res_1 + gated_res_2)
+        feat_gated = self.gate_scale * (gated_res_1 + gated_res_2)
         
         # feat_gated检测
         if (not _is_fx_proxy(feat_gated)) and (not self._overflow_warned) and (not torch.isfinite(feat_gated).all()):
