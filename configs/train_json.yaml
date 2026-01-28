@@ -2,8 +2,8 @@
 
 global:
   num_classes: 100
-  default_epochs: 60
-  default_batch_size: 512
+  default_epochs: 90
+  default_batch_size: 256
   default_learning_rate: 0.002
   default_num_workers: 8
   default_save_freq: 30
