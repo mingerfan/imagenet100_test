@@ -256,20 +256,6 @@ class MultiGPUManager:
         # 每个GPU进程创建独立的DataLoader实例
         # 如果启用use_memory_fs，所有进程都会从同一个内存文件系统路径读取数据
         # 这样实现了数据源的共享，而无需共享DataLoader实例
-        dataloader_kwargs = dict(model_config.get('dataloader_kwargs', {}) or {})
-        for key in (
-            'train_dir',
-            'val_dir',
-            'batch_size',
-            'num_workers',
-            'pin_memory',
-            'use_memory_fs',
-            'dataset',
-            'download',
-            'input_size',
-            'seed',
-        ):
-            dataloader_kwargs.pop(key, None)
         train_loader, val_loader, _, _ = create_dataloaders(
             train_dir=self.train_dir,
             val_dir=self.val_dir,
@@ -280,8 +266,7 @@ class MultiGPUManager:
             dataset=self.dataset,
             download=self.download,
             input_size=self.input_size,
-            seed=self.seed,
-            **dataloader_kwargs,
+            seed=self.seed
         )
         
         # 创建模型

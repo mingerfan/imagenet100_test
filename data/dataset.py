@@ -4,9 +4,7 @@
 可选使用内存文件系统加速（ImageFolder类数据集）
 """
 
-import os
 import random
-import threading
 import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
@@ -212,11 +210,7 @@ def create_dataloaders(
     dataset="imagenet100",
     download=False,
     input_size=None,
-    seed=None,
-    multiprocessing_context=None,
-    persistent_workers=None,
-    prefetch_factor=None,
-    timeout=0.0,
+    seed=None
 ):
     """
     创建训练和验证数据加载器
@@ -231,11 +225,6 @@ def create_dataloaders(
         dataset: 数据集类型 (imagenet100/imagenet1k/cifar10/cifar100)
         download: 是否允许下载数据集（仅 CIFAR 有效）
         input_size: 输入图像大小（可选，覆盖默认值）
-        seed: 随机种子（可选，启用时会为各worker固定种子）
-        multiprocessing_context: DataLoader 多进程上下文（如 'spawn'）
-        persistent_workers: 是否启用持久化worker（None 表示自动选择）
-        prefetch_factor: worker 预取批次数（None 表示使用默认）
-        timeout: DataLoader 超时（秒），0 表示不超时
     
     Returns:
         train_loader, val_loader, train_dataset, val_dataset
@@ -356,56 +345,29 @@ def create_dataloaders(
         generator.manual_seed(seed)
         worker_init_fn = _seed_worker
 
-    is_worker_thread = threading.current_thread() is not threading.main_thread()
-    if num_workers > 0:
-        if multiprocessing_context is None and is_worker_thread and os.name != 'nt':
-            multiprocessing_context = 'spawn'
-            print("  ⚠ DataLoader创建于工作线程，使用 multiprocessing_context='spawn' 避免fork死锁")
-        if persistent_workers is None:
-            # 工作线程场景下持久化worker更容易在异常/中断时卡住，默认关闭
-            persistent_workers = not is_worker_thread
-        if prefetch_factor is None:
-            prefetch_factor = 2
-    else:
-        persistent_workers = False
-
-    print(f"  multiprocessing_context: {multiprocessing_context or 'default'}")
-    print(f"  persistent_workers: {persistent_workers}")
-    print(f"  prefetch_factor: {prefetch_factor if num_workers > 0 else 'N/A'}")
-    print(f"  timeout: {timeout}")
-
-    train_loader_kwargs = dict(
+    persistent_workers = num_workers > 0
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         drop_last=True,
         worker_init_fn=worker_init_fn,
-        generator=generator,
-        timeout=timeout,
+        generator=generator
     )
-    val_loader_kwargs = dict(
+
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
         worker_init_fn=worker_init_fn,
-        generator=generator,
-        timeout=timeout,
+        generator=generator
     )
-
-    if num_workers > 0:
-        train_loader_kwargs["persistent_workers"] = persistent_workers
-        val_loader_kwargs["persistent_workers"] = persistent_workers
-        if prefetch_factor is not None:
-            train_loader_kwargs["prefetch_factor"] = prefetch_factor
-            val_loader_kwargs["prefetch_factor"] = prefetch_factor
-        if multiprocessing_context is not None:
-            train_loader_kwargs["multiprocessing_context"] = multiprocessing_context
-            val_loader_kwargs["multiprocessing_context"] = multiprocessing_context
-
-    train_loader = DataLoader(train_dataset, **train_loader_kwargs)
-    val_loader = DataLoader(val_dataset, **val_loader_kwargs)
     
     print(f"\n  训练批次数: {len(train_loader)}")
     print(f"  验证批次数: {len(val_loader)}")
