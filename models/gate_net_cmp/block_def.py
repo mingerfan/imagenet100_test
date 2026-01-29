@@ -114,6 +114,21 @@ def _safe_bn_output(x, max_feature_val=1000.0):
     return x
 
 
+def _is_swish_activation(activation) -> bool:
+    if activation is None:
+        return False
+    if isinstance(activation, str):
+        return activation.strip().lower() in ("swish", "silu")
+    if isinstance(activation, nn.Module):
+        act_cls = activation.__class__
+    else:
+        act_cls = activation if isinstance(activation, type) else activation.__class__
+    if act_cls is nn.SiLU:
+        return True
+    name = act_cls.__name__.lower()
+    return name in ("swish", "learnableswish", "silu")
+
+
 class Activation(nn.Module):
     def forward(self, x):
         pass
@@ -522,7 +537,8 @@ class SelfGated(nn.Module):
         # 移除BN层
         self.bn_gate = nn.BatchNorm2d(mid_channels, eps=BN_EPS)
 
-        self.act = activation()
+        # Gate uses sigmoid when activation is Swish/SiLU to keep delta in [0,1]
+        self.act = nn.Sigmoid() if _is_swish_activation(activation) else activation()
 
         self.conv_out = nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False)
         self.bn_out = nn.BatchNorm2d(out_channels, eps=BN_EPS)
@@ -819,7 +835,8 @@ class GatedDepthwiseConv(nn.Module):
         # 移除BN
         self.bn_gate = nn.BatchNorm2d(channels, eps=BN_EPS)
         
-        self.activation = activation()
+        use_sigmoid_gate = _is_swish_activation(activation)
+        self.activation = nn.Sigmoid() if use_sigmoid_gate else activation()
         if hasattr(self.activation, "set_warmup_act") and poly_warmup_act is not None:
             self.activation.set_warmup_act(poly_warmup_act)
         
@@ -832,7 +849,12 @@ class GatedDepthwiseConv(nn.Module):
         self.gate_reg_loss = torch.tensor(0.0)
         self.eps_reg_loss = torch.tensor(0.0)
         self.eps_reg_a = float(eps_reg_a)
-        self.enable_eps_reg = bool(enable_eps_reg)
+        if use_sigmoid_gate:
+            # Disable u-v regularization when using Swish->Sigmoid gate
+            self.enable_eps_reg = False
+            self.eps_reg_a = 0.0
+        else:
+            self.enable_eps_reg = bool(enable_eps_reg)
 
     def forward(self, x):
         # 输入检测
