@@ -4,7 +4,7 @@ import sys
 import os
 from datetime import datetime
 from collections import defaultdict
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Iterable
 
 import torch
 import torchvision
@@ -1328,6 +1328,70 @@ class FheInfo:
             "shallow_flops_pct": shallow_flops_pct
         }
 
+    def get_front_depth_metrics(self, depth_ratio: float = 0.2) -> Dict[str, float]:
+        """Get metrics for the first portion of depth (e.g. 20%)."""
+        depth_ratio = float(depth_ratio)
+        if depth_ratio <= 0:
+            return {
+                "front_depth_ratio": depth_ratio,
+                "front_depth_threshold": 0.0,
+                "front_latency_pct": 0.0,
+                "front_param_pct": 0.0,
+                "front_flops_pct": 0.0,
+            }
+        metrics = self.get_shallow_layer_metrics(shallow_threshold=depth_ratio)
+        return {
+            "front_depth_ratio": depth_ratio,
+            "front_depth_threshold": float(metrics["shallow_depth_threshold"]),
+            "front_latency_pct": float(metrics["shallow_latency_pct"]),
+            "front_param_pct": float(metrics["shallow_param_pct"]),
+            "front_flops_pct": float(metrics["shallow_flops_pct"]),
+        }
+
+    def get_depth_ct_stats(self, depths: Iterable[int]) -> Dict[int, Dict[str, float]]:
+        """Aggregate ciphertext (ct) counts for specific depths."""
+        depth_list = [int(d) for d in depths]
+        results: Dict[int, Dict[str, float]] = {}
+
+        for depth in depth_list:
+            nodes = [
+                meta
+                for meta in self.node_meta_list.values()
+                if (not meta.is_fused) and meta.out_depth == depth
+            ]
+            if not nodes:
+                results[depth] = {
+                    "nodes": 0.0,
+                    "sum_in_ct": 0.0,
+                    "sum_out_ct": 0.0,
+                    "avg_in_ct": 0.0,
+                    "avg_out_ct": 0.0,
+                    "min_in_ct": 0.0,
+                    "max_in_ct": 0.0,
+                    "min_out_ct": 0.0,
+                    "max_out_ct": 0.0,
+                    "sum_boot_count": 0.0,
+                }
+                continue
+
+            in_ct = [float(n.in_ct) for n in nodes]
+            out_ct = [float(n.out_ct) for n in nodes]
+            boot_count = [float(n.boot_count) for n in nodes]
+            results[depth] = {
+                "nodes": float(len(nodes)),
+                "sum_in_ct": float(sum(in_ct)),
+                "sum_out_ct": float(sum(out_ct)),
+                "avg_in_ct": float(sum(in_ct) / len(in_ct)),
+                "avg_out_ct": float(sum(out_ct) / len(out_ct)),
+                "min_in_ct": float(min(in_ct)),
+                "max_in_ct": float(max(in_ct)),
+                "min_out_ct": float(min(out_ct)),
+                "max_out_ct": float(max(out_ct)),
+                "sum_boot_count": float(sum(boot_count)),
+            }
+
+        return results
+
     def get_depth_flops_distribution(self, bin_size: int = 10, max_bins: Optional[int] = None) -> Dict:
         """获取按深度范围聚合的FLOPs分布（用于深度-FLOPs图）
         
@@ -1919,6 +1983,107 @@ class FheInfo:
             plt.show()
         else:
             plt.close()
+
+    @staticmethod
+    def plot_front_depth_comparison(front_metrics: Dict[str, Dict[str, float]],
+                                    plot_folder: Optional[str] = None,
+                                    save_path: Optional[str] = None,
+                                    show: bool = True):
+        """Plot front-depth (e.g. 20%) GMACs vs latency percentages."""
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+        except ImportError:
+            print("matplotlib not installed, skipping plot")
+            return
+
+        try:
+            import scienceplots  # noqa: F401
+            plt.style.use(["science", "ieee"])
+        except Exception:
+            plt.style.use("default")
+        plt.rcParams.update({
+            "text.usetex": False,
+            "font.serif": ["Times New Roman"],
+            "font.family": "serif",
+            "mathtext.fontset": "stix",
+            "axes.spines.top": True,
+            "axes.spines.right": True,
+            "lines.linewidth": 0.8,
+            "axes.labelsize": 14,
+            "xtick.labelsize": 11,
+            "ytick.labelsize": 11,
+            "legend.fontsize": 11,
+        })
+
+        if not front_metrics:
+            print("No front-depth metrics to plot")
+            return
+
+        model_names = list(front_metrics.keys())
+        gmacs = [front_metrics[m].get("front_flops_pct", 0.0) for m in model_names]
+        latency = [front_metrics[m].get("front_latency_pct", 0.0) for m in model_names]
+
+        x = np.arange(len(model_names))
+        width = 0.36
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        bars1 = ax.bar(
+            x - width / 2,
+            gmacs,
+            width,
+            label="20% Depth GMACs",
+            color="#A6CDE2",
+            edgecolor="black",
+            linewidth=0.6,
+        )
+        bars2 = ax.bar(
+            x + width / 2,
+            latency,
+            width,
+            label="20% Depth Latency",
+            color="#2F7FB8",
+            edgecolor="black",
+            linewidth=0.6,
+        )
+
+        ax.set_ylabel("Percentage (%)", fontsize=14, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_names, rotation=20, ha="right", fontsize=11, fontweight="bold")
+        ax.tick_params(axis="y", labelsize=11)
+        ax.legend(frameon=False, loc="upper left", fontsize=11, prop={"weight": "bold"})
+
+        # Annotate ratio on latency bars
+        for idx, bar in enumerate(bars2):
+            g = gmacs[idx]
+            l = latency[idx]
+            ratio = (l / g) if g > 0 else 0.0
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + 0.8,
+                f"{ratio:.1f}x",
+                ha="center",
+                va="bottom",
+                fontsize=11,
+                fontweight="bold",
+                color="#1f4e79",
+            )
+
+        ax.set_ylim(0, max(gmacs + latency + [1.0]) * 1.15)
+        ax.grid(axis="y", linestyle="--", alpha=0.3)
+        fig.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            print(f"Front-depth comparison plot saved to {save_path}")
+        elif plot_folder:
+            save_path = generate_unique_filename("front_depth_comparison", "png", plot_folder)
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            print(f"Front-depth comparison plot saved to {save_path}")
+
+        if show:
+            plt.show()
+        plt.close(fig)
 
     @staticmethod
     def plot_network_comprehensive_comparison(network_infos: Dict[str, 'FheInfo'], plot_folder: Optional[str] = None, show: bool = True):

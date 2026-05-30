@@ -1,0 +1,18 @@
+\begin{table*}[t]
+\caption{Best-model blocks (from search space). Stem: initial feature extractor; SecondDS: second downsampling op; Block\_k: the k-th body block type.}
+\label{tab:best-models-blocks}
+\centering
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{l p{2.2cm} p{2.8cm} p{2.2cm} p{2.2cm} p{2.2cm} p{2.2cm} p{2.2cm} p{2.2cm} p{2.2cm} p{2.2cm}}
+\toprule
+Net & stem & downsample\\_second & block\\_1 & block\\_2 & block\\_3 & block\\_4 & block\\_5 & block\\_6 & block\\_7 & block\\_8 \\
+\midrule
+Net A & Stem(SG, poly4) & SecondDS(Conv, SG, swish) & GatedMBConv(exp=1.0) + Sigmoid & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Poly4 + SE & GatedMBConv(exp=4.0) + Sigmoid + SE & GatedMBConv(exp=4.0) + Sigmoid & GatedMBConv(exp=4.0) + Sigmoid & MBConv(exp=4.0) + Swish & MBConv(exp=4.0) + Swish \\
+Net B & Stem(SG, poly4) & SecondDS(Conv, SG, swish) & GatedMBConv(exp=1.0) + Sigmoid & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Poly4 + SE & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Sigmoid & GatedMBConv(exp=4.0) + Sigmoid & MBConv(exp=4.0) + Swish & MBConv(exp=4.0) + Swish \\
+Net C & Stem(SG, poly4) & SecondDS(Conv, SG, poly4) & GatedMBConv(exp=1.0) + Sigmoid & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Sigmoid + SE & GatedMBConv(exp=4.0) + Sigmoid & GatedMBConv(exp=4.0) + Sigmoid & MBConv(exp=4.0) + Swish & MBConv(exp=4.0) + Swish \\
+Net D & Stem(SG, swish) & SecondDS(Conv, SG, poly4) & GatedMBConv(exp=1.0) + Sigmoid & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Poly4 + SE & GatedMBConv(exp=4.0) + Sigmoid + SE & GatedMBConv(exp=4.0) + Sigmoid & GatedMBConv(exp=4.0) + Sigmoid & MBConv(exp=4.0) + Swish & MBConv(exp=4.0) + Swish \\
+Net E & Stem(SG, poly4) & SecondDS(Conv, SG, poly4) & GatedMBConv(exp=1.0) + Sigmoid + SE & GatedMBConv(exp=4.0) + Poly4 & GatedMBConv(exp=4.0) + Poly4 + SE & GatedMBConv(exp=4.0) + Sigmoid + SE & GatedMBConv(exp=4.0) + Sigmoid & GatedMBConv(exp=4.0) + Sigmoid & MBConv(exp=4.0) + Swish & MBConv(exp=4.0) + Swish \\
+\bottomrule
+\end{tabular}
+\end{table*}

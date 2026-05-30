@@ -890,7 +890,8 @@ class GatedDepthwiseConv(nn.Module):
         if self.enable_eps_reg and self.eps_reg_a > 0:
             v_reg = feat_intrinsic
             u_reg = gate
-            if v_reg.dtype in (torch.float16, torch.bfloat16):
+            # Skip dtype checks during FX tracing (Proxy has no concrete dtype).
+            if (not _is_fx_proxy(v_reg)) and v_reg.dtype in (torch.float16, torch.bfloat16):
                 v_reg = v_reg.float()
                 u_reg = u_reg.float()
             eps = u_reg - v_reg

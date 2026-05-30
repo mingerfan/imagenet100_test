@@ -1,0 +1,92 @@
+{
+  "rank": 10,
+  "zen_fitness": 101.2807023525238,
+  "scores": {
+    "zen_score": 81.02456188201904,
+    "std_zen_score": 7.246300428543968,
+    "params": 19933574,
+    "flops": 2847764288.0,
+    "fhe_latency": 13205932.5,
+    "fhe_boot_count": 31,
+    "fhe_max_depth": 305,
+    "fhe_operation_latency": 7219636.5,
+    "fhe_boot_latency": 5986296.0
+  },
+  "generation": 1249,
+  "config": {
+    "stem_code": 2,
+    "second_ds_code": 3,
+    "stride_code": 24,
+    "ct_policies": [
+      "half",
+      "half",
+      "half"
+    ],
+    "block_choices": [
+      11,
+      12,
+      14,
+      15,
+      13,
+      13,
+      5,
+      5
+    ],
+    "blocks": [
+      {
+        "block_id": 11,
+        "in_channels": 40,
+        "out_channels": 82,
+        "stride": 2
+      },
+      {
+        "block_id": 12,
+        "in_channels": 82,
+        "out_channels": 166,
+        "stride": 2
+      },
+      {
+        "block_id": 14,
+        "in_channels": 166,
+        "out_channels": 668,
+        "stride": 2
+      },
+      {
+        "block_id": 15,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 13,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 13,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 5,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 5,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      }
+    ],
+    "initial_ct_count": 4,
+    "stem_out_channels": 40,
+    "num_classes": 100,
+    "name": "net_b4da98e0",
+    "description": null,
+    "created_at": "2026-01-28T17:00:38.316535"
+  }
+}
