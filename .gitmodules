@@ -1,0 +1,3 @@
+[submodule "thirdparty/SmartPAF"]
+	path = thirdparty/SmartPAF
+	url = git@github.com:EfficientPPML/SmartPAF.git
