@@ -102,21 +102,22 @@ initialization and scale control rather than more AT-only tuning.
 
 ## Technique Backlog From SMART-PAF
 
+Implemented experimentally:
+
+- CT / Coefficient Tuning: implemented as default-off `smartpaf_ct_init`.
+- DS / Dynamic Scale: implemented as default-off `poly4_scale_mode: dynamic`,
+  but DS-only failed without CT.
+
 Not yet implemented or only partially implemented:
 
-- CT / Coefficient Tuning: not implemented. Highest priority because current
-  polynomial coefficients are learned from scratch and collapse during full
-  replacement.
-- DS / Dynamic Scale: not implemented. Current `log_in_scale` is learned, but it
-  does not force batch activation ranges into `[-1, 1]`.
-- SS / Static Scale: not implemented. There is no calibration pass to freeze
-  deployment scales from running activation maxima.
+- SS / Static Scale: no calibration pass yet to freeze deployment scales from
+  running activation maxima.
 - SWA: not implemented. SMART-PAF uses SWA in PA/AT recovery.
 - BN recalibration: partially implemented. BN is frozen during poly phase, but
   there is no post-training BN running-stat recalibration.
 - Dropout mitigation: not implemented.
-- Full per-layer CT -> PA -> AT -> scale scheduler: not implemented. Current code
-  is a lightweight global scheduler.
+- Full per-layer CT -> PA -> AT -> DS/SS scheduler: not implemented. Current
+  code is a lightweight global scheduler.
 
 ## 2026-05-31 Dynamic Scale Attempt
 
@@ -167,3 +168,47 @@ Collapse details from `logs/proxy_imagenet100_96_pa_dynamic_scale_fast.log`:
 Conclusion: DS alone prevents large polynomial inputs but does not align the
 polynomial branch with the Swish target. The next required technique is CT /
 coefficient initialization before retrying DS or AT.
+
+## 2026-05-31 Coefficient Tuning Initialization
+
+Implemented as an experimental, default-off trainer option:
+
+- `smartpaf_ct_init`
+- `smartpaf_ct_batches`
+- `smartpaf_ct_max_samples`
+- `smartpaf_ct_steps`
+- `smartpaf_ct_lr`
+
+CT samples StablePoly4 pre-activation tensors before normal training and fits
+`a,b,c,d,e,log_in_scale` to the module's warmup activation with MSE.
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_fast.status' < /dev/null &
+```
+
+CT fit quality:
+
+| Module | Samples | MSE |
+| --- | ---: | ---: |
+| `special_resnet.layers.0.act` | 20000 | 0.00205496 |
+| `special_resnet.layers.1.act` | 20000 | 0.0010167 |
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | PASS |
+| `imagenet100-96-pa-only-b256-conservative` | 14 | 47.10 | 47.10 | COLLAPSE |
+
+Conclusion: CT fixes the late PA-only collapse on the ImageNet-100 96px proxy
+and nearly matches the Swish baseline. The next useful AT run should be CT+AT,
+not AT on scratch-initialized polynomial coefficients.

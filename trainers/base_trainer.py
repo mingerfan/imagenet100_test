@@ -61,6 +61,11 @@ class Trainer:
         smartpaf_alternate_training=False,
         smartpaf_at_cycle_epochs=1,
         smartpaf_freeze_bn_during_poly_phase=True,
+        smartpaf_ct_init=False,
+        smartpaf_ct_batches=8,
+        smartpaf_ct_max_samples=20000,
+        smartpaf_ct_steps=300,
+        smartpaf_ct_lr=0.01,
         collapse_guard_enabled=False,
         collapse_guard_drop=10.0,
         collapse_guard_patience=1,
@@ -102,6 +107,11 @@ class Trainer:
             smartpaf_alternate_training: 是否按 epoch 交替训练普通权重和多项式系数
             smartpaf_at_cycle_epochs: AT 每个阶段持续的 epoch 数
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
+            smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
+            smartpaf_ct_batches: CT 采样 train batch 数
+            smartpaf_ct_max_samples: 每个 StablePoly4 最多使用多少个标量激活样本
+            smartpaf_ct_steps: 每个 StablePoly4 CT 优化步数
+            smartpaf_ct_lr: CT Adam 学习率
             collapse_guard_enabled: 是否检测验证精度断崖式下降
             collapse_guard_drop: 相对上一轮或历史最佳下降超过多少百分点触发 guard
             collapse_guard_patience: 连续触发多少次后执行 action
@@ -147,6 +157,11 @@ class Trainer:
         self.smartpaf_alternate_training = bool(smartpaf_alternate_training)
         self.smartpaf_at_cycle_epochs = max(1, int(smartpaf_at_cycle_epochs))
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
+        self.smartpaf_ct_init = bool(smartpaf_ct_init)
+        self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
+        self.smartpaf_ct_max_samples = max(256, int(smartpaf_ct_max_samples))
+        self.smartpaf_ct_steps = max(1, int(smartpaf_ct_steps))
+        self.smartpaf_ct_lr = float(smartpaf_ct_lr)
         self.collapse_guard_enabled = bool(collapse_guard_enabled)
         self.collapse_guard_drop = float(collapse_guard_drop)
         self.collapse_guard_patience = max(1, int(collapse_guard_patience))
@@ -449,6 +464,93 @@ class Trainer:
             print("✓ SmartPAF-lite AT配置:")
             print(f"  - 每阶段epoch: {self.smartpaf_at_cycle_epochs}")
             print("  - 阶段顺序: 普通权重 -> 多项式系数 -> ...")
+
+    def _ct_poly_eval(self, module, x):
+        log_in_scale = torch.clamp(module.log_in_scale, min=-6.0, max=2.0)
+        x_poly = x * torch.exp(log_in_scale)
+        a = torch.clamp(module.a, min=-0.01, max=0.01)
+        b = torch.clamp(module.b, min=-0.1, max=0.1)
+        c = torch.clamp(module.c, min=-0.5, max=0.5)
+        d = torch.clamp(module.d, min=-5.0, max=5.0)
+        e = torch.clamp(module.e, min=-5.0, max=5.0)
+        poly = ((((a * x_poly + b) * x_poly + c) * x_poly + d) * x_poly + e)
+        return poly * float(getattr(module, "output_scale", 1.0))
+
+    def _run_smartpaf_ct_init(self):
+        """Fit StablePoly4 coefficients to their warmup activation on sampled inputs."""
+        if not self.smartpaf_ct_init or not self._smartpaf_poly_modules:
+            return
+
+        print("✓ SmartPAF-lite CT初始化:")
+        print(
+            f"  - batches={self.smartpaf_ct_batches}, max_samples={self.smartpaf_ct_max_samples}, "
+            f"steps={self.smartpaf_ct_steps}, lr={self.smartpaf_ct_lr}"
+        )
+
+        was_training = self.model.training
+        samples = {module: [] for _, module in self._smartpaf_poly_modules}
+        handles = []
+
+        def make_hook(module):
+            def hook(_module, inputs):
+                if not inputs:
+                    return
+                remaining = self.smartpaf_ct_max_samples - sum(t.numel() for t in samples[module])
+                if remaining <= 0:
+                    return
+                values = inputs[0].detach().float().flatten()
+                if values.numel() > remaining:
+                    idx = torch.linspace(0, values.numel() - 1, remaining, device=values.device).long()
+                    values = values.index_select(0, idx)
+                samples[module].append(values.cpu())
+            return hook
+
+        for _, module in self._smartpaf_poly_modules:
+            handles.append(module.register_forward_pre_hook(make_hook(module)))
+
+        self.model.eval()
+        with torch.no_grad():
+            for batch_idx, (images, _) in enumerate(self.train_loader):
+                if batch_idx >= self.smartpaf_ct_batches:
+                    break
+                images = images.to(self.device, non_blocking=True)
+                self.model(images)
+
+        for handle in handles:
+            handle.remove()
+
+        for name, module in self._smartpaf_poly_modules:
+            if not samples[module]:
+                print(f"  - {name}: skipped, no activation samples")
+                continue
+
+            x = torch.cat(samples[module], dim=0)
+            if x.numel() > self.smartpaf_ct_max_samples:
+                x = x[:self.smartpaf_ct_max_samples]
+            x = x.to(self.device)
+            with torch.no_grad():
+                target = module.warmup_act(x).detach()
+
+            params = [module.a, module.b, module.c, module.d, module.e, module.log_in_scale]
+            old_requires_grad = [param.requires_grad for param in params]
+            for param in params:
+                param.requires_grad = True
+            optimizer = optim.Adam(params, lr=self.smartpaf_ct_lr)
+
+            last_loss = None
+            for _ in range(self.smartpaf_ct_steps):
+                optimizer.zero_grad(set_to_none=True)
+                pred = self._ct_poly_eval(module, x)
+                loss = F.mse_loss(pred, target)
+                loss.backward()
+                optimizer.step()
+                last_loss = float(loss.detach().cpu())
+
+            for param, requires_grad in zip(params, old_requires_grad):
+                param.requires_grad = requires_grad
+            print(f"  - {name}: samples={x.numel()}, mse={last_loss:.6g}")
+
+        self.model.train(was_training)
 
     def _progress_bar(self, iterable, **kwargs):
         """
@@ -1165,6 +1267,7 @@ class Trainer:
             self._register_nan_hooks()
 
         try:
+            self._run_smartpaf_ct_init()
             for epoch in range(self.start_epoch, self.epochs + 1):
                 # 为所有需要 epoch 信息的模块更新 epoch
                 self._set_epoch_for_model(epoch)
