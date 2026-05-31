@@ -64,6 +64,7 @@ class Trainer:
         smartpaf_at_start_epoch=None,
         smartpaf_at_initial_phase='weights',
         smartpaf_at_poly_scope='all',
+        smartpaf_at_weight_scope='all',
         smartpaf_revalidate_rejected_phase=False,
         smartpaf_at_reject_nonimproving_poly=False,
         smartpaf_at_accept_min_delta=0.0,
@@ -133,6 +134,7 @@ class Trainer:
             smartpaf_at_start_epoch: AT 起始 epoch；None 保持旧行为，auto 表示从第一个 PA 模块开始
             smartpaf_at_initial_phase: AT 起始阶段，weights 或 poly
             smartpaf_at_poly_scope: poly 阶段训练范围，all 或 active
+            smartpaf_at_weight_scope: weights 阶段训练范围，all 或 active_related
             smartpaf_revalidate_rejected_phase: collapse guard 恢复 best 后是否重新验证并记录恢复模型
             smartpaf_at_reject_nonimproving_poly: 是否拒绝未提升 best 的 AT poly 阶段
             smartpaf_at_accept_min_delta: poly 阶段至少超过 best_acc 多少百分点才接受
@@ -212,6 +214,9 @@ class Trainer:
         self.smartpaf_at_poly_scope = str(smartpaf_at_poly_scope).strip().lower()
         if self.smartpaf_at_poly_scope not in {'all', 'active'}:
             raise ValueError(f"Unsupported smartpaf_at_poly_scope: {smartpaf_at_poly_scope}")
+        self.smartpaf_at_weight_scope = str(smartpaf_at_weight_scope).strip().lower()
+        if self.smartpaf_at_weight_scope not in {'all', 'active_related'}:
+            raise ValueError(f"Unsupported smartpaf_at_weight_scope: {smartpaf_at_weight_scope}")
         self.smartpaf_revalidate_rejected_phase = bool(smartpaf_revalidate_rejected_phase)
         self.smartpaf_at_reject_nonimproving_poly = bool(smartpaf_at_reject_nonimproving_poly)
         self.smartpaf_at_accept_min_delta = float(smartpaf_at_accept_min_delta)
@@ -256,6 +261,7 @@ class Trainer:
         self._smartpaf_first_poly_epoch = None
         self._smartpaf_at_start_epoch = None
         self._smartpaf_poly_module_param_ids = []
+        self._smartpaf_related_weight_module_param_ids = []
         self._swa_model = None
         self._swa_updates = 0
         self._nan_debug_running = False
@@ -615,6 +621,8 @@ class Trainer:
         self._smartpaf_poly_modules = []
         self._smartpaf_poly_param_ids = set()
         self._smartpaf_poly_module_param_ids = []
+        self._smartpaf_related_weight_module_param_ids = []
+        named_params = list(self.model.named_parameters())
 
         for name, module in self.model.named_modules():
             if hasattr(module, "set_poly_schedule") and callable(module.set_poly_schedule):
@@ -625,6 +633,13 @@ class Trainer:
                     self._smartpaf_poly_param_ids.add(param_id)
                     module_param_ids.add(param_id)
                 self._smartpaf_poly_module_param_ids.append((module, module_param_ids))
+                parent_prefix = name.rsplit('.', 1)[0] + '.' if '.' in name else ''
+                related_param_ids = {
+                    id(param)
+                    for param_name, param in named_params
+                    if parent_prefix and param_name.startswith(parent_prefix) and id(param) not in module_param_ids
+                }
+                self._smartpaf_related_weight_module_param_ids.append((module, related_param_ids))
 
         if not self._smartpaf_poly_modules:
             return
@@ -671,6 +686,7 @@ class Trainer:
             if self._smartpaf_at_start_epoch is not None:
                 print(f"  - 起始epoch: {self._smartpaf_at_start_epoch:g}")
             print(f"  - 多项式训练范围: {self.smartpaf_at_poly_scope}")
+            print(f"  - 权重训练范围: {self.smartpaf_at_weight_scope}")
             if self.smartpaf_at_initial_phase == 'poly':
                 print("  - 阶段顺序: 多项式系数 -> 普通权重 -> ...")
             else:
@@ -885,6 +901,18 @@ class Trainer:
                 active_ids.update(param_ids)
         return active_ids if active_ids else self._smartpaf_poly_param_ids
 
+    def _active_smartpaf_related_weight_param_ids(self, epoch):
+        if self.smartpaf_at_weight_scope == 'all':
+            return None
+
+        active_ids = set()
+        epoch_value = float(epoch)
+        for module, param_ids in self._smartpaf_related_weight_module_param_ids:
+            start_epoch = float(getattr(module, "poly_start_epoch", 0.0))
+            if epoch_value >= start_epoch:
+                active_ids.update(param_ids)
+        return active_ids if active_ids else None
+
     def _set_batchnorm_eval(self):
         for module in self.model.modules():
             if isinstance(module, nn.modules.batchnorm._BatchNorm):
@@ -911,10 +939,13 @@ class Trainer:
             self._zero_all_gradients()
 
         trainable_poly_ids = self._active_smartpaf_poly_param_ids(epoch) if train_poly else set()
+        trainable_weight_ids = None if train_poly else self._active_smartpaf_related_weight_param_ids(epoch)
         for param in self.model.parameters():
             is_poly_param = id(param) in self._smartpaf_poly_param_ids
             if train_poly:
                 param.requires_grad = id(param) in trainable_poly_ids
+            elif trainable_weight_ids is not None:
+                param.requires_grad = (not is_poly_param) and id(param) in trainable_weight_ids
             else:
                 param.requires_grad = not is_poly_param
 

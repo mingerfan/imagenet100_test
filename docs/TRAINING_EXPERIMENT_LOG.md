@@ -1273,3 +1273,119 @@ as intended after epochs 8, 10, and 12. It did not improve this proxy: final
 accuracy was 0.28 percentage points below the pre-guard AT baseline. Keep the
 option available for paper-faithful per-layer training groups, but do not enable
 it in the current global epoch alternation schedule.
+
+## 2026-06-01 AT Active-Related Weight Scope Attempt
+
+Implemented a default-off AT weight-scope option:
+
+- `smartpaf_at_weight_scope: all | active_related`
+
+`active_related` maps each StablePoly4 module to non-poly parameters in the same
+parent block. For the current proxy model this means:
+
+- `special_resnet.layers.0.act` -> `special_resnet.layers.0.conv*/bn*`
+- `special_resnet.layers.1.act` -> `special_resnet.layers.1.conv*/bn*`
+
+During weights phases, only related weights for currently active StablePoly4
+modules are trainable. This moves the implementation closer to the paper's
+current-PAF/related-layer AT target scope while keeping the option default-off.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from models.registry import get_model
+from trainers.base_trainer import Trainer
+
+model = get_model('resnet-basic-stablepoly4-layer1block1', num_classes=100, pretrained=False)
+loader = DataLoader(TensorDataset(torch.randn(2, 3, 96, 96), torch.zeros(2, dtype=torch.long)), batch_size=1)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+    device=torch.device('cpu'),
+    result_dir='/tmp/smartpaf_related_scope_smoke',
+    epochs=16,
+    save_checkpoints=False,
+    poly4_warmup_ratio=0.35,
+    smartpaf_progressive=True,
+    smartpaf_group_epochs='auto',
+    smartpaf_transition_epochs=6,
+    smartpaf_alternate_training=True,
+    smartpaf_at_start_epoch='auto',
+    smartpaf_at_initial_phase='poly',
+    smartpaf_at_poly_scope='active',
+    smartpaf_at_weight_scope='active_related',
+)
+trainer._apply_smartpaf_training_mode(6)
+trainable6 = {name for name, p in model.named_parameters() if p.requires_grad}
+assert 'special_resnet.layers.0.conv1.weight' in trainable6
+assert 'special_resnet.layers.0.act.a' not in trainable6
+assert 'special_resnet.layers.1.conv1.weight' not in trainable6
+assert 'fc.weight' not in trainable6
+trainer._apply_smartpaf_training_mode(12)
+trainable12 = {name for name, p in model.named_parameters() if p.requires_grad}
+assert 'special_resnet.layers.0.conv1.weight' in trainable12
+assert 'special_resnet.layers.1.conv1.weight' in trainable12
+assert 'special_resnet.layers.0.act.a' not in trainable12
+assert 'special_resnet.layers.1.act.a' not in trainable12
+assert 'fc.weight' not in trainable12
+print('related weight scope smoke ok', len(trainable6), len(trainable12))
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_related_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_related_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_related_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-related-b256` | 16 | 27.00 | 25.04 | 1.96 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-dropout-b256` | 16 | 41.14 | 41.14 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-related-b256` | 16 | 27.00 | 25.04 | 1.96 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-accept-b256` | 16 | 34.60 | 31.60 | 3.00 | 5 | COLLAPSE |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 22.52 | 0 |
+| 6 | weights | 27.00 | 0 |
+| 7 | poly_rejected | 27.00 | 0 |
+| 8 | weights | 26.68 | 0 |
+| 9 | poly_rejected | 27.00 | 0 |
+| 10 | weights | 25.36 | 0 |
+| 11 | poly_rejected | 27.00 | 0 |
+| 12 | weights | 25.94 | 0 |
+| 13 | poly_rejected | 27.00 | 0 |
+| 14 | weights | 26.60 | 0 |
+| 15 | poly_rejected | 27.00 | 0 |
+| 16 | weights | 25.04 | 0 |
+
+Conclusion: active-related weight scope is mechanically correct and stable, but
+it is a large negative result under global epoch alternation. The narrower
+weights phase improves briefly at epoch 6 and then cannot keep recovering the
+network; best accuracy is 14.42 percentage points below the pre-guard AT
+baseline. Keep the option default-off. The paper's related-layer scope should
+only be retried inside a true per-layer training-group loop where the rest of
+the network is already a strong fixed context.
