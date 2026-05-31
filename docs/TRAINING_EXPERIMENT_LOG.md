@@ -112,9 +112,9 @@ Implemented experimentally:
 
 Not yet implemented or only partially implemented:
 
-- SWA: not implemented. SMART-PAF uses SWA in PA/AT recovery.
-- BN recalibration: partially implemented. BN is frozen during poly phase, but
-  there is no post-training BN running-stat recalibration.
+- SWA: implemented as default-off global averaging, but not yet integrated into
+  the original SMART-PAF per-training-group acceptance loop.
+- BN recalibration: implemented as default-off post-training recalibration.
 - Dropout mitigation: not implemented.
 - Full per-layer CT -> PA -> AT -> DS/SS scheduler: not implemented. Current
   code is a lightweight global scheduler.
@@ -633,3 +633,102 @@ the normal epoch-16 model even after BN update. Keep SWA default-off. A more
 faithful SMART-PAF scheduler may still use SWA as a short recovery/acceptance
 candidate inside per-layer training groups, but global late-epoch SWA is not a
 current default.
+
+## 2026-06-01 AT Paper-Order Recovery Attempt
+
+Implemented a small AT scheduler option:
+
+- `smartpaf_at_initial_phase: weights | poly`
+
+The default remains `weights`, preserving existing behavior. The new `poly`
+mode follows the SMART-PAF paper's AT order more closely by training PAF
+coefficients first, then ordinary weights. This is still much simpler than the
+paper's full scheduler, which performs per-layer training groups with validation
+acceptance, SWA candidates, dropout-on-overfit, and target swapping only after
+the current group stops improving.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+from trainers.base_trainer import Trainer
+class T(Trainer):
+    def __init__(self, initial):
+        self.smartpaf_alternate_training = True
+        self._smartpaf_poly_param_ids = {1}
+        self._smartpaf_at_start_epoch = 7.0
+        self.smartpaf_at_cycle_epochs = 1
+        self.smartpaf_at_initial_phase = initial
+for initial in ('weights', 'poly'):
+    t = T(initial)
+    print(initial, [t._current_smartpaf_phase(e) for e in range(6, 10)])
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_polyfirst_recover_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_polyfirst_recover_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_polyfirst_recover_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-polyfirst-recover-b256` | 16 | 34.94 | 31.68 | 32.06 | 0 | 0 | 5 | COLLAPSE |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-polyfirst-recover-b256` | 16 | 34.94 | 31.68 | 5 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-delayed-poly01-b256` | 8 | 31.94 | 21.54 | 1 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-delayed-b256` | 10 | 31.28 | 20.88 | 1 | COLLAPSE |
+
+Phase details:
+
+| Epoch | Phase | Val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly | 17.56 | 0 |
+| 6 | weights | 25.40 | 0 |
+| 7 | poly | 14.26 | 1 |
+| 8 | weights | 34.94 | 0 |
+| 9 | poly | 8.66 | 1 |
+| 10 | weights | 34.34 | 0 |
+| 11 | poly | 15.52 | 1 |
+| 12 | weights | 34.46 | 0 |
+| 13 | poly | 8.40 | 1 |
+| 14 | weights | 33.10 | 0 |
+| 15 | poly | 1.04 | 1 |
+| 16 | weights | 31.68 | 0 |
+
+Conclusion: paper-order AT plus `restore_best_reduce_lr` prevents a hard process
+failure, but the poly-only phases still repeatedly collapse. The best recovered
+accuracy, 34.94%, is slightly better than earlier CT+SS delayed AT attempts but
+far below CT-only and CT+SS. Keep AT experimental. The next meaningful AT work
+should move to the paper's per-layer training-group acceptance loop instead of
+more global epoch alternation.
+
+Remaining paper gaps after this run:
+
+- Per-layer SMART-PAF scheduler: CT before a replacement, PA one operator at a
+  time, training groups of `E` epochs, accept only the best validation/SWA model,
+  and stop a step when no improvement remains.
+- AT target scope: the paper alternates current PAF coefficients and related
+  linear layers; the current implementation alternates all StablePoly4 params
+  versus all non-poly params.
+- Dropout-on-overfit: the paper triggers dropout when training accuracy exceeds
+  validation accuracy by more than 10 percentage points.
+- SWA inside each training group: global late-epoch SWA is implemented, but the
+  paper uses SWA as a candidate after every group.
+- PAF forms/degrees: this repo currently uses `StablePoly4`; the paper evaluates
+  composed sign PAFs such as `f1^2 o g1^2`, `f2 o g3`, `f2 o g2`, and `f1 o g2`.
+- Replacing MaxPooling and other non-polynomial operators: current proxies only
+  exercise StablePoly4 activation replacement.
+- DS-to-SS conversion workflow: DS and SS exist as modes, but the paper uses DS
+  through fine-tuning and then converts the deployable model to SS.

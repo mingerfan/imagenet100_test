@@ -62,6 +62,7 @@ class Trainer:
         smartpaf_alternate_training=False,
         smartpaf_at_cycle_epochs=1,
         smartpaf_at_start_epoch=None,
+        smartpaf_at_initial_phase='weights',
         smartpaf_freeze_bn_during_poly_phase=True,
         smartpaf_ct_init=False,
         smartpaf_ct_batches=8,
@@ -121,6 +122,7 @@ class Trainer:
             smartpaf_alternate_training: 是否按 epoch 交替训练普通权重和多项式系数
             smartpaf_at_cycle_epochs: AT 每个阶段持续的 epoch 数
             smartpaf_at_start_epoch: AT 起始 epoch；None 保持旧行为，auto 表示从第一个 PA 模块开始
+            smartpaf_at_initial_phase: AT 起始阶段，weights 或 poly
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
             smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
             smartpaf_ct_batches: CT 采样 train batch 数
@@ -184,6 +186,11 @@ class Trainer:
         self.smartpaf_alternate_training = bool(smartpaf_alternate_training)
         self.smartpaf_at_cycle_epochs = max(1, int(smartpaf_at_cycle_epochs))
         self.smartpaf_at_start_epoch = smartpaf_at_start_epoch
+        self.smartpaf_at_initial_phase = str(smartpaf_at_initial_phase).strip().lower()
+        if self.smartpaf_at_initial_phase not in {'weights', 'poly'}:
+            raise ValueError(
+                f"Unsupported smartpaf_at_initial_phase: {smartpaf_at_initial_phase}"
+            )
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
         self.smartpaf_ct_init = bool(smartpaf_ct_init)
         self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
@@ -534,7 +541,10 @@ class Trainer:
             print(f"  - 每阶段epoch: {self.smartpaf_at_cycle_epochs}")
             if self._smartpaf_at_start_epoch is not None:
                 print(f"  - 起始epoch: {self._smartpaf_at_start_epoch:g}")
-            print("  - 阶段顺序: 普通权重 -> 多项式系数 -> ...")
+            if self.smartpaf_at_initial_phase == 'poly':
+                print("  - 阶段顺序: 多项式系数 -> 普通权重 -> ...")
+            else:
+                print("  - 阶段顺序: 普通权重 -> 多项式系数 -> ...")
 
     def _ct_poly_eval(self, module, x):
         scale_mode = str(getattr(module, "scale_mode", "learned"))
@@ -730,7 +740,8 @@ class Trainer:
         else:
             epoch_offset = max(0.0, float(max(1, int(epoch)) - 1))
         phase_idx = int(epoch_offset // self.smartpaf_at_cycle_epochs)
-        return phase_idx % 2 == 1
+        poly_on_even_phase = self.smartpaf_at_initial_phase == 'poly'
+        return (phase_idx % 2 == 0) if poly_on_even_phase else (phase_idx % 2 == 1)
 
     def _set_batchnorm_eval(self):
         for module in self.model.modules():
