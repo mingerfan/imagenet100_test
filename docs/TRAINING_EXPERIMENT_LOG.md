@@ -245,3 +245,39 @@ AT implementation also wastes early poly phases before any polynomial branch
 contributes to the forward pass. AT should stay experimental; the next AT change
 should delay alternating training until the first polynomial module is active or
 move closer to the original per-layer CT -> PA -> AT schedule.
+
+## 2026-05-31 CT + Dynamic Scale Attempt
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ds_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ds_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ds_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ds-b256` | 16 | 44.58 | 42.98 | 5.52 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | PASS |
+| `imagenet100-96-pa-ct-ds-b256` | 16 | 44.58 | 42.98 | PASS |
+| `imagenet100-96-pa-ds-b256` | 10 | 36.44 | 9.46 | COLLAPSE |
+
+Observations:
+
+- CT fit matched previous CT runs: layer0 MSE 0.00205496 and layer1 MSE
+  0.0010167.
+- Dynamic scale kept effective input scale around 0.11-0.17 late in training.
+- The run did not produce non-finite batches or skipped optimizer steps.
+- Accuracy peaked at epoch 14, then dropped from 44.58% to 39.06% at epoch 15
+  and recovered to 42.98% at epoch 16.
+
+Conclusion: CT makes DS stable, unlike DS-only, but DS still reduces final
+accuracy relative to CT-only on this proxy. Keep DS experimental. A better next
+scale-control step is static calibration/frozen deployment scale, not dynamic
+batch absmax throughout training.
