@@ -860,3 +860,110 @@ collapses on poly phases and remains far below CT-only. Keep it available as an
 experimental option, but do not make AT a default. The next AT step should add
 accept/reject semantics so a bad poly group is discarded immediately rather than
 being measured as an epoch-level collapse.
+
+## 2026-06-01 AT Reject/Revalidate Attempt
+
+Implemented default-off rejected-phase revalidation:
+
+- `smartpaf_revalidate_rejected_phase`
+
+When collapse guard restores `best_model.pth` through
+`collapse_guard_action: restore_best_reduce_lr`, this option immediately
+revalidates the restored model and records the epoch as `poly_rejected` instead
+of recording the collapsed candidate's validation result as the accepted epoch
+result. The guard hit is still preserved in `collapse_guard_triggered`, so the
+summary still marks this run as COLLAPSE.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import shutil
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from trainers.base_trainer import Trainer
+
+path = '/tmp/smartpaf_reject_smoke'
+shutil.rmtree(path, ignore_errors=True)
+model = nn.Linear(2, 2)
+loader = DataLoader(TensorDataset(torch.randn(4, 2), torch.zeros(4, dtype=torch.long)), batch_size=2)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+    device=torch.device('cpu'),
+    result_dir=path,
+    epochs=1,
+    save_checkpoints=True,
+    collapse_guard_enabled=True,
+    collapse_guard_drop=1.0,
+    collapse_guard_action='restore_best_reduce_lr',
+    smartpaf_revalidate_rejected_phase=True,
+)
+trainer.best_acc = 50.0
+trainer.history['val_acc'].append(50.0)
+trainer.save_checkpoint(1, is_best=True)
+with torch.no_grad():
+    for p in model.parameters():
+        p.add_(10.0)
+restored = trainer._run_collapse_guard(2, 10.0)
+assert restored is True
+assert trainer._last_collapse_guard_restored is True
+assert trainer.optimizer.param_groups[0]['lr'] == 0.020000000000000004
+print('reject restore ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_active_reject_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_active_reject_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_active_reject_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-active-reject-b256` | 16 | 38.10 | 35.58 | 9.64 | 0 | 0 | 4 | COLLAPSE |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-active-reject-b256` | 16 | 38.10 | 35.58 | 9.64 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-active-recover-b256` | 16 | 37.38 | 35.64 | 36.12 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-polyfirst-recover-b256` | 16 | 34.94 | 31.68 | 32.06 | 5 | COLLAPSE |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly | 18.14 | 0 |
+| 6 | weights | 24.82 | 0 |
+| 7 | poly | 15.18 | 0 |
+| 8 | weights | 25.44 | 0 |
+| 9 | poly_rejected | 25.44 | 1 |
+| 10 | weights | 36.08 | 0 |
+| 11 | poly_rejected | 36.08 | 1 |
+| 12 | weights | 38.10 | 0 |
+| 13 | poly_rejected | 38.10 | 1 |
+| 14 | weights | 37.78 | 0 |
+| 15 | poly_rejected | 38.10 | 1 |
+| 16 | weights | 35.58 | 0 |
+
+Conclusion: reject/revalidate moves AT behavior closer to the paper's
+accept-only-good-candidates scheduler. It does not fix the underlying poly-phase
+collapse, but it prevents rejected candidates from polluting epoch metrics:
+`max_drop` falls from 36.12 to 9.64 and best accuracy rises slightly from 37.38
+to 38.10. AT remains far below CT-only and should stay experimental. The next
+useful step is a true per-layer training group that rolls back immediately after
+each group and advances only when the restored or SWA candidate improves the
+step best.

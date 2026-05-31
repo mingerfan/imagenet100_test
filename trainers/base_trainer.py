@@ -64,6 +64,7 @@ class Trainer:
         smartpaf_at_start_epoch=None,
         smartpaf_at_initial_phase='weights',
         smartpaf_at_poly_scope='all',
+        smartpaf_revalidate_rejected_phase=False,
         smartpaf_freeze_bn_during_poly_phase=True,
         smartpaf_ct_init=False,
         smartpaf_ct_batches=8,
@@ -125,6 +126,7 @@ class Trainer:
             smartpaf_at_start_epoch: AT 起始 epoch；None 保持旧行为，auto 表示从第一个 PA 模块开始
             smartpaf_at_initial_phase: AT 起始阶段，weights 或 poly
             smartpaf_at_poly_scope: poly 阶段训练范围，all 或 active
+            smartpaf_revalidate_rejected_phase: collapse guard 恢复 best 后是否重新验证并记录恢复模型
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
             smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
             smartpaf_ct_batches: CT 采样 train batch 数
@@ -196,6 +198,7 @@ class Trainer:
         self.smartpaf_at_poly_scope = str(smartpaf_at_poly_scope).strip().lower()
         if self.smartpaf_at_poly_scope not in {'all', 'active'}:
             raise ValueError(f"Unsupported smartpaf_at_poly_scope: {smartpaf_at_poly_scope}")
+        self.smartpaf_revalidate_rejected_phase = bool(smartpaf_revalidate_rejected_phase)
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
         self.smartpaf_ct_init = bool(smartpaf_ct_init)
         self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
@@ -223,6 +226,7 @@ class Trainer:
         self.collapse_guard_action = str(collapse_guard_action).strip().lower()
         self.collapse_guard_lr_factor = float(collapse_guard_lr_factor)
         self._collapse_guard_hits = 0
+        self._last_collapse_guard_restored = False
         self._last_train_stats = {}
         self._last_val_stats = {}
         self._smartpaf_poly_modules = []
@@ -1569,6 +1573,7 @@ class Trainer:
         return {'val_loss': val_loss, 'val_acc': val_acc, 'updates': self._swa_updates}
     
     def _run_collapse_guard(self, epoch, val_acc):
+        self._last_collapse_guard_restored = False
         if not self.collapse_guard_enabled:
             return False
 
@@ -1610,6 +1615,7 @@ class Trainer:
                 model_state = checkpoint.get('model_state_dict')
                 if model_state is not None:
                     self.model.load_state_dict(model_state, strict=self.resume_strict)
+                    self._last_collapse_guard_restored = True
                     print(f"  ✓ Restored best model from {best_path}")
             for group in self.optimizer.param_groups:
                 group['lr'] *= self.collapse_guard_lr_factor
@@ -1725,6 +1731,19 @@ class Trainer:
                     collapse_triggered = True
                     collapse_error = exc
 
+                smartpaf_phase = self._current_smartpaf_phase(epoch)
+                if (
+                    collapse_triggered
+                    and collapse_error is None
+                    and self.smartpaf_revalidate_rejected_phase
+                    and self._last_collapse_guard_restored
+                ):
+                    print("  - Revalidating restored model for rejected phase")
+                    val_loss, val_acc = self.validate(epoch=f'{epoch}_rejected')
+                    current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0
+                    epoch_time = time.time() - epoch_start
+                    smartpaf_phase = f"{smartpaf_phase}_rejected"
+
                 # 记录历史
                 self._append_history_row(
                     epoch=epoch,
@@ -1734,7 +1753,7 @@ class Trainer:
                     val_acc=val_acc,
                     learning_rate=current_lr,
                     epoch_time=epoch_time,
-                    smartpaf_phase=self._current_smartpaf_phase(epoch),
+                    smartpaf_phase=smartpaf_phase,
                     collapse_guard_triggered=collapse_triggered,
                 )
 
