@@ -1389,3 +1389,77 @@ network; best accuracy is 14.42 percentage points below the pre-guard AT
 baseline. Keep the option default-off. The paper's related-layer scope should
 only be retried inside a true per-layer training-group loop where the rest of
 the network is already a strong fixed context.
+
+## 2026-06-01 AT 2-Epoch Group Attempt
+
+Applied the existing AT group/cycle scheduler with:
+
+- `smartpaf_at_cycle_epochs: 2`
+- pre-guard poly rejection enabled
+- active poly scope
+- all non-poly weights during weights phases
+
+This tests whether simply lengthening AT phases is a useful proxy for the
+paper's training groups before implementing a full local best/SWA acceptance
+loop.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ss_at_group2_fast.yaml') as f:
+    data = yaml.safe_load(f)
+assert data['models'][0]['trainer_kwargs']['smartpaf_at_cycle_epochs'] == 2
+print(data['models'][0]['name'])
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-b256` | 16 | 38.76 | 38.76 | 0.34 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-dropout-b256` | 16 | 41.14 | 41.14 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-b256` | 16 | 38.76 | 38.76 | 0.34 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-related-b256` | 16 | 27.00 | 25.04 | 1.96 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 23.20 | 0 |
+| 6 | poly_rejected | 23.20 | 0 |
+| 7 | weights | 27.02 | 0 |
+| 8 | weights | 26.68 | 0 |
+| 9 | poly_rejected | 27.02 | 0 |
+| 10 | poly_rejected | 27.02 | 0 |
+| 11 | weights | 30.62 | 0 |
+| 12 | weights | 32.24 | 0 |
+| 13 | poly_rejected | 32.24 | 0 |
+| 14 | poly_rejected | 32.24 | 0 |
+| 15 | weights | 36.56 | 0 |
+| 16 | weights | 38.76 | 0 |
+
+Conclusion: 2-epoch AT groups are stable with pre-guard rejection but worse than
+single-epoch alternation. The consecutive poly epochs are repeatedly rejected
+and consume training budget before weights can recover. This confirms that
+longer cycles alone are not the paper's training-group method; the missing
+piece is local group best/SWA acceptance and early stopping inside each group.
