@@ -732,3 +732,131 @@ Remaining paper gaps after this run:
   exercise StablePoly4 activation replacement.
 - DS-to-SS conversion workflow: DS and SS exist as modes, but the paper uses DS
   through fine-tuning and then converts the deployable model to SS.
+
+## 2026-06-01 AT Active-Scope Recovery Attempt
+
+Implemented default-off AT target scoping:
+
+- `smartpaf_at_poly_scope: all | active`
+
+The default remains `all`. When set to `active`, poly phases only train
+StablePoly4 modules whose progressive PA schedule has reached their
+`poly_start_epoch`. This is closer to the paper's current-layer AT target scope
+than the earlier global all-poly alternation, though it still does not implement
+the full training-group acceptance scheduler.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import shutil
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from trainers.base_trainer import Trainer
+
+class Poly(nn.Module):
+    def __init__(self, start):
+        super().__init__()
+        self.p = nn.Parameter(torch.ones(()))
+        self.poly_start_epoch = float(start)
+    def set_poly_schedule(self, start_epoch=None, transition_epochs=None):
+        if start_epoch is not None:
+            self.poly_start_epoch = float(start_epoch)
+    def forward(self, x):
+        return x * self.p
+
+class Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.a = Poly(2)
+        self.b = Poly(4)
+        self.fc = nn.Linear(1, 2)
+    def forward(self, x):
+        return self.fc(self.b(self.a(x)))
+
+path = '/tmp/smartpaf_active_scope_smoke'
+shutil.rmtree(path, ignore_errors=True)
+model = Tiny()
+loader = DataLoader(TensorDataset(torch.randn(4, 1), torch.zeros(4, dtype=torch.long)), batch_size=2)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+    device=torch.device('cpu'),
+    result_dir=path,
+    epochs=4,
+    save_checkpoints=False,
+    smartpaf_alternate_training=True,
+    smartpaf_at_start_epoch=2,
+    smartpaf_at_initial_phase='poly',
+    smartpaf_at_poly_scope='active',
+    smartpaf_progressive=False,
+)
+model.a.poly_start_epoch = 2
+model.b.poly_start_epoch = 4
+ids2 = trainer._active_smartpaf_poly_param_ids(2)
+ids4 = trainer._active_smartpaf_poly_param_ids(4)
+assert id(model.a.p) in ids2 and id(model.b.p) not in ids2
+assert id(model.a.p) in ids4 and id(model.b.p) in ids4
+trainer._apply_smartpaf_training_mode(2)
+assert model.a.p.requires_grad and not model.b.p.requires_grad
+assert not model.fc.weight.requires_grad
+trainer._apply_smartpaf_training_mode(3)
+assert not model.a.p.requires_grad and not model.b.p.requires_grad
+assert model.fc.weight.requires_grad
+print('active scope ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_active_recover_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_active_recover_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_active_recover_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-active-recover-b256` | 16 | 37.38 | 35.64 | 36.12 | 0 | 0 | 4 | COLLAPSE |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-active-recover-b256` | 16 | 37.38 | 35.64 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-polyfirst-recover-b256` | 16 | 34.94 | 31.68 | 5 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-delayed-poly01-b256` | 8 | 31.94 | 21.54 | 1 | COLLAPSE |
+
+Phase details:
+
+| Epoch | Phase | Val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly | 17.78 | 0 |
+| 6 | weights | 24.26 | 0 |
+| 7 | poly | 15.06 | 0 |
+| 8 | weights | 25.46 | 0 |
+| 9 | poly | 10.52 | 1 |
+| 10 | weights | 36.28 | 0 |
+| 11 | poly | 17.68 | 1 |
+| 12 | weights | 37.38 | 0 |
+| 13 | poly | 10.28 | 1 |
+| 14 | weights | 37.14 | 0 |
+| 15 | poly | 1.02 | 1 |
+| 16 | weights | 35.64 | 0 |
+
+Conclusion: active-scope AT is a measurable improvement over global all-poly
+AT. It delayed the first guard from epoch 7 to epoch 9, reduced guard hits from
+5 to 4, and improved best accuracy from 34.94% to 37.38%. It still repeatedly
+collapses on poly phases and remains far below CT-only. Keep it available as an
+experimental option, but do not make AT a default. The next AT step should add
+accept/reject semantics so a bad poly group is discarded immediately rather than
+being measured as an epoch-level collapse.

@@ -63,6 +63,7 @@ class Trainer:
         smartpaf_at_cycle_epochs=1,
         smartpaf_at_start_epoch=None,
         smartpaf_at_initial_phase='weights',
+        smartpaf_at_poly_scope='all',
         smartpaf_freeze_bn_during_poly_phase=True,
         smartpaf_ct_init=False,
         smartpaf_ct_batches=8,
@@ -123,6 +124,7 @@ class Trainer:
             smartpaf_at_cycle_epochs: AT 每个阶段持续的 epoch 数
             smartpaf_at_start_epoch: AT 起始 epoch；None 保持旧行为，auto 表示从第一个 PA 模块开始
             smartpaf_at_initial_phase: AT 起始阶段，weights 或 poly
+            smartpaf_at_poly_scope: poly 阶段训练范围，all 或 active
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
             smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
             smartpaf_ct_batches: CT 采样 train batch 数
@@ -191,6 +193,9 @@ class Trainer:
             raise ValueError(
                 f"Unsupported smartpaf_at_initial_phase: {smartpaf_at_initial_phase}"
             )
+        self.smartpaf_at_poly_scope = str(smartpaf_at_poly_scope).strip().lower()
+        if self.smartpaf_at_poly_scope not in {'all', 'active'}:
+            raise ValueError(f"Unsupported smartpaf_at_poly_scope: {smartpaf_at_poly_scope}")
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
         self.smartpaf_ct_init = bool(smartpaf_ct_init)
         self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
@@ -225,6 +230,7 @@ class Trainer:
         self._smartpaf_last_phase = None
         self._smartpaf_first_poly_epoch = None
         self._smartpaf_at_start_epoch = None
+        self._smartpaf_poly_module_param_ids = []
         self._swa_model = None
         self._swa_updates = 0
         self._nan_debug_running = False
@@ -490,12 +496,17 @@ class Trainer:
         """配置 SmartPAF-lite 的逐层多项式启用与 AT 参数集合。"""
         self._smartpaf_poly_modules = []
         self._smartpaf_poly_param_ids = set()
+        self._smartpaf_poly_module_param_ids = []
 
         for name, module in self.model.named_modules():
             if hasattr(module, "set_poly_schedule") and callable(module.set_poly_schedule):
                 self._smartpaf_poly_modules.append((name, module))
+                module_param_ids = set()
                 for param in module.parameters(recurse=True):
-                    self._smartpaf_poly_param_ids.add(id(param))
+                    param_id = id(param)
+                    self._smartpaf_poly_param_ids.add(param_id)
+                    module_param_ids.add(param_id)
+                self._smartpaf_poly_module_param_ids.append((module, module_param_ids))
 
         if not self._smartpaf_poly_modules:
             return
@@ -541,6 +552,7 @@ class Trainer:
             print(f"  - 每阶段epoch: {self.smartpaf_at_cycle_epochs}")
             if self._smartpaf_at_start_epoch is not None:
                 print(f"  - 起始epoch: {self._smartpaf_at_start_epoch:g}")
+            print(f"  - 多项式训练范围: {self.smartpaf_at_poly_scope}")
             if self.smartpaf_at_initial_phase == 'poly':
                 print("  - 阶段顺序: 多项式系数 -> 普通权重 -> ...")
             else:
@@ -743,6 +755,18 @@ class Trainer:
         poly_on_even_phase = self.smartpaf_at_initial_phase == 'poly'
         return (phase_idx % 2 == 0) if poly_on_even_phase else (phase_idx % 2 == 1)
 
+    def _active_smartpaf_poly_param_ids(self, epoch):
+        if self.smartpaf_at_poly_scope == 'all':
+            return self._smartpaf_poly_param_ids
+
+        active_ids = set()
+        epoch_value = float(epoch)
+        for module, param_ids in self._smartpaf_poly_module_param_ids:
+            start_epoch = float(getattr(module, "poly_start_epoch", 0.0))
+            if epoch_value >= start_epoch:
+                active_ids.update(param_ids)
+        return active_ids if active_ids else self._smartpaf_poly_param_ids
+
     def _set_batchnorm_eval(self):
         for module in self.model.modules():
             if isinstance(module, nn.modules.batchnorm._BatchNorm):
@@ -768,9 +792,13 @@ class Trainer:
             self._smartpaf_last_phase = phase
             self._zero_all_gradients()
 
+        trainable_poly_ids = self._active_smartpaf_poly_param_ids(epoch) if train_poly else set()
         for param in self.model.parameters():
             is_poly_param = id(param) in self._smartpaf_poly_param_ids
-            param.requires_grad = is_poly_param if train_poly else not is_poly_param
+            if train_poly:
+                param.requires_grad = id(param) in trainable_poly_ids
+            else:
+                param.requires_grad = not is_poly_param
 
         if train_poly and self.smartpaf_freeze_bn_during_poly_phase:
             self._set_batchnorm_eval()
