@@ -72,6 +72,9 @@ class Trainer:
         smartpaf_ss_max_samples=20000,
         smartpaf_ss_percentile=1.0,
         smartpaf_ss_margin=1.0,
+        bn_recalibrate_after_training=False,
+        bn_recalibrate_batches=0,
+        bn_recalibrate_use_best=True,
         collapse_guard_enabled=False,
         collapse_guard_drop=10.0,
         collapse_guard_patience=1,
@@ -124,6 +127,9 @@ class Trainer:
             smartpaf_ss_max_samples: 每个 StablePoly4 最多使用多少个标量样本估计 scale
             smartpaf_ss_percentile: SS 使用的 abs 激活分位数；1.0 表示最大值
             smartpaf_ss_margin: SS absmax 安全余量倍率
+            bn_recalibrate_after_training: 是否在训练结束后重算 BatchNorm running stats
+            bn_recalibrate_batches: BN recalibration 使用的 train batch 数；0 表示全量
+            bn_recalibrate_use_best: recalibration 前是否加载 best_model.pth
             collapse_guard_enabled: 是否检测验证精度断崖式下降
             collapse_guard_drop: 相对上一轮或历史最佳下降超过多少百分点触发 guard
             collapse_guard_patience: 连续触发多少次后执行 action
@@ -180,6 +186,9 @@ class Trainer:
         self.smartpaf_ss_max_samples = max(256, int(smartpaf_ss_max_samples))
         self.smartpaf_ss_percentile = max(0.0, min(1.0, float(smartpaf_ss_percentile)))
         self.smartpaf_ss_margin = max(1e-6, float(smartpaf_ss_margin))
+        self.bn_recalibrate_after_training = bool(bn_recalibrate_after_training)
+        self.bn_recalibrate_batches = max(0, int(bn_recalibrate_batches))
+        self.bn_recalibrate_use_best = bool(bn_recalibrate_use_best)
         self.collapse_guard_enabled = bool(collapse_guard_enabled)
         self.collapse_guard_drop = float(collapse_guard_drop)
         self.collapse_guard_patience = max(1, int(collapse_guard_patience))
@@ -1284,6 +1293,125 @@ class Trainer:
         self._set_poly4_collect_stats(False)
 
         return avg_loss, avg_acc
+
+    def _append_history_row(
+        self,
+        epoch,
+        train_loss,
+        train_acc,
+        val_loss,
+        val_acc,
+        learning_rate,
+        epoch_time,
+        smartpaf_phase,
+        collapse_guard_triggered=0,
+    ):
+        self.history['epoch'].append(epoch)
+        self.history['train_loss'].append(train_loss)
+        self.history['train_acc'].append(train_acc)
+        self.history['val_loss'].append(val_loss)
+        self.history['val_acc'].append(val_acc)
+        self.history['learning_rate'].append(learning_rate)
+        self.history['epoch_time'].append(epoch_time)
+        self.history['train_valid_batches'].append(self._last_train_stats.get('valid_batches', 0))
+        self.history['train_skipped_batches'].append(self._last_train_stats.get('skipped_batches', 0))
+        self.history['val_valid_batches'].append(self._last_val_stats.get('valid_batches', 0))
+        self.history['val_skipped_batches'].append(self._last_val_stats.get('skipped_batches', 0))
+        self.history['nonfinite_train_batches'].append(self._last_train_stats.get('nonfinite_batches', 0))
+        self.history['nonfinite_val_batches'].append(self._last_val_stats.get('nonfinite_batches', 0))
+        self.history['smartpaf_phase'].append(smartpaf_phase)
+        self.history['collapse_guard_triggered'].append(int(collapse_guard_triggered))
+
+    def _has_batchnorm_modules(self):
+        return any(isinstance(module, nn.modules.batchnorm._BatchNorm) for module in self.model.modules())
+
+    def _run_bn_recalibration(self):
+        if not self.bn_recalibrate_after_training:
+            return None
+        if not self._has_batchnorm_modules():
+            print("BN recalibration: skipped, no BatchNorm modules")
+            return None
+
+        print("✓ BN recalibration:")
+        print(f"  - use_best={self.bn_recalibrate_use_best}, batches={self.bn_recalibrate_batches or 'all'}")
+
+        if self.bn_recalibrate_use_best:
+            best_path = os.path.join(self.result_dir, 'best_model.pth')
+            if os.path.exists(best_path):
+                checkpoint = torch.load(best_path, map_location=self.device)
+                model_state = checkpoint.get('model_state_dict')
+                if model_state is not None:
+                    self.model.load_state_dict(model_state, strict=self.resume_strict)
+                    print(f"  - loaded best model from {best_path}")
+            else:
+                print(f"  - best model not found at {best_path}; using current model")
+
+        was_training = self.model.training
+        bn_modules = [
+            module for module in self.model.modules()
+            if isinstance(module, nn.modules.batchnorm._BatchNorm)
+        ]
+        original_momenta = {module: module.momentum for module in bn_modules}
+
+        for module in bn_modules:
+            module.reset_running_stats()
+            module.momentum = None
+
+        self.model.train()
+        start_time = time.time()
+        valid_batches = 0
+        limit = self.bn_recalibrate_batches
+        steps_per_epoch = min(len(self.train_loader), limit) if limit else len(self.train_loader)
+
+        with torch.no_grad():
+            pbar = self._progress_bar(self.train_loader, desc='BN recalibration')
+            for batch_idx, (images, _) in enumerate(pbar):
+                if limit and batch_idx >= limit:
+                    break
+                images = images.to(self.device, non_blocking=True)
+                if self.val_force_fp32 and images.dtype != torch.float32:
+                    images = images.float()
+                self._set_epoch_progress_for_model(self.epochs, batch_idx, steps_per_epoch)
+                self.model(images)
+                valid_batches += 1
+                pbar.set_postfix({'batches': valid_batches})
+
+        for module, momentum in original_momenta.items():
+            module.momentum = momentum
+        self.model.train(was_training)
+
+        recal_time = time.time() - start_time
+        self._last_train_stats = {
+            'valid_batches': valid_batches,
+            'skipped_batches': 0,
+            'nonfinite_batches': 0,
+        }
+        print(f"  - recalibrated BatchNorm stats with {valid_batches} batches in {recal_time:.2f}s")
+
+        val_loss, val_acc = self.validate(epoch='bn_recal')
+        current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0
+        self._append_history_row(
+            epoch=self.epochs + 1,
+            train_loss=0.0,
+            train_acc=0.0,
+            val_loss=val_loss,
+            val_acc=val_acc,
+            learning_rate=current_lr,
+            epoch_time=recal_time,
+            smartpaf_phase='bn_recal',
+            collapse_guard_triggered=0,
+        )
+
+        if self.save_checkpoints:
+            is_new_best = val_acc > self.best_acc
+            if is_new_best:
+                self.best_acc = val_acc
+                self.save_checkpoint(self.epochs + 1, is_best=True)
+            self.save_checkpoint(self.epochs + 1, is_best=False, filename='bn_recalibrated_model.pth')
+
+        self.save_history()
+        print(f"  - BN recalibrated validation: Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
+        return {'val_loss': val_loss, 'val_acc': val_acc, 'batches': valid_batches}
     
     def _run_collapse_guard(self, epoch, val_acc):
         if not self.collapse_guard_enabled:
@@ -1441,21 +1569,17 @@ class Trainer:
                     collapse_error = exc
 
                 # 记录历史
-                self.history['epoch'].append(epoch)
-                self.history['train_loss'].append(train_loss)
-                self.history['train_acc'].append(train_acc)
-                self.history['val_loss'].append(val_loss)
-                self.history['val_acc'].append(val_acc)
-                self.history['learning_rate'].append(current_lr)
-                self.history['epoch_time'].append(epoch_time)
-                self.history['train_valid_batches'].append(self._last_train_stats.get('valid_batches', 0))
-                self.history['train_skipped_batches'].append(self._last_train_stats.get('skipped_batches', 0))
-                self.history['val_valid_batches'].append(self._last_val_stats.get('valid_batches', 0))
-                self.history['val_skipped_batches'].append(self._last_val_stats.get('skipped_batches', 0))
-                self.history['nonfinite_train_batches'].append(self._last_train_stats.get('nonfinite_batches', 0))
-                self.history['nonfinite_val_batches'].append(self._last_val_stats.get('nonfinite_batches', 0))
-                self.history['smartpaf_phase'].append(self._current_smartpaf_phase(epoch))
-                self.history['collapse_guard_triggered'].append(int(collapse_triggered))
+                self._append_history_row(
+                    epoch=epoch,
+                    train_loss=train_loss,
+                    train_acc=train_acc,
+                    val_loss=val_loss,
+                    val_acc=val_acc,
+                    learning_rate=current_lr,
+                    epoch_time=epoch_time,
+                    smartpaf_phase=self._current_smartpaf_phase(epoch),
+                    collapse_guard_triggered=collapse_triggered,
+                )
 
                 # 打印结果
                 print(f"\nEpoch [{epoch}/{self.epochs}] - {epoch_time:.2f}s")
@@ -1501,6 +1625,8 @@ class Trainer:
                 self._restore_all_trainable()
             if self._nan_debug_active:
                 self._remove_nan_hooks()
+
+        self._run_bn_recalibration()
         
         # 训练完成
         total_time = time.time() - start_time

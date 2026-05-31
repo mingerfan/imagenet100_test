@@ -430,3 +430,101 @@ accuracy before the next weights phase can recover. Keep AT experimental. The
 next AT-related change should move closer to the paper scheduler: per-layer
 training groups with acceptance/recovery logic, SWA, and BN recalibration,
 rather than global epoch-level alternation.
+
+## 2026-06-01 BN Recalibration Attempt
+
+Implemented a default-off post-training BatchNorm recalibration option:
+
+- `bn_recalibrate_after_training`
+- `bn_recalibrate_batches`
+- `bn_recalibrate_use_best`
+
+When enabled, the trainer optionally loads `best_model.pth`, resets BatchNorm
+running statistics, forwards train batches without gradients, then validates
+and appends a `smartpaf_phase=bn_recal` row to `train_history.csv`.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import shutil
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from trainers.base_trainer import Trainer
+
+class TinyBN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 4, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(4),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(4, 2),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+path = '/tmp/smartpaf_bn_recal_smoke'
+shutil.rmtree(path, ignore_errors=True)
+model = TinyBN()
+x = torch.randn(16, 3, 8, 8)
+y = torch.randint(0, 2, (16,))
+loader = DataLoader(TensorDataset(x, y), batch_size=4)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+    device=torch.device('cpu'),
+    result_dir=path,
+    epochs=1,
+    save_checkpoints=False,
+    bn_recalibrate_after_training=True,
+    bn_recalibrate_batches=2,
+    bn_recalibrate_use_best=False,
+)
+result = trainer._run_bn_recalibration()
+assert result is not None
+assert result['batches'] == 2
+assert trainer.history['smartpaf_phase'][-1] == 'bn_recal'
+assert len(trainer.history['epoch']) == 1
+PY
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_bnrecal_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_bnrecal_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_bnrecal_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-bnrecal-b256` | 17 | 47.54 | 47.32 | 2.34 | 0 | 0 | 0 | PASS |
+
+BN recalibration details:
+
+| Pre-recal epoch 16 | BN-recal row | Delta | Batches | Time |
+| ---: | ---: | ---: | ---: | ---: |
+| 47.54 | 47.32 | -0.22 | 128 | 17.86s |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | PASS |
+| `imagenet100-96-pa-ct-ss-bnrecal-b256` | 17 | 47.54 | 47.32 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | PASS |
+
+Conclusion: BN recalibration is implemented and stable, but it did not improve
+this CT+SS proxy. The recalibrated row was 0.22 percentage points below the
+pre-recal best. Keep BN recalibration default-off for now; it is most likely to
+be useful after SWA or other weight-averaging techniques, where BN statistics
+are known to become stale.

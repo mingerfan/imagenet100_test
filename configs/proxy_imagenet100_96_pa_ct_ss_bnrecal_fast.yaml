@@ -1,0 +1,61 @@
+# Low-resolution ImageNet-100 CT + Static Scale + BN recalibration proxy.
+# Recomputes BatchNorm running stats from train batches after normal training,
+# then evaluates and records the recalibrated model as an extra history row.
+
+global:
+  num_classes: 100
+  default_epochs: 16
+  default_batch_size: 256
+  default_learning_rate: 0.0007
+  default_num_workers: 12
+  default_save_freq: 0
+
+models:
+  - name: "imagenet100-96-pa-ct-ss-bnrecal-b256"
+    class: "resnet-basic-stablepoly4-layer1block1"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 16
+    batch_size: 256
+    learning_rate: 0.0007
+    num_workers: 12
+    prefetch_factor: 4
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    scheduler: cosine
+    warmup_epochs: 4
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.35
+      poly4_scale_mode: static
+      poly4_dynamic_scale_eps: 0.000001
+      smartpaf_ss_calibrate: true
+      smartpaf_ss_batches: 8
+      smartpaf_ss_max_samples: 20000
+      smartpaf_ss_percentile: 1.0
+      smartpaf_ss_margin: 1.0
+      smartpaf_ct_init: true
+      smartpaf_ct_batches: 8
+      smartpaf_ct_max_samples: 20000
+      smartpaf_ct_steps: 300
+      smartpaf_ct_lr: 0.01
+      smartpaf_progressive: true
+      smartpaf_group_epochs: auto
+      smartpaf_transition_epochs: 6
+      smartpaf_alternate_training: false
+      bn_recalibrate_after_training: true
+      bn_recalibrate_batches: 128
+      bn_recalibrate_use_best: true
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
