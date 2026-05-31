@@ -212,3 +212,36 @@ Comparison:
 Conclusion: CT fixes the late PA-only collapse on the ImageNet-100 96px proxy
 and nearly matches the Swish baseline. The next useful AT run should be CT+AT,
 not AT on scratch-initialized polynomial coefficients.
+
+## 2026-05-31 CT + Alternate Training Attempt
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_at_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 3 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_at_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_at_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-at-b256-cycle1` | 17 | 38.30 | 16.52 | 21.78 | 1 | 1 | 1 | COLLAPSE |
+
+Failure details:
+
+- CT fit matched the CT-only run:
+  `special_resnet.layers.0.act` MSE 0.00205496 and
+  `special_resnet.layers.1.act` MSE 0.0010167.
+- Epoch 14 poly phase train loss exploded to 133118055141.72, but validation
+  accuracy only moved from 35.74% to 35.08%.
+- Epoch 16 poly phase skipped one optimizer step because gradient norm was
+  non-finite.
+- Epoch 17 weights phase triggered collapse guard: validation accuracy dropped
+  from 38.30% to 16.52%, and `collapse_epoch_17.pth` was saved.
+
+Conclusion: CT delays AT collapse compared with the no-CT PA+AT run, but this
+AT schedule is still not stable and is less accurate than CT-only. The current
+AT implementation also wastes early poly phases before any polynomial branch
+contributes to the forward pass. AT should stay experimental; the next AT change
+should delay alternating training until the first polynomial module is active or
+move closer to the original per-layer CT -> PA -> AT schedule.
