@@ -967,3 +967,122 @@ to 38.10. AT remains far below CT-only and should stay experimental. The next
 useful step is a true per-layer training group that rolls back immediately after
 each group and advances only when the restored or SWA candidate improves the
 step best.
+
+## 2026-06-01 AT Accept-Only Poly Attempt
+
+Implemented a default-off AT acceptance option:
+
+- `smartpaf_at_reject_nonimproving_poly`
+- `smartpaf_at_accept_min_delta`
+- `smartpaf_at_reject_lr_factor`
+
+When enabled, an AT `poly` phase must beat the current best validation accuracy
+by at least `smartpaf_at_accept_min_delta`. Otherwise the trainer restores
+`best_model.pth`, optionally revalidates the restored model, and records the
+phase as `poly_rejected`.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+python - <<'PY'
+import os
+import shutil
+import tempfile
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from trainers.base_trainer import Trainer
+
+path = '/tmp/smartpaf_accept_smoke'
+shutil.rmtree(path, ignore_errors=True)
+os.makedirs(path, exist_ok=True)
+model = nn.Linear(2, 2)
+loader = DataLoader(TensorDataset(torch.randn(4, 2), torch.zeros(4, dtype=torch.long)), batch_size=2)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+    device=torch.device('cpu'),
+    result_dir=path,
+    epochs=1,
+    save_checkpoints=True,
+)
+trainer.best_acc = 50.0
+trainer.save_checkpoint(1, is_best=True)
+with torch.no_grad():
+    for p in model.parameters():
+        p.add_(10.0)
+restored = trainer._restore_best_and_scale_lr(1.0, 'smoke')
+assert restored is True
+assert trainer.optimizer.param_groups[0]['lr'] == 0.1
+print('accept restore ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_accept_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_accept_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_accept_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-accept-b256` | 16 | 34.60 | 31.60 | 3.00 | 0 | 0 | 5 | COLLAPSE |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-active-reject-b256` | 16 | 38.10 | 35.58 | 9.64 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-active-recover-b256` | 16 | 37.38 | 35.64 | 36.12 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-polyfirst-recover-b256` | 16 | 34.94 | 31.68 | 32.06 | 5 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-accept-b256` | 16 | 34.60 | 31.60 | 3.00 | 5 | COLLAPSE |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 22.64 | 0 |
+| 6 | weights | 24.60 | 0 |
+| 7 | poly_rejected | 24.60 | 1 |
+| 8 | weights | 34.60 | 0 |
+| 9 | poly_rejected | 34.60 | 1 |
+| 10 | weights | 34.56 | 0 |
+| 11 | poly_rejected | 34.60 | 1 |
+| 12 | weights | 34.12 | 0 |
+| 13 | poly_rejected | 34.60 | 1 |
+| 14 | weights | 33.32 | 0 |
+| 15 | poly_rejected | 34.60 | 1 |
+| 16 | weights | 31.60 | 0 |
+
+Conclusion: accept-only poly rejection works mechanically and keeps recorded
+validation metrics from showing the raw poly collapses. It is still worse than
+the previous active reject/revalidate run because collapse guard runs before the
+acceptance check. Large bad poly candidates are restored but first reduce LR by
+`collapse_guard_lr_factor=0.2`, so later weights phases train with an overly
+small learning rate. The next AT change should evaluate poly acceptance before
+collapse guard or add a poly-specific reject path that restores without global
+LR punishment.
+
+Remaining paper techniques not yet faithfully applied:
+
+- Per-layer SMART-PAF training groups with a local best/SWA candidate and
+  immediate rollback after every group.
+- Alternating the current PAF coefficients with only their related upstream
+  linear layers, instead of all poly parameters versus all non-poly parameters.
+- Dropout-on-overfit, gated by the train/validation accuracy gap.
+- SWA inside each training group as an acceptance candidate.
+- Paper PAF families and degrees (`f1^2 o g1^2`, `f2 o g3`, `f2 o g2`,
+  `f1 o g2`, alpha-7), beyond this repo's current `StablePoly4`.
+- Replacing MaxPooling and other non-polynomial operators, not only activation
+  functions.
+- DS fine-tuning followed by SS conversion as a deployment workflow.
