@@ -6,56 +6,168 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from .base_trainer import Trainer
 from models import get_model
 from data import create_dataloaders
 from utils import set_random_seed
 from typing import List, Dict, Optional
-import threading
-import queue
+import multiprocessing as mp
 import os
 
 
-def create_smart_optimizer(model, lr=0.001):
-    """
-    智能优化器：为不同类型的参数使用不同的权重衰减策略
-    
-    Args:
-        model: 模型
-        lr: 学习率
-    
-    Returns:
-        optimizer: 配置好的优化器
-    """
+def _model_has_module_class(model, class_name):
+    return any(module.__class__.__name__ == class_name for module in model.modules())
+
+
+def _collect_module_param_ids(model, class_name):
+    param_ids = set()
+    for module in model.modules():
+        if module.__class__.__name__ == class_name:
+            for param in module.parameters(recurse=True):
+                param_ids.add(id(param))
+    return param_ids
+
+
+def _collect_batchnorm_param_ids(model):
+    param_ids = set()
+    for module in model.modules():
+        if isinstance(module, nn.modules.batchnorm._BatchNorm):
+            for param in module.parameters(recurse=False):
+                param_ids.add(id(param))
+    return param_ids
+
+
+def _is_no_decay_parameter(name):
+    parts = name.split('.')
+    return (
+        name.endswith('.bias')
+        or name.endswith('.beta')
+        or name.endswith('.gate_scale')
+        or any(part.startswith('bn') or 'batchnorm' in part.lower() for part in parts)
+    )
+
+
+def create_smart_optimizer(
+    model,
+    lr=0.001,
+    optimizer_type='adamw',
+    weight_decay=1e-4,
+    poly_weight_decay=0.0,
+    beta_weight_decay=0.0,
+    poly_lr_mult=1.0,
+    normal_lr_mult=1.0,
+):
+    """智能优化器：为不同类型的参数使用不同的学习率/权重衰减策略。"""
     poly_params = []
-    beta_params = []
+    no_decay_params = []
     normal_params = []
-    
+    poly_param_ids = _collect_module_param_ids(model, "StablePoly4")
+    bn_param_ids = _collect_batchnorm_param_ids(model)
+
     for name, param in model.named_parameters():
-        # LearnableSwish和LearnableRelu的beta - 不约束防止归零
-        # 必须先匹配beta，因为'.act.beta'包含'.act.b'
-        if name.endswith('.beta'):
-            beta_params.append(param)
-        # StablePoly4的多项式系数 (如: .act.a, .act.b, .act.c, .act.d, .act.e) - 强约束防止爆炸
-        # 使用更精确的匹配，确保只匹配单个字母作为参数名
-        elif any(name.endswith(f'.act.{p}') for p in ['a', 'b', 'c', 'd', 'e']):
+        if not param.requires_grad:
+            continue
+        if id(param) in poly_param_ids:
             poly_params.append(param)
-        # 普通权重（卷积层、线性层等）- 标准约束
+        elif id(param) in bn_param_ids or _is_no_decay_parameter(name):
+            no_decay_params.append(param)
         else:
             normal_params.append(param)
-    
-    # 创建参数组，使用不同的权重衰减
-    optimizer = optim.AdamW(
-        [
-            {"params": normal_params, "weight_decay": 1e-4},
-            {"params": poly_params, "weight_decay": 0.1},  # Poly 强约束
-            {"params": beta_params, "weight_decay": 0.0},   # Beta 不约束
-        ],
-        lr=lr,
-    )
-    
+
+    param_groups = []
+    if normal_params:
+        param_groups.append({
+            "params": normal_params,
+            "lr": lr * normal_lr_mult,
+            "weight_decay": weight_decay,
+            "name": "normal_decay",
+            "is_poly": False,
+        })
+    if no_decay_params:
+        param_groups.append({
+            "params": no_decay_params,
+            "lr": lr * normal_lr_mult,
+            "weight_decay": beta_weight_decay,
+            "name": "normal_no_decay",
+            "is_poly": False,
+        })
+    if poly_params:
+        param_groups.append({
+            "params": poly_params,
+            "lr": lr * poly_lr_mult,
+            "weight_decay": poly_weight_decay,
+            "name": "poly",
+            "is_poly": True,
+        })
+
+    optimizer_key = str(optimizer_type).lower()
+    if optimizer_key == 'adamw':
+        optimizer = optim.AdamW(param_groups, lr=lr)
+    elif optimizer_key == 'adam':
+        optimizer = optim.Adam(param_groups, lr=lr)
+    elif optimizer_key == 'sgd':
+        optimizer = optim.SGD(param_groups, lr=lr, momentum=0.9)
+    else:
+        raise ValueError(f"Unsupported optimizer_type: {optimizer_type}")
+
+    print("优化器参数组:")
+    for group in optimizer.param_groups:
+        n_params = sum(p.numel() for p in group['params'])
+        print(
+            f"  - {group.get('name', 'unnamed')}: params={n_params:,}, "
+            f"lr={group['lr']:.6g}, wd={group.get('weight_decay', 0):.6g}, "
+            f"is_poly={group.get('is_poly', False)}"
+        )
+
     return optimizer
+
+
+def create_lr_scheduler(optimizer, model_config, default_lr, epochs):
+    scheduler_name = str(model_config.get('scheduler', 'cosine')).lower()
+    min_lr_ratio = float(model_config.get('min_lr_ratio', 0.01))
+    warmup_epochs = int(model_config.get('warmup_epochs', 0) or 0)
+    warmup_start_factor = float(model_config.get('warmup_start_factor', 0.05))
+
+    if scheduler_name in ('none', 'off', 'disabled'):
+        return None
+    if scheduler_name != 'cosine':
+        raise ValueError(f"Unsupported scheduler: {scheduler_name}")
+
+    eta_min = default_lr * min_lr_ratio
+    cosine_epochs = max(1, epochs - warmup_epochs)
+    cosine = CosineAnnealingLR(optimizer, T_max=cosine_epochs, eta_min=eta_min)
+    if warmup_epochs <= 0:
+        return cosine
+
+    warmup = LinearLR(
+        optimizer,
+        start_factor=max(1e-8, min(1.0, warmup_start_factor)),
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+
+
+def _process_worker(manager_kwargs, task_queue, result_queue, gpu_id, force, return_details):
+    """Process-isolated worker to avoid CUDA/DataLoader hangs from Python threads."""
+    manager = MultiGPUManager(**manager_kwargs)
+    manager.available_gpus = [gpu_id] if gpu_id is not None else []
+    while True:
+        model_config = task_queue.get()
+        if model_config is None:
+            break
+        model_name = model_config['name']
+        try:
+            detail = manager.train_model(
+                model_config,
+                gpu_id,
+                force,
+                return_details=return_details,
+            )
+            result_queue.put(('success', model_name, detail))
+        except Exception as exc:
+            result_queue.put(('failed', model_name, str(exc)))
 
 
 class MultiGPUManager:
@@ -66,7 +178,8 @@ class MultiGPUManager:
         train_dir: str,
         val_dir: str,
         result_dir: str = './results',
-        gpus: List[int] = [0, 1, 2, 3],
+        gpus: List[int] = [1, 2, 3],
+        excluded_gpus: Optional[List[int]] = None,
         num_classes: int = 100,
         default_epochs: int = 60,
         default_batch_size: int = 128,
@@ -85,7 +198,8 @@ class MultiGPUManager:
             train_dir: 训练集目录
             val_dir: 验证集目录
             result_dir: 结果保存目录
-            gpus: 可用的GPU设备列表
+            gpus: 可用的GPU设备列表，默认使用GPU 1/2/3并避开GPU 0
+            excluded_gpus: 运行时强制排除的GPU列表，默认排除physical GPU 0
             num_classes: 类别数量
             default_epochs: 默认训练epoch数
             default_batch_size: 默认批次大小
@@ -102,6 +216,7 @@ class MultiGPUManager:
         self.val_dir = val_dir
         self.result_dir = result_dir
         self.gpus = gpus
+        self.excluded_gpus = [0] if excluded_gpus is None else list(excluded_gpus)
         self.num_classes = num_classes
         self.default_epochs = default_epochs
         self.default_batch_size = default_batch_size
@@ -112,9 +227,26 @@ class MultiGPUManager:
         self.download = download
         self.input_size = input_size
         self.seed = seed
+        self._init_kwargs = {
+            'train_dir': train_dir,
+            'val_dir': val_dir,
+            'result_dir': result_dir,
+            'gpus': gpus,
+            'excluded_gpus': self.excluded_gpus,
+            'num_classes': num_classes,
+            'default_epochs': default_epochs,
+            'default_batch_size': default_batch_size,
+            'default_lr': default_lr,
+            'default_num_workers': default_num_workers,
+            'use_memory_fs': use_memory_fs,
+            'dataset': dataset,
+            'download': download,
+            'input_size': input_size,
+            'seed': seed,
+        }
 
         set_random_seed(self.seed)
-        
+
         # 创建结果目录
         import os
         os.makedirs(result_dir, exist_ok=True)
@@ -135,7 +267,13 @@ class MultiGPUManager:
             return []
         
         available = []
+        excluded = set(self.excluded_gpus or [])
+        if excluded:
+            print(f"默认排除GPU: {sorted(excluded)} (physical GPU0/第一张V100存在memory/ECC风险)")
         for gpu_id in self.gpus:
+            if gpu_id in excluded:
+                print(f"⚠ 跳过 GPU {gpu_id}: 已按环境约束排除")
+                continue
             try:
                 torch.cuda.set_device(gpu_id)
                 props = torch.cuda.get_device_properties(gpu_id)
@@ -239,12 +377,10 @@ class MultiGPUManager:
         print(f"{'=' * 60}")
         
         # 检测是否使用 StablePoly4 激活函数
-        uses_stablepoly = (
+        uses_stablepoly_by_name = (
             'stablepoly' in model_name.lower()
             or 'stablepoly' in str(model_class).lower()
         )
-        if uses_stablepoly:
-            print("⚠ 检测到 StablePoly4 激活函数，将使用更严格的梯度裁剪")
         
         # 设置设备
         device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None else 'cpu')
@@ -252,6 +388,7 @@ class MultiGPUManager:
         # 创建数据加载器
         batch_size = model_config.get('batch_size', self.default_batch_size)
         num_workers = model_config.get('num_workers', self.default_num_workers)
+        prefetch_factor = model_config.get('prefetch_factor', 4)
         
         # 每个GPU进程创建独立的DataLoader实例
         # 如果启用use_memory_fs，所有进程都会从同一个内存文件系统路径读取数据
@@ -262,6 +399,7 @@ class MultiGPUManager:
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=device.type == 'cuda',
+            prefetch_factor=prefetch_factor,
             use_memory_fs=self.use_memory_fs,
             dataset=self.dataset,
             download=self.download,
@@ -270,40 +408,52 @@ class MultiGPUManager:
         )
         
         # 创建模型
-        model_params = model_config.get('params', {})
+        model_params = dict(model_config.get('params', {}) or {})
         model_params['num_classes'] = model_params.get('num_classes', self.num_classes)
         
         model = get_model(model_class, **model_params)
         model = model.to(device)
+
+        uses_stablepoly = uses_stablepoly_by_name or _model_has_module_class(model, "StablePoly4")
+        if uses_stablepoly:
+            print("⚠ 检测到 StablePoly4 激活函数，将启用 SmartPAF 稳定训练默认项")
         
         # 打印模型信息
         total_params = sum(p.numel() for p in model.parameters())
         print(f"模型参数量: {total_params:,}")
         
         # 损失函数
-        criterion = nn.CrossEntropyLoss()
-        
+        label_smoothing = float(model_config.get('label_smoothing', 0.0) or 0.0)
+        criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+
         # 优化器 - 使用智能优化器，为不同参数类型使用不同权重衰减
         lr = model_config.get('learning_rate', self.default_lr)
-        optimizer = create_smart_optimizer(model, lr=lr)
-        
-        # 学习率调度器 - 使用实际训练轮数
-        epochs = model_config.get('epochs', self.default_epochs)
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=epochs,
-            eta_min=lr * 0.01
+        optimizer = create_smart_optimizer(
+            model,
+            lr=lr,
+            optimizer_type=model_config.get('optimizer_type', 'adamw'),
+            weight_decay=model_config.get('weight_decay', 1e-4),
+            poly_weight_decay=model_config.get('poly_weight_decay', 0.0 if uses_stablepoly else 1e-4),
+            beta_weight_decay=model_config.get('beta_weight_decay', 0.0),
+            poly_lr_mult=model_config.get('poly_lr_mult', 1.0),
+            normal_lr_mult=model_config.get('normal_lr_mult', 1.0),
         )
+
+        # 学习率调度器 - 支持 warmup + cosine
+        epochs = model_config.get('epochs', self.default_epochs)
+        scheduler = create_lr_scheduler(optimizer, model_config, lr, epochs)
+        if scheduler is not None:
+            print(
+                f"学习率调度器: {model_config.get('scheduler', 'cosine')} "
+                f"(warmup_epochs={model_config.get('warmup_epochs', 0)}, "
+                f"min_lr_ratio={model_config.get('min_lr_ratio', 0.01)})"
+            )
         
         # 结果保存目录
         # model_result_dir 已在上方解析（支持按模型覆盖）
         
         # 创建训练器
-        # 对于 StablePoly4 模型，使用更严格的梯度裁剪
-        grad_clip_max_norm = model_config.get(
-            'grad_clip_max_norm',
-            0.5 if uses_stablepoly else 1.0
-        )
+        grad_clip_max_norm = model_config.get('grad_clip_max_norm', 1.0)
         
         # 从配置中获取是否保存检查点（默认True）
         save_checkpoints = model_config.get('save_checkpoints', True)
@@ -330,6 +480,17 @@ class MultiGPUManager:
             'grad_clip_max_norm',
             'resume_path',
             'val_force_fp32',
+            'scheduler',
+            'warmup_epochs',
+            'warmup_start_factor',
+            'min_lr_ratio',
+            'optimizer_type',
+            'weight_decay',
+            'poly_weight_decay',
+            'beta_weight_decay',
+            'poly_lr_mult',
+            'normal_lr_mult',
+            'label_smoothing',
         ):
             trainer_kwargs.pop(key, None)
         
@@ -417,52 +578,37 @@ class MultiGPUManager:
                 except Exception as e:
                     results['failed'][model_name] = str(e)
         elif parallel and len(self.available_gpus) > 1:
-            # 并行训练
-            print(f"\n并行训练模式，使用 {len(self.available_gpus)} 个GPU")
-            
-            # 任务队列
-            task_queue = queue.Queue()
-            result_queue = queue.Queue()
-            
-            # 添加任务到队列
+            # 进程级并行训练：避免多线程共享 CUDA context / DataLoader 导致卡住
+            print(f"\n并行训练模式，使用 {len(self.available_gpus)} 个GPU（process workers）")
+
+            try:
+                ctx = mp.get_context('spawn')
+            except RuntimeError:
+                ctx = mp.get_context()
+            task_queue = ctx.Queue()
+            result_queue = ctx.Queue()
+
             for model_config in model_configs:
                 task_queue.put(model_config)
-            
-            # 工作线程函数
-            def worker(gpu_id):
-                while not task_queue.empty():
-                    try:
-                        model_config = task_queue.get(timeout=1)
-                        model_name = model_config['name']
-                        try:
-                            detail = self.train_model(
-                                model_config,
-                                gpu_id,
-                                force,
-                                return_details=return_details
-                            )
-                            result_queue.put(('success', model_name, detail))
-                        except Exception as e:
-                            result_queue.put(('failed', model_name, str(e)))
-                        task_queue.task_done()
-                    except queue.Empty:
-                        break
-            
-            # 创建工作线程
-            threads = []
-            for i, gpu_id in enumerate(self.available_gpus):
-                if i < len(model_configs):
-                    thread = threading.Thread(target=worker, args=(gpu_id,))
-                    thread.start()
-                    threads.append(thread)
-            
-            # 等待所有线程完成
-            for thread in threads:
-                thread.join()
-            
-            # 收集结果
-            while not result_queue.empty():
+
+            worker_count = min(len(self.available_gpus), len(model_configs))
+            for _ in range(worker_count):
+                task_queue.put(None)
+
+            processes = []
+            for i, gpu_id in enumerate(self.available_gpus[:worker_count]):
+                process = ctx.Process(
+                    target=_process_worker,
+                    args=(self._init_kwargs, task_queue, result_queue, gpu_id, force, return_details),
+                    name=f"trainer-gpu-{gpu_id}",
+                )
+                process.start()
+                processes.append(process)
+
+            received = 0
+            while received < len(model_configs):
                 status, model_name, value = result_queue.get()
+                received += 1
                 if status == 'success':
                     if value is not None:
                         if return_details:
@@ -474,7 +620,14 @@ class MultiGPUManager:
                         results['skipped'][model_name] = '已训练'
                 elif status == 'failed':
                     results['failed'][model_name] = value
-        
+
+            for process in processes:
+                process.join(timeout=30)
+                if process.is_alive():
+                    print(f"⚠ worker {process.name} 未正常退出，正在终止")
+                    process.terminate()
+                    process.join(timeout=10)
+
         else:
             # 串行训练
             print(f"\n串行训练模式，使用 GPU {self.available_gpus[0]}")

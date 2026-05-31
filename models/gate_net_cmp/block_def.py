@@ -241,6 +241,8 @@ class StablePoly4(nn.Module):
         # 细粒度进度（用于 step 级平滑过渡）
         self.register_buffer("current_step", torch.tensor(0, dtype=torch.long))
         self.register_buffer("steps_per_epoch", torch.tensor(1, dtype=torch.long))
+        self.poly_start_epoch = float(warmup_epochs)
+        self.poly_transition_epochs = 10.0
 
     def set_epoch(self, epoch):
         """设置当前epoch，用于控制ReLU到多项式的过渡"""
@@ -259,6 +261,18 @@ class StablePoly4(nn.Module):
             warmup_epochs: 新的warmup epoch数量
         """
         self.warmup_epochs = warmup_epochs
+        self.poly_start_epoch = float(warmup_epochs)
+
+    def set_poly_schedule(self, start_epoch=None, transition_epochs=None):
+        """设置多项式分支开始生效的调度。
+
+        start_epoch 为 epoch 小数进度阈值；transition_epochs 为从 warmup
+        激活平滑过渡到多项式激活的持续 epoch 数。
+        """
+        if start_epoch is not None:
+            self.poly_start_epoch = float(start_epoch)
+        if transition_epochs is not None:
+            self.poly_transition_epochs = max(0.0, float(transition_epochs))
 
     def set_warmup_act(self, warmup_act):
         """动态设置warmup阶段的激活函数"""
@@ -380,12 +394,14 @@ class StablePoly4(nn.Module):
         step = float(self.current_step.item())
         steps_per_epoch = float(self.steps_per_epoch.item())
         epoch_progress = epoch + (step / max(1.0, steps_per_epoch))
-        if epoch_progress < self.warmup_epochs:
+        poly_start_epoch = float(getattr(self, "poly_start_epoch", self.warmup_epochs))
+        transition_epochs = float(getattr(self, "poly_transition_epochs", 10.0))
+        if epoch_progress < poly_start_epoch:
             # 预热阶段：使用Swish，但保持poly分支有梯度
             alpha = 0.0
-        elif epoch_progress < self.warmup_epochs + 10:
+        elif transition_epochs > 0 and epoch_progress < poly_start_epoch + transition_epochs:
             # 过渡阶段（10个epoch）：从Swish平滑过渡到多项式
-            progress = (epoch_progress - self.warmup_epochs) / 10.0
+            progress = (epoch_progress - poly_start_epoch) / transition_epochs
             alpha = progress
         else:
             alpha = 1.0

@@ -7,8 +7,6 @@
 import os
 import shutil
 import time
-import shutil
-import time
 try:
     import fcntl
 except ImportError:
@@ -36,6 +34,7 @@ class MemoryFSManager:
         self.source_path = Path(source_path).resolve()
         self.shm_name = shm_name
         self.shm_path = Path(f"/dev/shm/{shm_name}")
+        self.complete_marker = self.shm_path / ".copy_complete"
         self.auto_copy = auto_copy
         
         # 锁文件路径，用于防止并发复制
@@ -139,7 +138,7 @@ class MemoryFSManager:
         target_path = path if path is not None else self.source_path
         total_size = 0
         
-        for dirpath, _, filenames in os.walk(target_path):
+        for dirpath, _, filenames in os.walk(target_path, followlinks=True):
             for filename in filenames:
                 filepath = Path(dirpath) / filename
                 if filepath.is_file():
@@ -180,6 +179,8 @@ class MemoryFSManager:
         """
         if not self.shm_path.exists():
             return False
+        if not self.complete_marker.exists():
+            return False
         
         # 检查关键目录是否存在
         src_subdirs = []
@@ -194,7 +195,7 @@ class MemoryFSManager:
         
         return True
     
-    def copy_to_shm(self, show_progress: bool = True):
+    def copy_to_shm(self, show_progress: bool = False):
         """
         复制数据集到内存文件系统（带进程间锁保护）
         
@@ -207,12 +208,22 @@ class MemoryFSManager:
             return
         
         try:
+            if self.is_copied():
+                print(f"[MemoryFS] 目标已完整存在，跳过复制")
+                return
+
             print(f"\n[MemoryFS] 开始复制数据集到内存文件系统...")
             print(f"[MemoryFS] 源: {self.source_path}")
             print(f"[MemoryFS] 目标: {self.shm_path}")
             
             start_time = time.time()
             
+            # 没有完整标记时认为缓存不可信。中断过的复制会留下部分目录，
+            # 如果直接复用会导致 ImageFolder 只看到部分类别。
+            if self.shm_path.exists():
+                print(f"[MemoryFS] 移除未完成缓存: {self.shm_path}")
+                shutil.rmtree(self.shm_path)
+
             # 创建目标目录
             self.shm_path.mkdir(parents=True, exist_ok=True)
             
@@ -221,12 +232,12 @@ class MemoryFSManager:
                 if src_item.is_dir():
                     dst_item = self.shm_path / src_item.name
                     
-                    # 如果目标已存在，跳过
-                    if dst_item.exists():
-                        print(f"[MemoryFS] 目标已存在: {src_item.name}，跳过")
-                        continue
-                    
                     self._copy_dir(src_item, dst_item, show_progress)
+
+            self.complete_marker.write_text(
+                f"source={self.source_path}\ncompleted_at={time.time():.0f}\n",
+                encoding="utf-8",
+            )
             
             elapsed = time.time() - start_time
             print(f"[MemoryFS] ✓ 复制完成! 耗时: {elapsed:.2f} 秒")
@@ -249,22 +260,24 @@ class MemoryFSManager:
         print(f"[MemoryFS] 复制 {src.name}...")
         
         # 统计文件数量
-        file_count = sum(1 for _ in src.rglob('*') if _.is_file())
+        file_count = sum(
+            len(filenames)
+            for _, _, filenames in os.walk(src, followlinks=True)
+        )
         print(f"[MemoryFS]   文件数量: {file_count:,}")
         
         # 执行复制
         if show_progress:
-            # 使用 rsync 显示进度（如果可用）
+            # 使用 rsync 输出简短统计，避免长任务日志被逐文件/逐进度刷新撑大。
             try:
                 import subprocess
                 result = subprocess.run([
-                    'rsync', '-av', '--progress',
-                    str(src) + '/', str(dst)
+                    'rsync', '-a', '--info=stats1', '--human-readable',
+                    str(src) + '/', str(dst) + '/'
                 ], check=True, capture_output=True, text=True)
-                
-                # 显示最后几行进度信息
-                lines = result.stderr.split('\n')
-                for line in lines[-5:]:
+
+                lines = (result.stdout + "\n" + result.stderr).split('\n')
+                for line in lines[-8:]:
                     if line:
                         print(f"[MemoryFS]   {line}")
             except (FileNotFoundError, subprocess.CalledProcessError):
@@ -306,7 +319,7 @@ class MemoryFSManager:
         
         # 3. 自动复制（如果启用且未复制）
         if self.auto_copy and not self.is_copied():
-            self.copy_to_shm()
+            self.copy_to_shm(show_progress=False)
         elif not self.is_copied():
             print(f"[MemoryFS] 使用原始路径: auto_copy=False")
             return self.source_path

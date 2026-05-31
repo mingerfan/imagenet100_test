@@ -206,6 +206,7 @@ def create_dataloaders(
     batch_size=64,
     num_workers=8,
     pin_memory=True,
+    prefetch_factor=4,
     use_memory_fs=False,
     dataset="imagenet100",
     download=False,
@@ -221,6 +222,7 @@ def create_dataloaders(
         batch_size: 批次大小
         num_workers: 数据加载的worker数量
         pin_memory: 是否使用内存固定（GPU训练时设为True）
+        prefetch_factor: 每个worker预取batch数（num_workers > 0时有效）
         use_memory_fs: 是否使用内存文件系统（推荐，避免并发问题）
         dataset: 数据集类型 (imagenet100/imagenet1k/cifar10/cifar100)
         download: 是否允许下载数据集（仅 CIFAR 有效）
@@ -336,6 +338,8 @@ def create_dataloaders(
     print("\n[3] 创建DataLoader...")
     print(f"  批次大小: {batch_size}")
     print(f"  Worker数量: {num_workers}")
+    if num_workers > 0:
+        print(f"  Worker预取: {prefetch_factor}")
     print(f"  内存固定: {pin_memory}")
     
     generator = None
@@ -346,6 +350,10 @@ def create_dataloaders(
         worker_init_fn = _seed_worker
 
     persistent_workers = num_workers > 0
+    loader_kwargs = {}
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -355,7 +363,8 @@ def create_dataloaders(
         persistent_workers=persistent_workers,
         drop_last=True,
         worker_init_fn=worker_init_fn,
-        generator=generator
+        generator=generator,
+        **loader_kwargs
     )
 
     val_loader = DataLoader(
@@ -366,7 +375,8 @@ def create_dataloaders(
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         worker_init_fn=worker_init_fn,
-        generator=generator
+        generator=generator,
+        **loader_kwargs
     )
     
     print(f"\n  训练批次数: {len(train_loader)}")

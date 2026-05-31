@@ -1,0 +1,33 @@
+# SmartPAF-lite smoke training config.
+# Runs a short CIFAR-10 pass to verify progressive StablePoly4 scheduling and AT.
+
+global:
+  num_classes: 10
+  default_epochs: 2
+  default_batch_size: 32
+  default_learning_rate: 0.0005
+  default_num_workers: 0
+  default_save_freq: 0
+
+models:
+  - name: "smartpaf-lite-resnet-basic-stablepoly4-cifar10-smoke"
+    class: "resnet-basic-stablepoly4-layer1block1"
+    params:
+      num_classes: 10
+      pretrained: false
+    epochs: 2
+    batch_size: 32
+    learning_rate: 0.0005
+    num_workers: 0
+    save_freq: 0
+    use_amp: false
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.0
+      smartpaf_progressive: true
+      smartpaf_start_epoch: 1
+      smartpaf_group_epochs: 1
+      smartpaf_transition_epochs: 1
+      smartpaf_alternate_training: true
+      smartpaf_at_cycle_epochs: 1
+      smartpaf_freeze_bn_during_poly_phase: true

@@ -1,0 +1,55 @@
+# Stable SmartPAF-lite training config for ImageNet-100.
+# Goal: prioritize stability before enabling CT/DS/SS/SWA ablations.
+
+global:
+  num_classes: 100
+  default_epochs: 60
+  default_batch_size: 64
+  default_learning_rate: 0.0005
+  default_num_workers: 8
+  default_save_freq: 5
+
+models:
+  - name: "smartpaf-stable-resnet-basic-stablepoly4-layer1block1"
+    class: "resnet-basic-stablepoly4-layer1block1"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 60
+    batch_size: 64
+    learning_rate: 0.0005
+    num_workers: 8
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 5
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    beta_weight_decay: 0.0
+    poly_lr_mult: 1.0
+    normal_lr_mult: 1.0
+    scheduler: cosine
+    warmup_epochs: 5
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      eps_reg_lambda: 0.0
+      poly4_range_lambda: 0.00001
+      poly4_deriv_lambda: 0.00001
+      poly4_range_r: 2.0
+      poly4_deriv_L: 3.0
+      poly4_warmup_ratio: 0.35
+      smartpaf_progressive: true
+      smartpaf_start_epoch: null
+      smartpaf_group_epochs: auto
+      smartpaf_transition_epochs: 2
+      smartpaf_alternate_training: true
+      smartpaf_at_cycle_epochs: 1
+      smartpaf_freeze_bn_during_poly_phase: true
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: warn

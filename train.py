@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import torch
 from trainers import MultiGPUManager
 from utils import load_config, get_model_configs, get_json_model_configs, set_random_seed
 from models import MODEL_REGISTRY
@@ -60,10 +61,15 @@ def parse_args():
         '--gpus',
         type=int,
         nargs='+',
-        default=[0, 1, 2, 3],
-        help='使用的GPU设备ID列表，例如: --gpus 0 1 2 3'
+        default=[1, 2, 3],
+        help='使用的GPU设备ID列表，默认避开GPU 0，例如: --gpus 1 2 3'
     )
-    
+    parser.add_argument(
+        '--allow_gpu0',
+        action='store_true',
+        help='允许使用physical GPU 0（不推荐：该卡存在memory/ECC风险）'
+    )
+
     # 训练选项
     parser.add_argument(
         '--force',
@@ -91,7 +97,7 @@ def parse_args():
     parser.add_argument(
         '--use_amp',
         action='store_true',
-        default=True,
+        default=None,
         help='Enable automatic mixed precision'
     )
     parser.add_argument(
@@ -104,7 +110,7 @@ def parse_args():
         '--val_fp32',
         dest='val_force_fp32',
         action='store_true',
-        default=True,
+        default=None,
         help='Force FP32 in validation (disable autocast)'
     )
     parser.add_argument(
@@ -192,6 +198,8 @@ def main():
     """主函数"""
     args = parse_args()
     set_random_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
 
     dataset_name = normalize_dataset_name(args.dataset)
     dataset_info = get_dataset_info(dataset_name)
@@ -199,11 +207,26 @@ def main():
     print("=" * 60)
     print("多模型训练系统")
     print("=" * 60)
-    
+
+    requested_gpus = list(args.gpus or [])
+    if 0 in requested_gpus and not args.allow_gpu0:
+        args.gpus = [gpu for gpu in requested_gpus if gpu != 0]
+        print("⚠ 已过滤 physical GPU 0：该卡存在 memory/ECC 风险；如确需使用请加 --allow_gpu0")
+        if not args.gpus:
+            print("❌ 过滤 GPU0 后没有剩余 GPU。请使用 --gpus 1 2 3 或显式 --allow_gpu0。")
+            sys.exit(1)
+    print(f"请求GPU: {requested_gpus}")
+    print(f"实际GPU: {args.gpus}")
+    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', '<未设置>')}")
+
     # 设置默认数据路径
     if args.train_dir is None:
         if dataset_name == 'imagenet100':
-            args.train_dir = '/home/xuming/Documents/dataset/ImageNet_100/train'
+            candidates = [
+                '/home/xuming/Documents/dataset/imagenet_100/train',
+                '/home/xuming/Documents/dataset/ImageNet_100/train',
+            ]
+            args.train_dir = next((path for path in candidates if os.path.exists(path)), candidates[0])
         elif dataset_name in ('cifar10', 'cifar100'):
             args.train_dir = './data'
         else:
@@ -212,7 +235,11 @@ def main():
 
     if args.val_dir is None:
         if dataset_name == 'imagenet100':
-            args.val_dir = '/home/xuming/Documents/dataset/ImageNet_100/val'
+            candidates = [
+                '/home/xuming/Documents/dataset/imagenet_100/val',
+                '/home/xuming/Documents/dataset/ImageNet_100/val',
+            ]
+            args.val_dir = next((path for path in candidates if os.path.exists(path)), candidates[0])
         elif dataset_name in ('cifar10', 'cifar100'):
             args.val_dir = args.train_dir
         else:
@@ -287,8 +314,10 @@ def main():
         model_config['save_checkpoints'] = args.save_checkpoints
         if args.save_freq is not None:
             model_config['save_freq'] = args.save_freq
-        model_config['use_amp'] = args.use_amp
-        model_config['val_force_fp32'] = args.val_force_fp32
+        if args.use_amp is not None:
+            model_config['use_amp'] = args.use_amp
+        if args.val_force_fp32 is not None:
+            model_config['val_force_fp32'] = args.val_force_fp32
         if args.resume:
             model_config['resume'] = True
         if args.resume_mode:
@@ -306,6 +335,7 @@ def main():
         val_dir=args.val_dir,
         result_dir=args.result_dir,
         gpus=args.gpus,
+        excluded_gpus=[] if args.allow_gpu0 else [0],
         num_classes=args.num_classes,
         default_num_workers=args.num_workers,
         use_memory_fs=args.use_memory_fs,
@@ -347,9 +377,9 @@ def main():
     
     print(f"\n结果保存在: {args.result_dir}")
     print("=" * 60)
+    if failed_count > 0:
+        sys.exit(1)
 
 
 if __name__ == '__main__':
     main()
-
-

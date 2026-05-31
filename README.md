@@ -104,10 +104,10 @@ python train.py
 
 ### 2. 指定GPU
 
-使用特定的GPU：
+使用特定的GPU。项目默认使用 GPU 1/2/3，避开 GPU 0；GPU 0 长时间使用后更容易出现 ECC 问题，需要重置时不参与默认训练。
 
 ```bash
-python train.py --gpus 0 1
+python train.py --gpus 1 2 3
 ```
 
 ### 3. 训练特定模型
@@ -150,7 +150,7 @@ python train.py --config my_config.yaml
 | `--train_dir` | 训练集目录 | `/home/xuming/Documents/dataset/ImageNet_100/train` |
 | `--val_dir` | 验证集目录 | `/home/xuming/Documents/dataset/ImageNet_100/val` |
 | `--result_dir` | 结果保存目录 | `./results` |
-| `--gpus` | 使用的GPU列表 | `[0, 1, 2, 3]` |
+| `--gpus` | 使用的GPU列表，默认避开GPU 0 | `[1, 2, 3]` |
 | `--force` | 强制重新训练 | `False` |
 | `--no_parallel` | 禁用并行训练 | `False` |
 | `--no_cache` | 不使用内存缓存 | `False` |
