@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.optim.swa_utils import AveragedModel
 import time
 import os
 import csv
@@ -75,6 +76,10 @@ class Trainer:
         bn_recalibrate_after_training=False,
         bn_recalibrate_batches=0,
         bn_recalibrate_use_best=True,
+        swa_enabled=False,
+        swa_start_epoch=None,
+        swa_bn_update=True,
+        swa_bn_batches=0,
         collapse_guard_enabled=False,
         collapse_guard_drop=10.0,
         collapse_guard_patience=1,
@@ -130,6 +135,10 @@ class Trainer:
             bn_recalibrate_after_training: 是否在训练结束后重算 BatchNorm running stats
             bn_recalibrate_batches: BN recalibration 使用的 train batch 数；0 表示全量
             bn_recalibrate_use_best: recalibration 前是否加载 best_model.pth
+            swa_enabled: 是否启用 Stochastic Weight Averaging
+            swa_start_epoch: SWA 开始平均的 epoch；None 表示最后 25% epoch
+            swa_bn_update: SWA 评估前是否重算 BatchNorm running stats
+            swa_bn_batches: SWA BN 更新使用的 train batch 数；0 表示全量
             collapse_guard_enabled: 是否检测验证精度断崖式下降
             collapse_guard_drop: 相对上一轮或历史最佳下降超过多少百分点触发 guard
             collapse_guard_patience: 连续触发多少次后执行 action
@@ -189,6 +198,13 @@ class Trainer:
         self.bn_recalibrate_after_training = bool(bn_recalibrate_after_training)
         self.bn_recalibrate_batches = max(0, int(bn_recalibrate_batches))
         self.bn_recalibrate_use_best = bool(bn_recalibrate_use_best)
+        self.swa_enabled = bool(swa_enabled)
+        if swa_start_epoch is None:
+            self.swa_start_epoch = max(1, int(self.epochs * 0.75))
+        else:
+            self.swa_start_epoch = max(1, int(swa_start_epoch))
+        self.swa_bn_update = bool(swa_bn_update)
+        self.swa_bn_batches = max(0, int(swa_bn_batches))
         self.collapse_guard_enabled = bool(collapse_guard_enabled)
         self.collapse_guard_drop = float(collapse_guard_drop)
         self.collapse_guard_patience = max(1, int(collapse_guard_patience))
@@ -202,6 +218,8 @@ class Trainer:
         self._smartpaf_last_phase = None
         self._smartpaf_first_poly_epoch = None
         self._smartpaf_at_start_epoch = None
+        self._swa_model = None
+        self._swa_updates = 0
         self._nan_debug_running = False
         self._nan_hooks = []
         self._nan_triggered = False
@@ -824,7 +842,7 @@ class Trainer:
                 # 调用 set_epoch 方法
                 module.set_epoch(epoch)
 
-    def _set_epoch_progress_for_model(self, epoch, step_idx, steps_per_epoch):
+    def _set_epoch_progress_for_model(self, epoch, step_idx, steps_per_epoch, model=None):
         """
         递归地为模型中所有需要 epoch 进度信息的模块设置细粒度进度
 
@@ -833,7 +851,8 @@ class Trainer:
             step_idx: 当前 batch 索引（0-based）
             steps_per_epoch: 每个 epoch 的 batch 数
         """
-        for module in self.model.modules():
+        target_model = model if model is not None else self.model
+        for module in target_model.modules():
             if hasattr(module, 'set_epoch_progress') and callable(module.set_epoch_progress):
                 module.set_epoch_progress(epoch, step_idx, steps_per_epoch)
 
@@ -1322,13 +1341,72 @@ class Trainer:
         self.history['smartpaf_phase'].append(smartpaf_phase)
         self.history['collapse_guard_triggered'].append(int(collapse_guard_triggered))
 
-    def _has_batchnorm_modules(self):
-        return any(isinstance(module, nn.modules.batchnorm._BatchNorm) for module in self.model.modules())
+    def _next_history_epoch(self):
+        numeric_epochs = []
+        for epoch in self.history.get('epoch', []):
+            try:
+                numeric_epochs.append(int(epoch))
+            except (TypeError, ValueError):
+                continue
+        return (max(numeric_epochs) + 1) if numeric_epochs else 1
+
+    def _has_batchnorm_modules(self, model=None):
+        target_model = model if model is not None else self.model
+        return any(isinstance(module, nn.modules.batchnorm._BatchNorm) for module in target_model.modules())
+
+    def _recalibrate_model_batchnorm(self, model, batches, epoch_for_progress, label):
+        if not self._has_batchnorm_modules(model):
+            print(f"{label}: skipped, no BatchNorm modules")
+            return 0, 0.0
+
+        was_training = model.training
+        bn_modules = [
+            module for module in model.modules()
+            if isinstance(module, nn.modules.batchnorm._BatchNorm)
+        ]
+        original_momenta = {module: module.momentum for module in bn_modules}
+
+        for module in bn_modules:
+            module.reset_running_stats()
+            module.momentum = None
+
+        model.train()
+        start_time = time.time()
+        valid_batches = 0
+        limit = max(0, int(batches))
+        steps_per_epoch = min(len(self.train_loader), limit) if limit else len(self.train_loader)
+
+        with torch.no_grad():
+            pbar = self._progress_bar(self.train_loader, desc=label)
+            for batch_idx, (images, _) in enumerate(pbar):
+                if limit and batch_idx >= limit:
+                    break
+                images = images.to(self.device, non_blocking=True)
+                if self.val_force_fp32 and images.dtype != torch.float32:
+                    images = images.float()
+                self._set_epoch_progress_for_model(epoch_for_progress, batch_idx, steps_per_epoch, model=model)
+                model(images)
+                valid_batches += 1
+                pbar.set_postfix({'batches': valid_batches})
+
+        for module, momentum in original_momenta.items():
+            module.momentum = momentum
+        model.train(was_training)
+
+        return valid_batches, time.time() - start_time
+
+    def _validate_with_model(self, model, epoch):
+        original_model = self.model
+        self.model = model
+        try:
+            return self.validate(epoch=epoch)
+        finally:
+            self.model = original_model
 
     def _run_bn_recalibration(self):
         if not self.bn_recalibrate_after_training:
             return None
-        if not self._has_batchnorm_modules():
+        if not self._has_batchnorm_modules(self.model):
             print("BN recalibration: skipped, no BatchNorm modules")
             return None
 
@@ -1346,41 +1424,12 @@ class Trainer:
             else:
                 print(f"  - best model not found at {best_path}; using current model")
 
-        was_training = self.model.training
-        bn_modules = [
-            module for module in self.model.modules()
-            if isinstance(module, nn.modules.batchnorm._BatchNorm)
-        ]
-        original_momenta = {module: module.momentum for module in bn_modules}
-
-        for module in bn_modules:
-            module.reset_running_stats()
-            module.momentum = None
-
-        self.model.train()
-        start_time = time.time()
-        valid_batches = 0
-        limit = self.bn_recalibrate_batches
-        steps_per_epoch = min(len(self.train_loader), limit) if limit else len(self.train_loader)
-
-        with torch.no_grad():
-            pbar = self._progress_bar(self.train_loader, desc='BN recalibration')
-            for batch_idx, (images, _) in enumerate(pbar):
-                if limit and batch_idx >= limit:
-                    break
-                images = images.to(self.device, non_blocking=True)
-                if self.val_force_fp32 and images.dtype != torch.float32:
-                    images = images.float()
-                self._set_epoch_progress_for_model(self.epochs, batch_idx, steps_per_epoch)
-                self.model(images)
-                valid_batches += 1
-                pbar.set_postfix({'batches': valid_batches})
-
-        for module, momentum in original_momenta.items():
-            module.momentum = momentum
-        self.model.train(was_training)
-
-        recal_time = time.time() - start_time
+        valid_batches, recal_time = self._recalibrate_model_batchnorm(
+            self.model,
+            batches=self.bn_recalibrate_batches,
+            epoch_for_progress=self.epochs,
+            label='BN recalibration',
+        )
         self._last_train_stats = {
             'valid_batches': valid_batches,
             'skipped_batches': 0,
@@ -1391,7 +1440,7 @@ class Trainer:
         val_loss, val_acc = self.validate(epoch='bn_recal')
         current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0
         self._append_history_row(
-            epoch=self.epochs + 1,
+            epoch=self._next_history_epoch(),
             train_loss=0.0,
             train_acc=0.0,
             val_loss=val_loss,
@@ -1406,12 +1455,79 @@ class Trainer:
             is_new_best = val_acc > self.best_acc
             if is_new_best:
                 self.best_acc = val_acc
-                self.save_checkpoint(self.epochs + 1, is_best=True)
-            self.save_checkpoint(self.epochs + 1, is_best=False, filename='bn_recalibrated_model.pth')
+                self.save_checkpoint(self.history['epoch'][-1], is_best=True)
+            self.save_checkpoint(self.history['epoch'][-1], is_best=False, filename='bn_recalibrated_model.pth')
 
         self.save_history()
         print(f"  - BN recalibrated validation: Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
         return {'val_loss': val_loss, 'val_acc': val_acc, 'batches': valid_batches}
+
+    def _maybe_update_swa_model(self, epoch):
+        if not self.swa_enabled or epoch < self.swa_start_epoch:
+            return
+        if self._swa_model is None:
+            self._swa_model = AveragedModel(self.model).to(self.device)
+            print(f"✓ SWA started at epoch {epoch}")
+        self._swa_model.update_parameters(self.model)
+        self._swa_updates += 1
+        print(f"  - SWA update count: {self._swa_updates}")
+
+    def _run_swa_evaluation(self):
+        if not self.swa_enabled:
+            return None
+        if self._swa_model is None or self._swa_updates == 0:
+            print("SWA: skipped, no averaged checkpoints")
+            return None
+
+        swa_model = self._swa_model.module.to(self.device)
+        print("✓ SWA evaluation:")
+        print(f"  - updates={self._swa_updates}, start_epoch={self.swa_start_epoch}")
+
+        valid_batches = 0
+        recal_time = 0.0
+        if self.swa_bn_update:
+            print(f"  - BN update batches={self.swa_bn_batches or 'all'}")
+            valid_batches, recal_time = self._recalibrate_model_batchnorm(
+                swa_model,
+                batches=self.swa_bn_batches,
+                epoch_for_progress=self.epochs,
+                label='SWA BN update',
+            )
+        self._last_train_stats = {
+            'valid_batches': valid_batches,
+            'skipped_batches': 0,
+            'nonfinite_batches': 0,
+        }
+
+        val_loss, val_acc = self._validate_with_model(swa_model, epoch='swa')
+        current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0
+        self._append_history_row(
+            epoch=self._next_history_epoch(),
+            train_loss=0.0,
+            train_acc=0.0,
+            val_loss=val_loss,
+            val_acc=val_acc,
+            learning_rate=current_lr,
+            epoch_time=recal_time,
+            smartpaf_phase='swa',
+            collapse_guard_triggered=0,
+        )
+
+        original_model = self.model
+        self.model = swa_model
+        try:
+            if self.save_checkpoints:
+                is_new_best = val_acc > self.best_acc
+                if is_new_best:
+                    self.best_acc = val_acc
+                    self.save_checkpoint(self.history['epoch'][-1], is_best=True)
+                self.save_checkpoint(self.history['epoch'][-1], is_best=False, filename='swa_model.pth')
+        finally:
+            self.model = original_model
+
+        self.save_history()
+        print(f"  - SWA validation: Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
+        return {'val_loss': val_loss, 'val_acc': val_acc, 'updates': self._swa_updates}
     
     def _run_collapse_guard(self, epoch, val_acc):
         if not self.collapse_guard_enabled:
@@ -1527,6 +1643,8 @@ class Trainer:
         print(f"混合精度训练: {self.use_amp}")
         print(f"验证强制FP32: {self.val_force_fp32}")
         print(f"结果保存目录: {self.result_dir}")
+        if self.swa_enabled:
+            print(f"SWA: enabled (start_epoch={self.swa_start_epoch}, bn_update={self.swa_bn_update})")
         self._ensure_history_fields()
 
         if self.start_epoch > 1:
@@ -1615,6 +1733,9 @@ class Trainer:
                 if self.save_checkpoints and self.save_freq and self.save_freq > 0:
                     if epoch % self.save_freq == 0 and not is_new_best:
                         self.save_checkpoint(epoch, is_best=False)
+
+                if collapse_error is None:
+                    self._maybe_update_swa_model(epoch)
                 
                 # 保存历史
                 self.save_history()
@@ -1626,6 +1747,7 @@ class Trainer:
             if self._nan_debug_active:
                 self._remove_nan_hooks()
 
+        self._run_swa_evaluation()
         self._run_bn_recalibration()
         
         # 训练完成

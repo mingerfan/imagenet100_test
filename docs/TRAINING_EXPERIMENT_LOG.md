@@ -528,3 +528,108 @@ this CT+SS proxy. The recalibrated row was 0.22 percentage points below the
 pre-recal best. Keep BN recalibration default-off for now; it is most likely to
 be useful after SWA or other weight-averaging techniques, where BN statistics
 are known to become stale.
+
+## 2026-06-01 SWA Attempt
+
+Implemented default-off Stochastic Weight Averaging support:
+
+- `swa_enabled`
+- `swa_start_epoch`
+- `swa_bn_update`
+- `swa_bn_batches`
+
+When enabled, the trainer keeps an `AveragedModel` from `swa_start_epoch`
+through the end of training. After normal training, it optionally recalibrates
+BatchNorm running statistics on the averaged model, validates it, saves
+`swa_model.pth`, and appends a `smartpaf_phase=swa` row to `train_history.csv`.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import shutil
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from trainers.base_trainer import Trainer
+
+class TinyBN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 4, 3, padding=1, bias=False),
+            nn.BatchNorm2d(4),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(4, 2),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+path = '/tmp/smartpaf_swa_smoke'
+shutil.rmtree(path, ignore_errors=True)
+model = TinyBN()
+x = torch.randn(16, 3, 8, 8)
+y = torch.randint(0, 2, (16,))
+loader = DataLoader(TensorDataset(x, y), batch_size=4)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
+    device=torch.device('cpu'),
+    result_dir=path,
+    epochs=2,
+    save_checkpoints=False,
+    swa_enabled=True,
+    swa_start_epoch=1,
+    swa_bn_update=True,
+    swa_bn_batches=2,
+)
+trainer._maybe_update_swa_model(1)
+trainer._maybe_update_swa_model(2)
+result = trainer._run_swa_evaluation()
+assert result is not None
+assert result['updates'] == 2
+assert trainer.history['smartpaf_phase'][-1] == 'swa'
+assert trainer.history['train_valid_batches'][-1] == 2
+PY
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_swa_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_swa_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_swa_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-swa-b256` | 17 | 47.66 | 44.68 | 2.98 | 0 | 0 | 0 | PASS |
+
+SWA details:
+
+| SWA start | Updates | BN update batches | Pre-SWA epoch 16 | SWA row | Delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 12 | 5 | 128 | 47.66 | 44.68 | -2.98 |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | PASS |
+| `imagenet100-96-pa-ct-ss-swa-b256` | 17 | 47.66 | 44.68 | PASS |
+| `imagenet100-96-pa-ct-ss-bnrecal-b256` | 17 | 47.54 | 47.32 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | PASS |
+
+Conclusion: SWA is implemented and stable, but this simple late-epoch averaging
+does not improve the proxy. The averaged model is 2.98 percentage points below
+the normal epoch-16 model even after BN update. Keep SWA default-off. A more
+faithful SMART-PAF scheduler may still use SWA as a short recovery/acceptance
+candidate inside per-layer training groups, but global late-epoch SWA is not a
+current default.
