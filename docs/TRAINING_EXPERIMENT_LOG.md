@@ -367,3 +367,66 @@ Conclusion: Static scale is the best scale-control variant so far. It is stable
 and significantly better than dynamic scale, but still trails CT-only by 1.52
 percentage points on this proxy. Keep SS experimental and prefer CT-only as the
 current default unless deployment requires fixed polynomial input scaling.
+
+## 2026-06-01 Delayed Alternate Training Attempts
+
+Implemented a default-compatible AT scheduling option:
+
+- `smartpaf_at_start_epoch`
+- `smartpaf_at_start_epoch: auto` resolves to the first PA module start epoch
+- Before that start epoch, AT keeps all parameters trainable instead of
+  alternating between weights/poly phases while the model is still in warmup
+
+Rationale: the previous CT+AT run alternated from epoch 1 even though no
+polynomial branch contributed to the forward path until PA began. The delayed
+schedule is closer to the SMART-PAF flow where AT is applied inside each
+replacement/fine-tuning group, not during the initial warmup-only phase.
+
+Validation command:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+```
+
+Proxy commands:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_delayed_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_delayed_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_delayed_fast.status' < /dev/null &
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_delayed_poly01_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_delayed_poly01_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_delayed_poly01_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Poly LR mult | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-delayed-b256` | 0.5 | 10 | 31.28 | 20.88 | 10.40 | 0 | 0 | 1 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-delayed-poly01-b256` | 0.1 | 8 | 31.94 | 21.54 | 10.40 | 0 | 0 | 1 | COLLAPSE |
+
+Observations:
+
+- Delayed AT scheduling worked as intended: epochs before PA used phase `all`,
+  then switched to `weights -> poly -> ...` starting at epoch 7.
+- Both failures happened in `poly` phase, with no non-finite batches and no
+  skipped optimizer steps.
+- The polynomial input and derivative diagnostics stayed bounded:
+  `|x_poly| max <= 0.7667` and `|f'| max <= 0.5053`.
+- Reducing `poly_lr_mult` from 0.5 to 0.1 did not remove the first poly-phase
+  validation drop; it only moved the failure from epoch 10 to epoch 8.
+
+Comparison:
+
+| Model | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | PASS |
+| `imagenet100-96-pa-ct-ss-at-delayed-poly01-b256` | 8 | 31.94 | 21.54 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-delayed-b256` | 10 | 31.28 | 20.88 | COLLAPSE |
+
+Conclusion: Delaying AT avoids wasting early warmup epochs, but AT is still not
+stable in this implementation. The collapse is not caused by NaN/Inf or large
+polynomial input scale; it is caused by the poly-only phase degrading validation
+accuracy before the next weights phase can recover. Keep AT experimental. The
+next AT-related change should move closer to the paper scheduler: per-layer
+training groups with acceptance/recovery logic, SWA, and BN recalibration,
+rather than global epoch-level alternation.

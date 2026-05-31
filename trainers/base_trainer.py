@@ -60,6 +60,7 @@ class Trainer:
         smartpaf_transition_epochs=2,
         smartpaf_alternate_training=False,
         smartpaf_at_cycle_epochs=1,
+        smartpaf_at_start_epoch=None,
         smartpaf_freeze_bn_during_poly_phase=True,
         smartpaf_ct_init=False,
         smartpaf_ct_batches=8,
@@ -111,6 +112,7 @@ class Trainer:
             smartpaf_transition_epochs: 单个 StablePoly4 从 warmup 激活过渡到多项式的持续 epoch
             smartpaf_alternate_training: 是否按 epoch 交替训练普通权重和多项式系数
             smartpaf_at_cycle_epochs: AT 每个阶段持续的 epoch 数
+            smartpaf_at_start_epoch: AT 起始 epoch；None 保持旧行为，auto 表示从第一个 PA 模块开始
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
             smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
             smartpaf_ct_batches: CT 采样 train batch 数
@@ -166,6 +168,7 @@ class Trainer:
         self.smartpaf_transition_epochs = max(0.0, float(smartpaf_transition_epochs))
         self.smartpaf_alternate_training = bool(smartpaf_alternate_training)
         self.smartpaf_at_cycle_epochs = max(1, int(smartpaf_at_cycle_epochs))
+        self.smartpaf_at_start_epoch = smartpaf_at_start_epoch
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
         self.smartpaf_ct_init = bool(smartpaf_ct_init)
         self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
@@ -188,6 +191,8 @@ class Trainer:
         self._smartpaf_poly_modules = []
         self._smartpaf_poly_param_ids = set()
         self._smartpaf_last_phase = None
+        self._smartpaf_first_poly_epoch = None
+        self._smartpaf_at_start_epoch = None
         self._nan_debug_running = False
         self._nan_hooks = []
         self._nan_triggered = False
@@ -356,7 +361,25 @@ class Trainer:
     def _current_smartpaf_phase(self, epoch):
         if not self.smartpaf_alternate_training or not self._smartpaf_poly_param_ids:
             return 'disabled'
+        if self._smartpaf_at_start_epoch is not None and float(epoch) < self._smartpaf_at_start_epoch:
+            return 'all'
         return 'poly' if self._is_smartpaf_poly_phase(epoch) else 'weights'
+
+    def _resolve_smartpaf_at_start_epoch(self):
+        if self.smartpaf_at_start_epoch is None:
+            return None
+
+        if isinstance(self.smartpaf_at_start_epoch, str):
+            key = self.smartpaf_at_start_epoch.strip().lower()
+            if key in {'', 'none', 'false'}:
+                return None
+            if key in {'auto', 'poly_start', 'pa_start'}:
+                if self._smartpaf_first_poly_epoch is not None:
+                    return float(self._smartpaf_first_poly_epoch)
+                return float(getattr(self, "poly4_warmup_epochs", 0))
+            return float(key)
+
+        return float(self.smartpaf_at_start_epoch)
 
     def _zero_all_gradients(self):
         if self.optimizer is not None:
@@ -448,6 +471,7 @@ class Trainer:
             if start_epoch is None:
                 start_epoch = getattr(self, "poly4_warmup_epochs", 0)
             start_epoch = float(start_epoch)
+            self._smartpaf_first_poly_epoch = start_epoch
 
             if isinstance(self.smartpaf_group_epochs, str) and self.smartpaf_group_epochs.lower() == 'auto':
                 available = max(1.0, self.epochs - start_epoch - max(0.0, self.smartpaf_transition_epochs))
@@ -474,10 +498,15 @@ class Trainer:
                     print(f"    {idx + 1}. {name}: start={module_start:g}")
             if len(self._smartpaf_poly_modules) > 8:
                 print(f"    ... 其余 {len(self._smartpaf_poly_modules) - 8} 个模块按相同间隔继续")
+        else:
+            self._smartpaf_first_poly_epoch = float(getattr(self, "poly4_warmup_epochs", 0))
 
         if self.smartpaf_alternate_training:
+            self._smartpaf_at_start_epoch = self._resolve_smartpaf_at_start_epoch()
             print("✓ SmartPAF-lite AT配置:")
             print(f"  - 每阶段epoch: {self.smartpaf_at_cycle_epochs}")
+            if self._smartpaf_at_start_epoch is not None:
+                print(f"  - 起始epoch: {self._smartpaf_at_start_epoch:g}")
             print("  - 阶段顺序: 普通权重 -> 多项式系数 -> ...")
 
     def _ct_poly_eval(self, module, x):
@@ -667,7 +696,13 @@ class Trainer:
     def _is_smartpaf_poly_phase(self, epoch):
         if not self.smartpaf_alternate_training:
             return False
-        phase_idx = (max(1, int(epoch)) - 1) // self.smartpaf_at_cycle_epochs
+        if self._smartpaf_at_start_epoch is not None:
+            if float(epoch) < self._smartpaf_at_start_epoch:
+                return False
+            epoch_offset = max(0.0, float(epoch) - self._smartpaf_at_start_epoch)
+        else:
+            epoch_offset = max(0.0, float(max(1, int(epoch)) - 1))
+        phase_idx = int(epoch_offset // self.smartpaf_at_cycle_epochs)
         return phase_idx % 2 == 1
 
     def _set_batchnorm_eval(self):
@@ -678,6 +713,14 @@ class Trainer:
     def _apply_smartpaf_training_mode(self, epoch):
         """按 AT 阶段切换参数 requires_grad。"""
         if not self.smartpaf_alternate_training or not self._smartpaf_poly_param_ids:
+            return
+
+        if self._smartpaf_at_start_epoch is not None and float(epoch) < self._smartpaf_at_start_epoch:
+            if self._smartpaf_last_phase != "all":
+                print("SmartPAF-lite AT阶段: all")
+                self._smartpaf_last_phase = "all"
+                self._restore_all_trainable()
+                self._zero_all_gradients()
             return
 
         train_poly = self._is_smartpaf_poly_phase(epoch)
