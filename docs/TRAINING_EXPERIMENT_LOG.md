@@ -1463,3 +1463,94 @@ single-epoch alternation. The consecutive poly epochs are repeatedly rejected
 and consume training budget before weights can recover. This confirms that
 longer cycles alone are not the paper's training-group method; the missing
 piece is local group best/SWA acceptance and early stopping inside each group.
+
+## 2026-06-01 AT 2-Epoch Group Skip Attempt
+
+Added default-off `smartpaf_at_skip_rejected_poly_group`. When a poly epoch is
+rejected inside a multi-epoch AT phase group, the remaining epochs in that same
+scheduled poly group are switched to weights. This keeps the existing global AT
+proxy but avoids spending a second epoch on a poly-only phase that has already
+failed the accept check.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ss_at_group2_skip_fast.yaml') as f:
+    data = yaml.safe_load(f)
+kw = data['models'][0]['trainer_kwargs']
+assert kw['smartpaf_at_cycle_epochs'] == 2
+assert kw['smartpaf_at_skip_rejected_poly_group'] is True
+print(data['models'][0]['name'])
+PY
+.venv/bin/python - <<'PY'
+from trainers.base_trainer import Trainer
+t = Trainer.__new__(Trainer)
+t.smartpaf_alternate_training = True
+t.smartpaf_at_initial_phase = 'poly'
+t.smartpaf_at_cycle_epochs = 2
+t._smartpaf_at_start_epoch = 5
+t.smartpaf_at_skip_rejected_poly_group = True
+t._smartpaf_skipped_poly_phase_idx = None
+assert t._is_smartpaf_poly_phase(5)
+assert t._is_smartpaf_poly_phase(6)
+t._mark_rejected_poly_group(5)
+assert not t._is_smartpaf_poly_phase(6)
+assert not t._is_smartpaf_poly_phase(7)
+assert t._is_smartpaf_poly_phase(9)
+print('phase smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_skip_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_skip_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_skip_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-skip-b256` | 16 | 43.52 | 43.52 | 0.58 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-skip-b256` | 16 | 43.52 | 43.52 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-dropout-b256` | 16 | 41.14 | 41.14 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-b256` | 16 | 38.76 | 38.76 | 0.34 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-related-b256` | 16 | 27.00 | 25.04 | 1.96 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 23.48 | 0 |
+| 6 | weights | 24.14 | 0 |
+| 7 | weights | 28.48 | 0 |
+| 8 | weights | 28.24 | 0 |
+| 9 | poly_rejected | 28.48 | 0 |
+| 10 | weights | 30.08 | 0 |
+| 11 | weights | 35.02 | 0 |
+| 12 | weights | 37.28 | 0 |
+| 13 | poly_rejected | 37.28 | 0 |
+| 14 | weights | 41.10 | 0 |
+| 15 | weights | 40.52 | 0 |
+| 16 | weights | 43.52 | 0 |
+
+Conclusion: skip-after-reject is a meaningful positive step for AT. It improves
+the AT proxy from 38.76 with plain 2-epoch groups and 41.42 with single-epoch
+pre-guard to 43.52, while keeping nonfinite and guard counts at zero. It still
+trails CT+SS by 3.90 points and CT-only by 5.42 points, so this should remain
+default-off. The next AT step should be closer to the paper's training-group
+logic: keep a local group best/SWA candidate, accept only improving poly
+updates, and stop the group dynamically when it stops helping.

@@ -70,6 +70,7 @@ class Trainer:
         smartpaf_at_accept_min_delta=0.0,
         smartpaf_at_reject_lr_factor=1.0,
         smartpaf_at_reject_before_collapse_guard=False,
+        smartpaf_at_skip_rejected_poly_group=False,
         smartpaf_at_dropout_on_overfit=False,
         smartpaf_at_dropout_gap=10.0,
         smartpaf_at_dropout_p=0.5,
@@ -140,6 +141,7 @@ class Trainer:
             smartpaf_at_accept_min_delta: poly 阶段至少超过 best_acc 多少百分点才接受
             smartpaf_at_reject_lr_factor: 非 collapse poly reject 后的学习率倍率
             smartpaf_at_reject_before_collapse_guard: 是否在 collapse guard 前拒绝坏 poly 候选
+            smartpaf_at_skip_rejected_poly_group: poly 组内某 epoch 被拒后是否跳过该组剩余 poly epoch
             smartpaf_at_dropout_on_overfit: 是否在训练/验证精度差过大时启用分类头 dropout
             smartpaf_at_dropout_gap: 触发 dropout 的训练/验证精度差，单位百分点
             smartpaf_at_dropout_p: 分类头输入 dropout 概率
@@ -222,6 +224,7 @@ class Trainer:
         self.smartpaf_at_accept_min_delta = float(smartpaf_at_accept_min_delta)
         self.smartpaf_at_reject_lr_factor = float(smartpaf_at_reject_lr_factor)
         self.smartpaf_at_reject_before_collapse_guard = bool(smartpaf_at_reject_before_collapse_guard)
+        self.smartpaf_at_skip_rejected_poly_group = bool(smartpaf_at_skip_rejected_poly_group)
         self.smartpaf_at_dropout_on_overfit = bool(smartpaf_at_dropout_on_overfit)
         self.smartpaf_at_dropout_gap = float(smartpaf_at_dropout_gap)
         self.smartpaf_at_dropout_p = float(smartpaf_at_dropout_p)
@@ -262,6 +265,7 @@ class Trainer:
         self._smartpaf_at_start_epoch = None
         self._smartpaf_poly_module_param_ids = []
         self._smartpaf_related_weight_module_param_ids = []
+        self._smartpaf_skipped_poly_phase_idx = None
         self._swa_model = None
         self._swa_updates = 0
         self._nan_debug_running = False
@@ -879,15 +883,39 @@ class Trainer:
     def _is_smartpaf_poly_phase(self, epoch):
         if not self.smartpaf_alternate_training:
             return False
+        phase_idx = self._smartpaf_phase_index(epoch)
+        if phase_idx is None:
+            return False
+        poly_on_even_phase = self.smartpaf_at_initial_phase == 'poly'
+        is_poly = (phase_idx % 2 == 0) if poly_on_even_phase else (phase_idx % 2 == 1)
+        if (
+            is_poly
+            and self.smartpaf_at_skip_rejected_poly_group
+            and self._smartpaf_skipped_poly_phase_idx == phase_idx
+        ):
+            return False
+        return is_poly
+
+    def _smartpaf_phase_index(self, epoch):
+        if not self.smartpaf_alternate_training:
+            return None
         if self._smartpaf_at_start_epoch is not None:
             if float(epoch) < self._smartpaf_at_start_epoch:
-                return False
+                return None
             epoch_offset = max(0.0, float(epoch) - self._smartpaf_at_start_epoch)
         else:
             epoch_offset = max(0.0, float(max(1, int(epoch)) - 1))
-        phase_idx = int(epoch_offset // self.smartpaf_at_cycle_epochs)
-        poly_on_even_phase = self.smartpaf_at_initial_phase == 'poly'
-        return (phase_idx % 2 == 0) if poly_on_even_phase else (phase_idx % 2 == 1)
+        return int(epoch_offset // self.smartpaf_at_cycle_epochs)
+
+    def _mark_rejected_poly_group(self, epoch):
+        if not self.smartpaf_at_skip_rejected_poly_group:
+            return
+        phase_idx = self._smartpaf_phase_index(epoch)
+        if phase_idx is None:
+            return
+        self._smartpaf_skipped_poly_phase_idx = phase_idx
+        if self.smartpaf_at_cycle_epochs > 1:
+            print(f"  - Skipping remaining poly epochs in AT phase group {phase_idx}")
 
     def _active_smartpaf_poly_param_ids(self, epoch):
         if self.smartpaf_at_poly_scope == 'all':
@@ -1926,6 +1954,9 @@ class Trainer:
                         and self._should_reject_nonimproving_poly(smartpaf_phase, val_acc)
                     ):
                         rejected_phase = self._reject_nonimproving_poly(val_acc)
+
+                if rejected_phase and smartpaf_phase == 'poly':
+                    self._mark_rejected_poly_group(epoch)
 
                 if rejected_phase and self.smartpaf_revalidate_rejected_phase:
                     print("  - Revalidating restored model for rejected phase")
