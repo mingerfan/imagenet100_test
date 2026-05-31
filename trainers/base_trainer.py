@@ -66,6 +66,11 @@ class Trainer:
         smartpaf_ct_max_samples=20000,
         smartpaf_ct_steps=300,
         smartpaf_ct_lr=0.01,
+        smartpaf_ss_calibrate=False,
+        smartpaf_ss_batches=8,
+        smartpaf_ss_max_samples=20000,
+        smartpaf_ss_percentile=1.0,
+        smartpaf_ss_margin=1.0,
         collapse_guard_enabled=False,
         collapse_guard_drop=10.0,
         collapse_guard_patience=1,
@@ -112,6 +117,11 @@ class Trainer:
             smartpaf_ct_max_samples: 每个 StablePoly4 最多使用多少个标量激活样本
             smartpaf_ct_steps: 每个 StablePoly4 CT 优化步数
             smartpaf_ct_lr: CT Adam 学习率
+            smartpaf_ss_calibrate: 是否在训练前校准 static scale
+            smartpaf_ss_batches: SS 校准采样 train batch 数
+            smartpaf_ss_max_samples: 每个 StablePoly4 最多使用多少个标量样本估计 scale
+            smartpaf_ss_percentile: SS 使用的 abs 激活分位数；1.0 表示最大值
+            smartpaf_ss_margin: SS absmax 安全余量倍率
             collapse_guard_enabled: 是否检测验证精度断崖式下降
             collapse_guard_drop: 相对上一轮或历史最佳下降超过多少百分点触发 guard
             collapse_guard_patience: 连续触发多少次后执行 action
@@ -162,6 +172,11 @@ class Trainer:
         self.smartpaf_ct_max_samples = max(256, int(smartpaf_ct_max_samples))
         self.smartpaf_ct_steps = max(1, int(smartpaf_ct_steps))
         self.smartpaf_ct_lr = float(smartpaf_ct_lr)
+        self.smartpaf_ss_calibrate = bool(smartpaf_ss_calibrate)
+        self.smartpaf_ss_batches = max(1, int(smartpaf_ss_batches))
+        self.smartpaf_ss_max_samples = max(256, int(smartpaf_ss_max_samples))
+        self.smartpaf_ss_percentile = max(0.0, min(1.0, float(smartpaf_ss_percentile)))
+        self.smartpaf_ss_margin = max(1e-6, float(smartpaf_ss_margin))
         self.collapse_guard_enabled = bool(collapse_guard_enabled)
         self.collapse_guard_drop = float(collapse_guard_drop)
         self.collapse_guard_patience = max(1, int(collapse_guard_patience))
@@ -466,8 +481,18 @@ class Trainer:
             print("  - 阶段顺序: 普通权重 -> 多项式系数 -> ...")
 
     def _ct_poly_eval(self, module, x):
-        log_in_scale = torch.clamp(module.log_in_scale, min=-6.0, max=2.0)
-        x_poly = x * torch.exp(log_in_scale)
+        scale_mode = str(getattr(module, "scale_mode", "learned"))
+        if scale_mode == "static" and hasattr(module, "static_absmax"):
+            absmax = module.static_absmax.to(device=x.device, dtype=torch.float32)
+            absmax = torch.clamp(absmax, min=getattr(module, "dynamic_scale_eps", 1e-6))
+            x_poly = x / absmax.to(dtype=x.dtype)
+        elif scale_mode == "dynamic":
+            absmax = x.detach().abs().amax().float()
+            absmax = torch.clamp(absmax, min=getattr(module, "dynamic_scale_eps", 1e-6))
+            x_poly = x / absmax.to(device=x.device, dtype=x.dtype)
+        else:
+            log_in_scale = torch.clamp(module.log_in_scale, min=-6.0, max=2.0)
+            x_poly = x * torch.exp(log_in_scale)
         a = torch.clamp(module.a, min=-0.01, max=0.01)
         b = torch.clamp(module.b, min=-0.1, max=0.1)
         c = torch.clamp(module.c, min=-0.5, max=0.5)
@@ -549,6 +574,81 @@ class Trainer:
             for param, requires_grad in zip(params, old_requires_grad):
                 param.requires_grad = requires_grad
             print(f"  - {name}: samples={x.numel()}, mse={last_loss:.6g}")
+
+        self.model.train(was_training)
+
+    def _run_smartpaf_ss_calibration(self):
+        """Calibrate StablePoly4 static_absmax from sampled pre-activation inputs."""
+        if not self.smartpaf_ss_calibrate or not self._smartpaf_poly_modules:
+            return
+
+        static_modules = [
+            (name, module)
+            for name, module in self._smartpaf_poly_modules
+            if str(getattr(module, "scale_mode", "learned")) == "static"
+            and hasattr(module, "set_scale_mode")
+        ]
+        if not static_modules:
+            print("SmartPAF-lite SS校准: skipped, no StablePoly4 modules in static scale mode")
+            return
+
+        print("✓ SmartPAF-lite SS校准:")
+        print(
+            f"  - batches={self.smartpaf_ss_batches}, max_samples={self.smartpaf_ss_max_samples}, "
+            f"percentile={self.smartpaf_ss_percentile:g}, margin={self.smartpaf_ss_margin:g}"
+        )
+
+        was_training = self.model.training
+        absmax = {module: 0.0 for _, module in static_modules}
+        samples = {module: [] for _, module in static_modules}
+        handles = []
+
+        def make_hook(module):
+            def hook(_module, inputs):
+                if not inputs:
+                    return
+                values = inputs[0].detach().float().abs().flatten()
+                if values.numel() == 0:
+                    return
+                batch_max = float(values.max().cpu())
+                absmax[module] = max(absmax[module], batch_max)
+                if self.smartpaf_ss_percentile < 1.0:
+                    current = sum(t.numel() for t in samples[module])
+                    remaining = self.smartpaf_ss_max_samples - current
+                    if remaining <= 0:
+                        return
+                    if values.numel() > remaining:
+                        idx = torch.linspace(0, values.numel() - 1, remaining, device=values.device).long()
+                        values = values.index_select(0, idx)
+                    samples[module].append(values.cpu())
+            return hook
+
+        for _, module in static_modules:
+            handles.append(module.register_forward_pre_hook(make_hook(module)))
+
+        self.model.eval()
+        with torch.no_grad():
+            for batch_idx, (images, _) in enumerate(self.train_loader):
+                if batch_idx >= self.smartpaf_ss_batches:
+                    break
+                images = images.to(self.device, non_blocking=True)
+                self.model(images)
+
+        for handle in handles:
+            handle.remove()
+
+        for name, module in static_modules:
+            if self.smartpaf_ss_percentile < 1.0 and samples[module]:
+                values = torch.cat(samples[module], dim=0)
+                if values.numel() > self.smartpaf_ss_max_samples:
+                    values = values[:self.smartpaf_ss_max_samples]
+                q = torch.quantile(values.float(), self.smartpaf_ss_percentile).item()
+                calibrated = q
+            else:
+                calibrated = absmax[module]
+            calibrated = max(calibrated * self.smartpaf_ss_margin, getattr(module, "dynamic_scale_eps", 1e-6))
+            module.set_scale_mode(static_absmax=calibrated)
+            print(f"  - {name}: static_absmax={calibrated:.6g}, in_scale≈{1.0 / calibrated:.6g}")
 
         self.model.train(was_training)
 
@@ -1267,6 +1367,7 @@ class Trainer:
             self._register_nan_hooks()
 
         try:
+            self._run_smartpaf_ss_calibration()
             self._run_smartpaf_ct_init()
             for epoch in range(self.start_epoch, self.epochs + 1):
                 # 为所有需要 epoch 信息的模块更新 epoch

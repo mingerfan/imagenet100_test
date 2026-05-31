@@ -107,11 +107,11 @@ Implemented experimentally:
 - CT / Coefficient Tuning: implemented as default-off `smartpaf_ct_init`.
 - DS / Dynamic Scale: implemented as default-off `poly4_scale_mode: dynamic`,
   but DS-only failed without CT.
+- SS / Static Scale: implemented as default-off `smartpaf_ss_calibrate` with
+  `poly4_scale_mode: static`.
 
 Not yet implemented or only partially implemented:
 
-- SS / Static Scale: no calibration pass yet to freeze deployment scales from
-  running activation maxima.
 - SWA: not implemented. SMART-PAF uses SWA in PA/AT recovery.
 - BN recalibration: partially implemented. BN is frozen during poly phase, but
   there is no post-training BN running-stat recalibration.
@@ -281,3 +281,89 @@ Conclusion: CT makes DS stable, unlike DS-only, but DS still reduces final
 accuracy relative to CT-only on this proxy. Keep DS experimental. A better next
 scale-control step is static calibration/frozen deployment scale, not dynamic
 batch absmax throughout training.
+
+## 2026-06-01 Static Scale Calibration
+
+Implemented as an experimental, default-off trainer option:
+
+- `smartpaf_ss_calibrate`
+- `smartpaf_ss_batches`
+- `smartpaf_ss_max_samples`
+- `smartpaf_ss_percentile`
+- `smartpaf_ss_margin`
+
+SS calibration samples StablePoly4 pre-activation tensors before CT/training and
+writes each module's `static_absmax`. CT then fits coefficients using the same
+static scale path that forward uses during training.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from models.gate_net_cmp.block_def import StablePoly4
+from trainers.base_trainer import Trainer
+
+model = nn.Sequential(StablePoly4(scale_mode='static'))
+x = torch.linspace(-3, 3, steps=64).view(16, 1, 2, 2)
+y = torch.zeros(16, dtype=torch.long)
+loader = DataLoader(TensorDataset(x, y), batch_size=4)
+opt = torch.optim.SGD(model.parameters(), lr=0.01)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=opt,
+    device=torch.device('cpu'),
+    result_dir='/tmp/smartpaf_ss_smoke',
+    epochs=1,
+    poly4_scale_mode='static',
+    smartpaf_ss_calibrate=True,
+    smartpaf_ss_batches=2,
+    smartpaf_ct_init=True,
+    smartpaf_ct_batches=2,
+    smartpaf_ct_steps=2,
+)
+trainer._run_smartpaf_ss_calibration()
+assert float(model[0].static_absmax) > 1.0
+assert model[0].scale_mode == 'static'
+PY
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_fast.status' < /dev/null &
+```
+
+Calibration and CT fit:
+
+| Module | Static absmax | In scale | CT MSE |
+| --- | ---: | ---: | ---: |
+| `special_resnet.layers.0.act` | 6.28725 | 0.159052 | 0.0695138 |
+| `special_resnet.layers.1.act` | 6.16644 | 0.162168 | 0.0404399 |
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | PASS |
+| `imagenet100-96-pa-ct-ds-b256` | 16 | 44.58 | 42.98 | PASS |
+| `imagenet100-96-pa-ds-b256` | 10 | 36.44 | 9.46 | COLLAPSE |
+
+Conclusion: Static scale is the best scale-control variant so far. It is stable
+and significantly better than dynamic scale, but still trails CT-only by 1.52
+percentage points on this proxy. Keep SS experimental and prefer CT-only as the
+current default unless deployment requires fixed polynomial input scaling.
