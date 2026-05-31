@@ -69,6 +69,9 @@ class Trainer:
         smartpaf_at_accept_min_delta=0.0,
         smartpaf_at_reject_lr_factor=1.0,
         smartpaf_at_reject_before_collapse_guard=False,
+        smartpaf_at_dropout_on_overfit=False,
+        smartpaf_at_dropout_gap=10.0,
+        smartpaf_at_dropout_p=0.5,
         smartpaf_freeze_bn_during_poly_phase=True,
         smartpaf_ct_init=False,
         smartpaf_ct_batches=8,
@@ -135,6 +138,9 @@ class Trainer:
             smartpaf_at_accept_min_delta: poly 阶段至少超过 best_acc 多少百分点才接受
             smartpaf_at_reject_lr_factor: 非 collapse poly reject 后的学习率倍率
             smartpaf_at_reject_before_collapse_guard: 是否在 collapse guard 前拒绝坏 poly 候选
+            smartpaf_at_dropout_on_overfit: 是否在训练/验证精度差过大时启用分类头 dropout
+            smartpaf_at_dropout_gap: 触发 dropout 的训练/验证精度差，单位百分点
+            smartpaf_at_dropout_p: 分类头输入 dropout 概率
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
             smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
             smartpaf_ct_batches: CT 采样 train batch 数
@@ -211,6 +217,9 @@ class Trainer:
         self.smartpaf_at_accept_min_delta = float(smartpaf_at_accept_min_delta)
         self.smartpaf_at_reject_lr_factor = float(smartpaf_at_reject_lr_factor)
         self.smartpaf_at_reject_before_collapse_guard = bool(smartpaf_at_reject_before_collapse_guard)
+        self.smartpaf_at_dropout_on_overfit = bool(smartpaf_at_dropout_on_overfit)
+        self.smartpaf_at_dropout_gap = float(smartpaf_at_dropout_gap)
+        self.smartpaf_at_dropout_p = float(smartpaf_at_dropout_p)
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
         self.smartpaf_ct_init = bool(smartpaf_ct_init)
         self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
@@ -253,6 +262,9 @@ class Trainer:
         self._nan_hooks = []
         self._nan_triggered = False
         self._nan_debug_active = False
+        self._smartpaf_overfit_dropout_active = False
+        self._smartpaf_overfit_dropout_hooks = []
+        self._smartpaf_overfit_dropout_targets = []
 
         # 创建结果目录
         os.makedirs(result_dir, exist_ok=True)
@@ -261,6 +273,7 @@ class Trainer:
         self._adjust_poly4_warmup()
         self._configure_poly4_modules()
         self._configure_smartpaf_modules()
+        self._configure_smartpaf_overfit_dropout()
 
         # 初始化scaler
         self.scaler = GradScaler() if use_amp else None
@@ -282,6 +295,7 @@ class Trainer:
             'nonfinite_train_batches': [],
             'nonfinite_val_batches': [],
             'smartpaf_phase': [],
+            'smartpaf_overfit_dropout_active': [],
             'collapse_guard_triggered': []
         }
 
@@ -308,6 +322,7 @@ class Trainer:
             'nonfinite_train_batches',
             'nonfinite_val_batches',
             'smartpaf_phase',
+            'smartpaf_overfit_dropout_active',
             'collapse_guard_triggered',
         ]
         existing_len = len(self.history.get('epoch', []))
@@ -420,6 +435,93 @@ class Trainer:
         if self._smartpaf_at_start_epoch is not None and float(epoch) < self._smartpaf_at_start_epoch:
             return 'all'
         return 'poly' if self._is_smartpaf_poly_phase(epoch) else 'weights'
+
+    def _last_linear_in_module(self, module):
+        if isinstance(module, nn.Linear):
+            return module
+        linear = None
+        for child in module.modules():
+            if isinstance(child, nn.Linear):
+                linear = child
+        return linear
+
+    def _find_smartpaf_dropout_targets(self):
+        targets = []
+        for attr_name in ('fc', 'classifier', 'head'):
+            if not hasattr(self.model, attr_name):
+                continue
+            target = self._last_linear_in_module(getattr(self.model, attr_name))
+            if target is not None:
+                targets.append((attr_name, target))
+                return targets
+
+        last_name = None
+        last_linear = None
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Linear):
+                last_name = name
+                last_linear = module
+        if last_linear is not None:
+            targets.append((last_name, last_linear))
+        return targets
+
+    def _configure_smartpaf_overfit_dropout(self):
+        if not self.smartpaf_at_dropout_on_overfit:
+            return
+
+        if not (0.0 < self.smartpaf_at_dropout_p < 1.0):
+            raise ValueError(
+                f"smartpaf_at_dropout_p must be between 0 and 1, got {self.smartpaf_at_dropout_p}"
+            )
+
+        targets = self._find_smartpaf_dropout_targets()
+        if not targets:
+            print("⚠ SmartPAF overfit dropout enabled but no Linear classifier head was found")
+            return
+
+        def make_hook(name):
+            def _hook(module, inputs):
+                if (
+                    not self._smartpaf_overfit_dropout_active
+                    or not self.model.training
+                    or not inputs
+                    or not torch.is_tensor(inputs[0])
+                ):
+                    return None
+                dropped = F.dropout(inputs[0], p=self.smartpaf_at_dropout_p, training=True)
+                return (dropped, *inputs[1:])
+            return _hook
+
+        for name, module in targets:
+            self._smartpaf_overfit_dropout_hooks.append(module.register_forward_pre_hook(make_hook(name)))
+            self._smartpaf_overfit_dropout_targets.append(name)
+
+        target_text = ", ".join(self._smartpaf_overfit_dropout_targets)
+        print(
+            "✓ SmartPAF overfit dropout: "
+            f"targets={target_text}, gap>={self.smartpaf_at_dropout_gap:g}pp, p={self.smartpaf_at_dropout_p:g}"
+        )
+
+    def _remove_smartpaf_overfit_dropout_hooks(self):
+        for handle in self._smartpaf_overfit_dropout_hooks:
+            handle.remove()
+        self._smartpaf_overfit_dropout_hooks = []
+
+    def _update_smartpaf_overfit_dropout(self, epoch, train_acc, val_acc):
+        if not self.smartpaf_at_dropout_on_overfit or not self._smartpaf_overfit_dropout_targets:
+            return
+        if not self.smartpaf_alternate_training:
+            return
+
+        gap = float(train_acc) - float(val_acc)
+        should_enable = gap >= self.smartpaf_at_dropout_gap
+        if should_enable != self._smartpaf_overfit_dropout_active:
+            state = "enabled" if should_enable else "disabled"
+            print(
+                f"  - SmartPAF overfit dropout {state}: "
+                f"train-val gap={gap:.2f}pp, threshold={self.smartpaf_at_dropout_gap:.2f}pp"
+            )
+        self._smartpaf_overfit_dropout_active = should_enable
 
     def _resolve_smartpaf_at_start_epoch(self):
         if self.smartpaf_at_start_epoch is None:
@@ -1394,6 +1496,7 @@ class Trainer:
         self.history['nonfinite_train_batches'].append(self._last_train_stats.get('nonfinite_batches', 0))
         self.history['nonfinite_val_batches'].append(self._last_val_stats.get('nonfinite_batches', 0))
         self.history['smartpaf_phase'].append(smartpaf_phase)
+        self.history['smartpaf_overfit_dropout_active'].append(int(self._smartpaf_overfit_dropout_active))
         self.history['collapse_guard_triggered'].append(int(collapse_guard_triggered))
 
     def _next_history_epoch(self):
@@ -1849,6 +1952,9 @@ class Trainer:
                         self.save_checkpoint(epoch, is_best=False)
 
                 if collapse_error is None:
+                    self._update_smartpaf_overfit_dropout(epoch, train_acc, val_acc)
+
+                if collapse_error is None:
                     self._maybe_update_swa_model(epoch)
                 
                 # 保存历史
@@ -1858,6 +1964,7 @@ class Trainer:
         finally:
             if self.smartpaf_alternate_training:
                 self._restore_all_trainable()
+            self._remove_smartpaf_overfit_dropout_hooks()
             if self._nan_debug_active:
                 self._remove_nan_hooks()
 

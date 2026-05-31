@@ -1154,3 +1154,122 @@ improve. This is the best AT variant so far, but it still trails CT-only by
 7.52 percentage points and CT+SS by 6.00 points. AT should remain experimental.
 The next paper-faithful step is a true per-layer training-group loop with local
 best/SWA acceptance, instead of global epoch alternation.
+
+## 2026-06-01 AT Dropout-on-Overfit Attempt
+
+Implemented a default-off overfit-triggered dropout option:
+
+- `smartpaf_at_dropout_on_overfit`
+- `smartpaf_at_dropout_gap`
+- `smartpaf_at_dropout_p`
+- `smartpaf_overfit_dropout_active` history column
+
+The implementation registers a forward pre-hook on the classifier `Linear`
+layer and applies dropout to the classifier input only while the model is in
+training mode and the overfit trigger is active. This avoids replacing `fc` with
+a `Sequential`, so checkpoint key names remain unchanged.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from trainers.base_trainer import Trainer
+
+class Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(4, 2)
+    def forward(self, x):
+        return self.fc(x)
+
+model = Tiny()
+loader = DataLoader(TensorDataset(torch.ones(4, 4), torch.zeros(4, dtype=torch.long)), batch_size=2)
+keys_before = set(model.state_dict().keys())
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+    device=torch.device('cpu'),
+    result_dir='/tmp/smartpaf_dropout_smoke',
+    epochs=1,
+    save_checkpoints=False,
+    smartpaf_alternate_training=True,
+    smartpaf_at_dropout_on_overfit=True,
+    smartpaf_at_dropout_gap=1.0,
+    smartpaf_at_dropout_p=0.5,
+)
+assert set(model.state_dict().keys()) == keys_before
+trainer._update_smartpaf_overfit_dropout(1, train_acc=60.0, val_acc=50.0)
+assert trainer._smartpaf_overfit_dropout_active is True
+model.train()
+torch.manual_seed(0)
+y_train = model(torch.ones(16, 4))
+trainer._smartpaf_overfit_dropout_active = False
+torch.manual_seed(0)
+y_plain = model(torch.ones(16, 4))
+assert not torch.allclose(y_train, y_plain)
+model.eval()
+trainer._smartpaf_overfit_dropout_active = True
+torch.manual_seed(0)
+y_eval = model(torch.ones(16, 4))
+torch.manual_seed(1)
+y_eval_2 = model(torch.ones(16, 4))
+assert torch.allclose(y_eval, y_eval_2)
+trainer._remove_smartpaf_overfit_dropout_hooks()
+print('overfit dropout smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_dropout_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_dropout_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_dropout_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-dropout-b256` | 16 | 41.14 | 41.14 | 0.00 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-dropout-b256` | 16 | 41.14 | 41.14 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-active-reject-b256` | 16 | 38.10 | 35.58 | 9.64 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-accept-b256` | 16 | 34.60 | 31.60 | 3.00 | 5 | COLLAPSE |
+
+Phase and dropout details:
+
+| Epoch | Phase | Recorded val acc | Dropout active | Guard |
+| ---: | --- | ---: | ---: | ---: |
+| 5 | poly_rejected | 23.46 | 0 | 0 |
+| 6 | weights | 24.52 | 0 | 0 |
+| 7 | poly_rejected | 24.52 | 0 | 0 |
+| 8 | weights | 25.66 | 0 | 0 |
+| 9 | poly_rejected | 25.66 | 1 | 0 |
+| 10 | weights | 30.88 | 0 | 0 |
+| 11 | poly_rejected | 30.88 | 1 | 0 |
+| 12 | weights | 35.20 | 0 | 0 |
+| 13 | poly_rejected | 35.20 | 1 | 0 |
+| 14 | weights | 39.78 | 0 | 0 |
+| 15 | poly_rejected | 39.78 | 0 | 0 |
+| 16 | weights | 41.14 | 0 | 0 |
+
+Conclusion: dropout-on-overfit is implemented and stable, and the trigger fired
+as intended after epochs 8, 10, and 12. It did not improve this proxy: final
+accuracy was 0.28 percentage points below the pre-guard AT baseline. Keep the
+option available for paper-faithful per-layer training groups, but do not enable
+it in the current global epoch alternation schedule.
