@@ -1086,3 +1086,71 @@ Remaining paper techniques not yet faithfully applied:
 - Replacing MaxPooling and other non-polynomial operators, not only activation
   functions.
 - DS fine-tuning followed by SS conversion as a deployment workflow.
+
+## 2026-06-01 AT Pre-Guard Reject Attempt
+
+Implemented a default-off AT option:
+
+- `smartpaf_at_reject_before_collapse_guard`
+
+When this is enabled together with `smartpaf_at_reject_nonimproving_poly`, a bad
+AT `poly` candidate is rejected before collapse guard runs. The intended
+behavior is to restore the previous best checkpoint and keep the scheduled LR
+intact, instead of treating an exploratory poly-only phase as a global collapse.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_preguard_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_preguard_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_preguard_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-active-reject-b256` | 16 | 38.10 | 35.58 | 9.64 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-active-recover-b256` | 16 | 37.38 | 35.64 | 36.12 | 4 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-polyfirst-recover-b256` | 16 | 34.94 | 31.68 | 32.06 | 5 | COLLAPSE |
+| `imagenet100-96-pa-ct-ss-at-accept-b256` | 16 | 34.60 | 31.60 | 3.00 | 5 | COLLAPSE |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 21.76 | 0 |
+| 6 | weights | 23.94 | 0 |
+| 7 | poly_rejected | 23.94 | 0 |
+| 8 | weights | 25.76 | 0 |
+| 9 | poly_rejected | 25.76 | 0 |
+| 10 | weights | 31.34 | 0 |
+| 11 | poly_rejected | 31.34 | 0 |
+| 12 | weights | 36.20 | 0 |
+| 13 | poly_rejected | 36.20 | 0 |
+| 14 | weights | 39.94 | 0 |
+| 15 | poly_rejected | 39.94 | 0 |
+| 16 | weights | 41.42 | 0 |
+
+Conclusion: pre-guard rejection fixes the LR punishment issue found in the
+accept-only run. All rejected poly phases were restored before collapse guard,
+so `collapse_guard_triggered` stayed at 0 and the weights phases continued to
+improve. This is the best AT variant so far, but it still trails CT-only by
+7.52 percentage points and CT+SS by 6.00 points. AT should remain experimental.
+The next paper-faithful step is a true per-layer training-group loop with local
+best/SWA acceptance, instead of global epoch alternation.

@@ -68,6 +68,7 @@ class Trainer:
         smartpaf_at_reject_nonimproving_poly=False,
         smartpaf_at_accept_min_delta=0.0,
         smartpaf_at_reject_lr_factor=1.0,
+        smartpaf_at_reject_before_collapse_guard=False,
         smartpaf_freeze_bn_during_poly_phase=True,
         smartpaf_ct_init=False,
         smartpaf_ct_batches=8,
@@ -133,6 +134,7 @@ class Trainer:
             smartpaf_at_reject_nonimproving_poly: 是否拒绝未提升 best 的 AT poly 阶段
             smartpaf_at_accept_min_delta: poly 阶段至少超过 best_acc 多少百分点才接受
             smartpaf_at_reject_lr_factor: 非 collapse poly reject 后的学习率倍率
+            smartpaf_at_reject_before_collapse_guard: 是否在 collapse guard 前拒绝坏 poly 候选
             smartpaf_freeze_bn_during_poly_phase: AT 的多项式阶段是否冻结 BN 统计
             smartpaf_ct_init: 是否在训练前用采样激活拟合 StablePoly4 系数
             smartpaf_ct_batches: CT 采样 train batch 数
@@ -208,6 +210,7 @@ class Trainer:
         self.smartpaf_at_reject_nonimproving_poly = bool(smartpaf_at_reject_nonimproving_poly)
         self.smartpaf_at_accept_min_delta = float(smartpaf_at_accept_min_delta)
         self.smartpaf_at_reject_lr_factor = float(smartpaf_at_reject_lr_factor)
+        self.smartpaf_at_reject_before_collapse_guard = bool(smartpaf_at_reject_before_collapse_guard)
         self.smartpaf_freeze_bn_during_poly_phase = bool(smartpaf_freeze_bn_during_poly_phase)
         self.smartpaf_ct_init = bool(smartpaf_ct_init)
         self.smartpaf_ct_batches = max(1, int(smartpaf_ct_batches))
@@ -1601,6 +1604,24 @@ class Trainer:
         print(f"  ✓ Scaled LR by factor {lr_factor} ({reason})")
         return restored
 
+    def _should_reject_nonimproving_poly(self, smartpaf_phase, val_acc):
+        return (
+            self.smartpaf_at_reject_nonimproving_poly
+            and smartpaf_phase == 'poly'
+            and val_acc <= self.best_acc + self.smartpaf_at_accept_min_delta
+        )
+
+    def _reject_nonimproving_poly(self, val_acc):
+        print(
+            f"  - Rejecting non-improving poly phase: "
+            f"val_acc={val_acc:.2f}%, best={self.best_acc:.2f}%"
+        )
+        self._last_collapse_guard_restored = self._restore_best_and_scale_lr(
+            lr_factor=self.smartpaf_at_reject_lr_factor,
+            reason='non-improving AT poly phase',
+        )
+        return self._last_collapse_guard_restored
+
     def _run_collapse_guard(self, epoch, val_acc):
         self._last_collapse_guard_restored = False
         if not self.collapse_guard_enabled:
@@ -1745,34 +1766,32 @@ class Trainer:
                 epoch_time = time.time() - epoch_start
                 
                 collapse_error = None
-                try:
-                    collapse_triggered = self._run_collapse_guard(epoch, val_acc)
-                except RuntimeError as exc:
-                    collapse_triggered = True
-                    collapse_error = exc
-
                 smartpaf_phase = self._current_smartpaf_phase(epoch)
-                rejected_phase = (
-                    collapse_triggered
-                    and collapse_error is None
-                    and self._last_collapse_guard_restored
-                )
                 if (
-                    not rejected_phase
-                    and collapse_error is None
-                    and self.smartpaf_at_reject_nonimproving_poly
-                    and smartpaf_phase == 'poly'
-                    and val_acc <= self.best_acc + self.smartpaf_at_accept_min_delta
+                    self.smartpaf_at_reject_before_collapse_guard
+                    and self._should_reject_nonimproving_poly(smartpaf_phase, val_acc)
                 ):
-                    print(
-                        f"  - Rejecting non-improving poly phase: "
-                        f"val_acc={val_acc:.2f}%, best={self.best_acc:.2f}%"
+                    self._last_collapse_guard_restored = False
+                    collapse_triggered = False
+                    rejected_phase = self._reject_nonimproving_poly(val_acc)
+                else:
+                    try:
+                        collapse_triggered = self._run_collapse_guard(epoch, val_acc)
+                    except RuntimeError as exc:
+                        collapse_triggered = True
+                        collapse_error = exc
+
+                    rejected_phase = (
+                        collapse_triggered
+                        and collapse_error is None
+                        and self._last_collapse_guard_restored
                     )
-                    self._last_collapse_guard_restored = self._restore_best_and_scale_lr(
-                        lr_factor=self.smartpaf_at_reject_lr_factor,
-                        reason='non-improving AT poly phase',
-                    )
-                    rejected_phase = self._last_collapse_guard_restored
+                    if (
+                        not rejected_phase
+                        and collapse_error is None
+                        and self._should_reject_nonimproving_poly(smartpaf_phase, val_acc)
+                    ):
+                        rejected_phase = self._reject_nonimproving_poly(val_acc)
 
                 if rejected_phase and self.smartpaf_revalidate_rejected_phase:
                     print("  - Revalidating restored model for rejected phase")
