@@ -43,6 +43,9 @@ class Trainer:
         poly4_deriv_lambda=0.0,
         poly4_range_r=2.0,
         poly4_deriv_L=3.0,
+        poly4_scale_mode='learned',
+        poly4_dynamic_scale_momentum=0.99,
+        poly4_dynamic_scale_eps=1e-6,
         nan_debug=False,
         val_force_fp32=True,
         val_batch_stats_path=None,
@@ -87,6 +90,9 @@ class Trainer:
             poly4_deriv_lambda: StablePoly4导数正则权重
             poly4_range_r: StablePoly4输入范围阈值
             poly4_deriv_L: StablePoly4导数阈值
+            poly4_scale_mode: StablePoly4输入缩放模式 learned/dynamic/static
+            poly4_dynamic_scale_momentum: dynamic scale running absmax 动量
+            poly4_dynamic_scale_eps: dynamic/static scale 的最小 absmax
             nan_debug: 是否启用NaN定位钩子（默认关闭）
             val_force_fp32: 验证阶段强制使用FP32（禁用autocast）
             smartpaf_progressive: 是否逐层延迟启用 StablePoly4 多项式分支
@@ -123,6 +129,9 @@ class Trainer:
         self.poly4_deriv_lambda = poly4_deriv_lambda
         self.poly4_range_r = poly4_range_r
         self.poly4_deriv_L = poly4_deriv_L
+        self.poly4_scale_mode = str(poly4_scale_mode).strip().lower()
+        self.poly4_dynamic_scale_momentum = float(poly4_dynamic_scale_momentum)
+        self.poly4_dynamic_scale_eps = float(poly4_dynamic_scale_eps)
         self.nan_debug = nan_debug
         self.val_force_fp32 = val_force_fp32
         self.val_batch_stats_path = val_batch_stats_path
@@ -373,11 +382,18 @@ class Trainer:
                     deriv_L=self.poly4_deriv_L,
                     enable=self.poly4_deriv_lambda > 0,
                 )
+            if hasattr(module, 'set_scale_mode') and callable(module.set_scale_mode):
+                module.set_scale_mode(
+                    mode=self.poly4_scale_mode,
+                    momentum=self.poly4_dynamic_scale_momentum,
+                    eps=self.poly4_dynamic_scale_eps,
+                )
             if hasattr(module, 'set_warmup_epochs') and callable(module.set_warmup_epochs):
                 poly4_count += 1
 
         if poly4_count > 0:
             print("✓ StablePoly4正则/调度配置:")
+            print(f"  - scale_mode: {self.poly4_scale_mode}")
             if self.poly4_range_lambda > 0:
                 print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")
             if self.poly4_deriv_lambda > 0:
@@ -582,7 +598,17 @@ class Trainer:
                 e = module.e.detach().float().cpu().item()
                 log_in = module.log_in_scale.detach().float().cpu().item()
                 log_in_clamped = max(-6.0, min(2.0, log_in))
-                in_scale = float(torch.exp(torch.tensor(log_in_clamped)))
+                scale_mode = str(getattr(module, "scale_mode", "learned"))
+                if scale_mode == "learned":
+                    in_scale = float(torch.exp(torch.tensor(log_in_clamped)))
+                else:
+                    if scale_mode == "static" and hasattr(module, "static_absmax"):
+                        absmax = module.static_absmax.detach().float().cpu().item()
+                    elif hasattr(module, "running_absmax"):
+                        absmax = module.running_absmax.detach().float().cpu().item()
+                    else:
+                        absmax = 1.0
+                    in_scale = 1.0 / max(absmax, getattr(module, "dynamic_scale_eps", 1e-6))
                 out_scale = float(getattr(module, "output_scale", 1.0))
                 warmup_epochs = int(getattr(module, "warmup_epochs", 0))
                 cur_epoch = int(module.current_epoch.item()) if hasattr(module, "current_epoch") else None
@@ -594,7 +620,7 @@ class Trainer:
             print(
                 f"  - {name}: "
                 f"a={a:.4g} b={b:.4g} c={c:.4g} d={d:.4g} e={e:.4g} "
-                f"log_in_scale={log_in:.4g} in_scale≈{in_scale:.4g} "
+                f"scale_mode={scale_mode} log_in_scale={log_in:.4g} in_scale≈{in_scale:.4g} "
                 f"output_scale={out_scale:.4g} warmup_epochs={warmup_epochs}"
                 + (f" current_epoch={cur_epoch}" if cur_epoch is not None else "")
             )

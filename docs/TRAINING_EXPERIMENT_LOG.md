@@ -117,3 +117,53 @@ Not yet implemented or only partially implemented:
 - Dropout mitigation: not implemented.
 - Full per-layer CT -> PA -> AT -> scale scheduler: not implemented. Current code
   is a lightweight global scheduler.
+
+## 2026-05-31 Dynamic Scale Attempt
+
+Implemented as an experimental, default-off StablePoly4 option:
+
+- `poly4_scale_mode: learned | dynamic | static`
+- `poly4_dynamic_scale_momentum`
+- `poly4_dynamic_scale_eps`
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import torch
+from models.gate_net_cmp.block_def import StablePoly4
+m = StablePoly4(scale_mode='dynamic')
+x = torch.randn(4, 3, 8, 8) * 5
+m.train()
+y = m(x)
+print(torch.isfinite(y).all().item(), float(m.running_absmax), m.scale_mode)
+m.eval()
+y2 = m(x)
+print(torch.isfinite(y2).all().item(), y2.shape)
+PY
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_dynamic_scale_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_dynamic_scale_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_dynamic_scale_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ds-b256` | 10 | 36.44 | 9.46 | 26.98 | 0 | 0 | 1 | COLLAPSE |
+
+Collapse details from `logs/proxy_imagenet100_96_pa_dynamic_scale_fast.log`:
+
+- Epoch 9 validation accuracy: 36.44%.
+- Epoch 10 validation accuracy: 9.46%.
+- Collapse guard drop: 26.98 percentage points.
+- `nonfinite_train_batches = 0`, `nonfinite_val_batches = 0`.
+- Dynamic scale constrained the polynomial inputs: layer0 `|x_poly| max = 0.6287`, layer1 `|x_poly| max = 0.3752`.
+
+Conclusion: DS alone prevents large polynomial inputs but does not align the
+polynomial branch with the Swish target. The next required technique is CT /
+coefficient initialization before retrying DS or AT.

@@ -202,6 +202,9 @@ class StablePoly4(nn.Module):
         deriv_L=3.0,
         enable_range_loss=True,
         enable_deriv_loss=True,
+        scale_mode="learned",
+        dynamic_scale_momentum=0.99,
+        dynamic_scale_eps=1e-6,
     ):
         super().__init__()
         self.output_scale = output_scale
@@ -228,6 +231,9 @@ class StablePoly4(nn.Module):
         self.deriv_L = deriv_L
         self.enable_range_loss = enable_range_loss
         self.enable_deriv_loss = enable_deriv_loss
+        self.scale_mode = self._normalize_scale_mode(scale_mode)
+        self.dynamic_scale_momentum = float(dynamic_scale_momentum)
+        self.dynamic_scale_eps = float(dynamic_scale_eps)
         self.range_loss = torch.tensor(0.0)
         self.deriv_loss = torch.tensor(0.0)
         self.collect_stats = False
@@ -241,6 +247,8 @@ class StablePoly4(nn.Module):
         # 细粒度进度（用于 step 级平滑过渡）
         self.register_buffer("current_step", torch.tensor(0, dtype=torch.long))
         self.register_buffer("steps_per_epoch", torch.tensor(1, dtype=torch.long))
+        self.register_buffer("running_absmax", torch.tensor(1.0, dtype=torch.float32))
+        self.register_buffer("static_absmax", torch.tensor(1.0, dtype=torch.float32))
         self.poly_start_epoch = float(warmup_epochs)
         self.poly_transition_epochs = 10.0
 
@@ -297,6 +305,51 @@ class StablePoly4(nn.Module):
         if enable is not None:
             self.enable_deriv_loss = bool(enable)
 
+    def set_scale_mode(self, mode=None, momentum=None, eps=None, static_absmax=None):
+        """设置 StablePoly4 输入缩放模式。"""
+        if mode is not None:
+            self.scale_mode = self._normalize_scale_mode(mode)
+        if momentum is not None:
+            self.dynamic_scale_momentum = float(momentum)
+        if eps is not None:
+            self.dynamic_scale_eps = float(eps)
+        if static_absmax is not None:
+            value = max(float(static_absmax), self.dynamic_scale_eps)
+            self.static_absmax.fill_(value)
+
+    @staticmethod
+    def _normalize_scale_mode(mode):
+        key = str(mode or "learned").strip().lower()
+        if key not in {"learned", "dynamic", "static"}:
+            raise ValueError(f"Unsupported StablePoly4 scale_mode: {mode}")
+        return key
+
+    def _calc_poly_input(self, x_work):
+        if self.scale_mode == "learned":
+            log_in_scale = torch.clamp(self.log_in_scale, min=-6.0, max=2.0)
+            in_scale = torch.exp(log_in_scale)
+            return x_work * in_scale, in_scale
+
+        if self.scale_mode == "dynamic":
+            batch_absmax = x_work.detach().abs().amax().float()
+            batch_absmax = torch.clamp(batch_absmax, min=self.dynamic_scale_eps)
+            if self.training:
+                momentum = max(0.0, min(0.9999, self.dynamic_scale_momentum))
+                self.running_absmax.mul_(momentum).add_(
+                    batch_absmax.to(device=self.running_absmax.device) * (1.0 - momentum)
+                )
+                absmax = batch_absmax
+            else:
+                absmax = self.running_absmax.to(device=x_work.device, dtype=torch.float32)
+                absmax = torch.clamp(absmax, min=self.dynamic_scale_eps)
+            in_scale = x_work.new_tensor(1.0) / absmax.to(device=x_work.device, dtype=x_work.dtype)
+            return x_work * in_scale, in_scale
+
+        absmax = self.static_absmax.to(device=x_work.device, dtype=torch.float32)
+        absmax = torch.clamp(absmax, min=self.dynamic_scale_eps)
+        in_scale = x_work.new_tensor(1.0) / absmax.to(device=x_work.device, dtype=x_work.dtype)
+        return x_work * in_scale, in_scale
+
     @staticmethod
     def _build_warmup_act(warmup_act):
         if warmup_act is None:
@@ -342,10 +395,8 @@ class StablePoly4(nn.Module):
         # 计算Swish激活（用于预热）
         swish_out = self.warmup_act(x_work)
 
-        # 输入范围控制：可学习缩放，限制进入多项式的数值范围
-        log_in_scale = torch.clamp(self.log_in_scale, min=-6.0, max=2.0)
-        in_scale = torch.exp(log_in_scale)
-        x_poly = x_work * in_scale
+        # 输入范围控制：learned 使用可学习缩放；dynamic/static 使用 absmax 缩放。
+        x_poly, _ = self._calc_poly_input(x_work)
 
         # 计算多项式激活
         # 对高阶参数进行软约束，防止它们过大
