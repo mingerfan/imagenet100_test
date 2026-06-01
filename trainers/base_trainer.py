@@ -86,6 +86,8 @@ class Trainer:
         smartpaf_ss_max_samples=20000,
         smartpaf_ss_percentile=1.0,
         smartpaf_ss_margin=1.0,
+        smartpaf_ds_to_ss_after_training=False,
+        smartpaf_ds_to_ss_use_best=True,
         bn_recalibrate_after_training=False,
         bn_recalibrate_batches=0,
         bn_recalibrate_use_best=True,
@@ -158,6 +160,8 @@ class Trainer:
             smartpaf_ss_max_samples: 每个 StablePoly4 最多使用多少个标量样本估计 scale
             smartpaf_ss_percentile: SS 使用的 abs 激活分位数；1.0 表示最大值
             smartpaf_ss_margin: SS absmax 安全余量倍率
+            smartpaf_ds_to_ss_after_training: 训练后是否将 dynamic scale 固定成 static scale 并验证
+            smartpaf_ds_to_ss_use_best: DS->SS 转换前是否加载 best_model.pth
             bn_recalibrate_after_training: 是否在训练结束后重算 BatchNorm running stats
             bn_recalibrate_batches: BN recalibration 使用的 train batch 数；0 表示全量
             bn_recalibrate_use_best: recalibration 前是否加载 best_model.pth
@@ -242,6 +246,8 @@ class Trainer:
         self.smartpaf_ss_max_samples = max(256, int(smartpaf_ss_max_samples))
         self.smartpaf_ss_percentile = max(0.0, min(1.0, float(smartpaf_ss_percentile)))
         self.smartpaf_ss_margin = max(1e-6, float(smartpaf_ss_margin))
+        self.smartpaf_ds_to_ss_after_training = bool(smartpaf_ds_to_ss_after_training)
+        self.smartpaf_ds_to_ss_use_best = bool(smartpaf_ds_to_ss_use_best)
         self.bn_recalibrate_after_training = bool(bn_recalibrate_after_training)
         self.bn_recalibrate_batches = max(0, int(bn_recalibrate_batches))
         self.bn_recalibrate_use_best = bool(bn_recalibrate_use_best)
@@ -873,6 +879,76 @@ class Trainer:
             print(f"  - {name}: static_absmax={calibrated:.6g}, in_scale≈{1.0 / calibrated:.6g}")
 
         self.model.train(was_training)
+
+    def _run_smartpaf_ds_to_ss_evaluation(self):
+        """Convert dynamic StablePoly4 scales to deployable static scales and validate."""
+        if not self.smartpaf_ds_to_ss_after_training or not self._smartpaf_poly_modules:
+            return None
+
+        dynamic_modules = [
+            (name, module)
+            for name, module in self._smartpaf_poly_modules
+            if str(getattr(module, "scale_mode", "learned")) == "dynamic"
+            and hasattr(module, "running_absmax")
+            and hasattr(module, "set_scale_mode")
+        ]
+        if not dynamic_modules:
+            print("SmartPAF-lite DS->SS: skipped, no StablePoly4 modules in dynamic scale mode")
+            return None
+
+        print("✓ SmartPAF-lite DS->SS conversion:")
+        print(f"  - use_best={self.smartpaf_ds_to_ss_use_best}")
+
+        if self.smartpaf_ds_to_ss_use_best:
+            best_path = os.path.join(self.result_dir, 'best_model.pth')
+            if os.path.exists(best_path):
+                checkpoint = torch.load(best_path, map_location=self.device)
+                model_state = checkpoint.get('model_state_dict')
+                if model_state is not None:
+                    self.model.load_state_dict(model_state, strict=self.resume_strict)
+                    print(f"  - loaded best model from {best_path}")
+            else:
+                print(f"  - best model not found at {best_path}; using current model")
+
+        converted = []
+        for name, module in dynamic_modules:
+            absmax = float(module.running_absmax.detach().float().cpu().item())
+            absmax = max(absmax, getattr(module, "dynamic_scale_eps", 1e-6))
+            module.set_scale_mode(mode='static', static_absmax=absmax)
+            converted.append((name, absmax))
+            print(f"  - {name}: static_absmax={absmax:.6g}, in_scale≈{1.0 / absmax:.6g}")
+
+        start_time = time.time()
+        val_loss, val_acc = self.validate(epoch='ds_to_ss')
+        eval_time = time.time() - start_time
+        current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0
+        self._last_train_stats = {
+            'valid_batches': 0,
+            'skipped_batches': 0,
+            'nonfinite_batches': 0,
+        }
+        self._append_history_row(
+            epoch=self._next_history_epoch(),
+            train_loss=0.0,
+            train_acc=0.0,
+            val_loss=val_loss,
+            val_acc=val_acc,
+            learning_rate=current_lr,
+            epoch_time=eval_time,
+            smartpaf_phase='ds_to_ss',
+            collapse_guard_triggered=0,
+        )
+
+        if self.save_checkpoints:
+            is_new_best = val_acc > self.best_acc
+            if is_new_best:
+                self.best_acc = val_acc
+                self.save_checkpoint(self.history['epoch'][-1], is_best=True)
+            self.save_checkpoint(self.history['epoch'][-1], is_best=False, filename='ds_to_ss_model.pth')
+
+        self.save_history()
+        print(f"  - DS->SS validation: Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
+        return {'val_loss': val_loss, 'val_acc': val_acc, 'converted': converted}
 
     def _progress_bar(self, iterable, **kwargs):
         """
@@ -2063,6 +2139,7 @@ class Trainer:
 
         self._run_swa_evaluation()
         self._run_bn_recalibration()
+        self._run_smartpaf_ds_to_ss_evaluation()
         
         # 训练完成
         total_time = time.time() - start_time

@@ -1653,3 +1653,112 @@ spending epochs on them once validation rejects a group. Keep the option
 default-off; the remaining paper-faithful step is still a true per-layer group
 loop with local best/SWA candidate restoration instead of global epoch
 alternation.
+
+## 2026-06-01 DS-to-SS Deployment Conversion Attempt
+
+Implemented default-off `smartpaf_ds_to_ss_after_training` and
+`smartpaf_ds_to_ss_use_best`. This adds the paper-style deployment step for
+dynamic scale runs: after DS training, optionally load `best_model.pth`, copy
+each dynamic StablePoly4 module's `running_absmax` into `static_absmax`, switch
+the module to static scale, then validate and save `ds_to_ss_model.pth`.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ds_to_ss_fast.yaml') as f:
+    data = yaml.safe_load(f)
+kw = data['models'][0]['trainer_kwargs']
+assert kw['poly4_scale_mode'] == 'dynamic'
+assert kw['smartpaf_ds_to_ss_after_training'] is True
+assert kw['smartpaf_ds_to_ss_use_best'] is True
+print(data['models'][0]['name'])
+PY
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from models.gate_net_cmp.block_def import StablePoly4
+from trainers.base_trainer import Trainer
+
+model = nn.Sequential(StablePoly4(scale_mode='dynamic'))
+x = torch.randn(24, 3)
+y = torch.arange(24) % 3
+loader = DataLoader(TensorDataset(x, y), batch_size=6)
+opt = torch.optim.SGD(model.parameters(), lr=0.01)
+trainer = Trainer(
+    model=model,
+    train_loader=loader,
+    val_loader=loader,
+    criterion=nn.CrossEntropyLoss(),
+    optimizer=opt,
+    device=torch.device('cpu'),
+    result_dir='/tmp/smartpaf_ds_to_ss_smoke',
+    epochs=1,
+    save_checkpoints=False,
+    poly4_scale_mode='dynamic',
+    smartpaf_ds_to_ss_after_training=True,
+    smartpaf_ds_to_ss_use_best=False,
+)
+model.train()
+with torch.no_grad():
+    model(torch.randn(8, 3) * 4)
+result = trainer._run_smartpaf_ds_to_ss_evaluation()
+assert result is not None
+assert model[0].scale_mode == 'static'
+assert float(model[0].static_absmax) > 1.0
+assert trainer.history['smartpaf_phase'][-1] == 'ds_to_ss'
+print('ds_to_ss smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ds_to_ss_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ds_to_ss_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ds_to_ss_fast.status' < /dev/null &
+```
+
+CT and DS->SS conversion details:
+
+| Module | CT MSE | DS->SS static absmax | In scale |
+| --- | ---: | ---: | ---: |
+| `special_resnet.layers.0.act` | 0.0571138 | 8.70961 | 0.114816 |
+| `special_resnet.layers.1.act` | 0.0326864 | 6.96405 | 0.143595 |
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ds-to-ss-b256` | 17 | 44.42 | 44.42 | 3.54 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ds-b256` | 16 | 44.58 | 42.98 | 5.52 | 0 | PASS |
+| `imagenet100-96-pa-ct-ds-to-ss-b256` | 17 | 44.42 | 44.42 | 3.54 | 0 | PASS |
+
+Tail rows:
+
+| Epoch/Row | Phase | Val acc | Val loss |
+| ---: | --- | ---: | ---: |
+| 13 | disabled | 42.48 | 2.5357 |
+| 14 | disabled | 44.42 | 2.4441 |
+| 15 | disabled | 40.88 | 2.6122 |
+| 16 | disabled | 43.00 | 2.5146 |
+| 17 | ds_to_ss | 44.42 | 2.4441 |
+
+Conclusion: DS-to-SS conversion works mechanically and preserves the best DS
+checkpoint exactly on this proxy: epoch 14 dynamic validation and the converted
+static validation are both 44.42%. This confirms the deployability path, but it
+does not fix DS's accuracy gap: direct pre-calibrated SS remains 3.00 points
+higher, and CT-only remains 4.52 points higher. Keep DS-to-SS default-off and
+available for deployment-style runs; current accuracy work should continue to
+focus on the per-layer group scheduler and PAF family choices rather than scale
+conversion alone.
