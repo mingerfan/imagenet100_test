@@ -877,6 +877,19 @@ class Trainer:
             return x
         raise ValueError(f"Unsupported smartpaf_ct_target: {self.smartpaf_ct_target}")
 
+    @staticmethod
+    def _even_sample_indices(num_values, sample_count, device):
+        if sample_count <= 0:
+            return torch.empty(0, device=device, dtype=torch.long)
+        if sample_count >= num_values:
+            return torch.arange(num_values, device=device, dtype=torch.long)
+        if sample_count == 1:
+            return torch.zeros(1, device=device, dtype=torch.long)
+        return torch.arange(sample_count, device=device, dtype=torch.long).mul_(num_values - 1).div_(
+            sample_count - 1,
+            rounding_mode='floor',
+        )
+
     def _run_smartpaf_ct_init(self):
         """Fit StablePoly4 coefficients to their warmup activation on sampled inputs."""
         if not self.smartpaf_ct_init or not self._smartpaf_poly_modules:
@@ -901,7 +914,7 @@ class Trainer:
                     return
                 values = inputs[0].detach().float().flatten()
                 if values.numel() > remaining:
-                    idx = torch.linspace(0, values.numel() - 1, remaining, device=values.device).long()
+                    idx = self._even_sample_indices(values.numel(), remaining, values.device)
                     values = values.index_select(0, idx)
                 samples[module].append(values.cpu())
             return hook
@@ -994,7 +1007,7 @@ class Trainer:
                     if remaining <= 0:
                         return
                     if values.numel() > remaining:
-                        idx = torch.linspace(0, values.numel() - 1, remaining, device=values.device).long()
+                        idx = self._even_sample_indices(values.numel(), remaining, values.device)
                         values = values.index_select(0, idx)
                     samples[module].append(values.cpu())
             return hook

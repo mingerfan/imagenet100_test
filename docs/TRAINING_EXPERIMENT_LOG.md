@@ -3153,3 +3153,13 @@ Planned commands:
 .venv/bin/python -u train.py --config configs/large_cifar10_224_autofhe_compare.yaml --dataset cifar10 --train_dir ./data --val_dir ./data --download --result_dir ./results --gpus 1 2 3 --input_size 224 --force
 .venv/bin/python -u train.py --config configs/large_cifar100_224_autofhe_compare.yaml --dataset cifar100 --train_dir ./data --val_dir ./data --download --result_dir ./results --gpus 1 2 3 --input_size 224 --force
 ```
+
+First CIFAR-10 attempt with `./data` failed before training because the CIFAR
+download was attempted concurrently by three workers and the configured proxy
+returned connection errors. Retrying with local `./tmp/cifar-10-batches-py`
+entered training but found a CT initialization bug at 224px: StablePoly CT/SS
+activation sampling used `torch.linspace(...).long()` on CUDA for large flattened
+feature maps. At 224px this can round the final index to `numel()`, causing
+`index_select` to trigger a scatter/gather device-side assert. The sampling code
+now uses integer arithmetic and a debug run confirmed CT initialization reaches
+the first training batch for `cifar10-224-autofhe-degree2-b128`.
