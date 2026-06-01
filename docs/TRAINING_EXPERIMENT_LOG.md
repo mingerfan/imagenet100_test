@@ -3203,3 +3203,23 @@ CIFAR-100 data prep status:
 
 Therefore CIFAR-100/ImageNet100 follow-up training is pending a usable
 CIFAR-100 data root or a working external download path.
+
+## 2026-06-01 ImageNet100 224 AutoFHE Comparison Setup
+
+Goal: continue the large-resolution stability check on available ImageNet100
+data while CIFAR-100 is blocked by missing data/download failures.
+
+Dataset check:
+
+- `train`: 128,982 images via symlinks into `imagenet_1000`
+- `val`: 5,000 images via symlinks into `imagenet_1000`
+
+Config:
+
+- `configs/large_imagenet100_224_autofhe_compare.yaml`
+
+Planned command:
+
+```bash
+.venv/bin/python -u train.py --config configs/large_imagenet100_224_autofhe_compare.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 1 2 3 --input_size 224 --no_memory_fs --force
+```
