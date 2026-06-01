@@ -3087,3 +3087,50 @@ Conclusion: the Swish-specific PAT backward is mechanically ready and
 default-off. It should be tested as an ablation against the existing
 `imagenet100-96-autofhe-adaptive-degree2-b256` result before making it a
 recommended default.
+
+## 2026-06-01 AutoFHE PAT Swish Backward Proxy
+
+Goal: test whether the Swish-specific PAT backward improves the selected
+AutoFHE adaptive degree-2 proxy. The setup matches
+`proxy_imagenet100_96_autofhe_adaptive_degree_fast.yaml` except that
+`poly4_pat_swish_backward: true` is enabled.
+
+Proxy command:
+
+```bash
+bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_autofhe_pat_swish_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_autofhe_pat_swish_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_autofhe_pat_swish_fast.status'
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-autofhe-pat-swish-degree2-b256` | 16 | 48.22 | 48.22 | 0.00 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-autofhe-adaptive-degree2-b256` | 16 | 48.98 | 48.98 | 1.02 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-autofhe-pat-swish-degree2-b256` | 16 | 48.22 | 48.22 | 0.00 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Val acc | Note |
+| ---: | ---: | --- |
+| 5 | 23.58 | first StablePoly starts transition; no early drop |
+| 8 | 34.42 | better than no-PAT run at the same point |
+| 10 | 38.34 | second StablePoly starts transition; falls behind no-PAT |
+| 13 | 45.42 | lower than no-PAT 46.28 |
+| 16 | 48.22 | final |
+
+Conclusion: Swish PAT backward is numerically stable and avoids collapse, but it
+is a negative result for the degree-2 proxy: final accuracy is 0.76 percentage
+points below the no-PAT adaptive-degree run. Keep `poly4_pat_swish_backward`
+default-off. The likely reason is that degree-2 polynomial gradients are already
+well behaved after CT; replacing activation-input gradients with Swish helps
+some early transition epochs but slows late adaptation after the second
+StablePoly module activates. PAT may still be useful for degree-3/4 or more
+aggressive PAF families where true polynomial gradients are less stable.
