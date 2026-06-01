@@ -1896,3 +1896,140 @@ better AT proxy remains dynamic poly stop plus uninterrupted weights recovery.
 Keep phase restore default-off. A more faithful next step should make this
 per-layer and compare a local SWA candidate, rather than applying short global
 phase restores.
+
+## 2026-06-01 AT Phase SWA Candidate Attempt
+
+Added default-off `smartpaf_at_phase_swa`. When phase-local restoration is
+enabled, each AT phase group now keeps an `AveragedModel` over the group epochs.
+At the group boundary, the trainer validates the SWA candidate and restores it
+if it beats the ordinary group best. This is a direct proxy for the SMART-PAF
+paper's "best or SWA candidate" training-group acceptance rule.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ss_at_group2_phaseswa_fast.yaml') as f:
+    data = yaml.safe_load(f)
+kw = data['models'][0]['trainer_kwargs']
+assert kw['smartpaf_at_restore_phase_best'] is True
+assert kw['smartpaf_at_phase_swa'] is True
+assert kw['smartpaf_at_stop_after_rejected_poly_groups'] == 1
+print(data['models'][0]['name'])
+PY
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from trainers.base_trainer import Trainer
+model = nn.Linear(1, 1, bias=False)
+trainer = Trainer.__new__(Trainer)
+trainer.model = model
+trainer.device = torch.device('cpu')
+trainer.resume_strict = True
+trainer.smartpaf_alternate_training = True
+trainer.smartpaf_at_initial_phase = 'poly'
+trainer.smartpaf_at_cycle_epochs = 2
+trainer._smartpaf_at_start_epoch = 5
+trainer._smartpaf_poly_stopped_after_rejections = False
+trainer._smartpaf_poly_param_ids = {id(model.weight)}
+trainer.smartpaf_at_skip_rejected_poly_group = False
+trainer._smartpaf_skipped_poly_phase_idx = None
+trainer.smartpaf_at_restore_phase_best = True
+trainer.smartpaf_at_restore_phase_min_delta = 0.0
+trainer.smartpaf_at_phase_swa = True
+trainer.best_acc = 20.0
+trainer.history = {'val_acc': [20.0]}
+trainer._smartpaf_restore_phase_idx = None
+trainer._smartpaf_restore_phase_label = None
+trainer._smartpaf_restore_phase_start_acc = None
+trainer._smartpaf_restore_phase_start_state = None
+trainer._smartpaf_restore_phase_best_acc = None
+trainer._smartpaf_restore_phase_best_epoch = None
+trainer._smartpaf_restore_phase_best_state = None
+trainer._smartpaf_restore_phase_last_restored_acc = None
+trainer._smartpaf_restore_phase_swa_model = None
+trainer._smartpaf_restore_phase_swa_updates = 0
+trainer._smartpaf_restore_phase_swa_acc = None
+trainer._validate_with_model = lambda model, epoch: (0.5, 23.0)
+with torch.no_grad():
+    model.weight.fill_(1.0)
+trainer._prepare_smartpaf_phase_restore_group(5)
+with torch.no_grad():
+    model.weight.fill_(2.0)
+trainer._update_smartpaf_phase_restore_group(5, 22.0)
+with torch.no_grad():
+    model.weight.fill_(4.0)
+trainer._update_smartpaf_phase_restore_group(6, 21.0)
+result = trainer._finalize_smartpaf_phase_restore_group()
+assert result['best_source'] == 'swa'
+assert result['swa_updates'] == 2
+assert abs(float(model.weight.item()) - 3.0) < 1e-6
+print('phase swa smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_phaseswa_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_phaseswa_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_phaseswa_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-phaseswa-b256` | 17 | 46.18 | 46.18 | 1.50 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-b256` | 16 | 46.64 | 46.64 | 2.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-phaseswa-b256` | 17 | 46.18 | 46.18 | 1.50 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-phasebest-b256` | 17 | 45.34 | 45.34 | 1.36 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-skip-b256` | 16 | 43.52 | 43.52 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+
+Phase details:
+
+| Epoch/Row | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 22.82 | 0 |
+| 6 | weights | 24.26 | 0 |
+| 7 | weights | 28.86 | 0 |
+| 8 | weights | 27.36 | 0 |
+| 9 | weights | 31.22 | 0 |
+| 10 | weights | 34.36 | 0 |
+| 11 | weights | 37.76 | 0 |
+| 12 | weights | 39.64 | 0 |
+| 13 | weights | 43.82 | 0 |
+| 14 | weights | 45.26 | 0 |
+| 15 | weights | 43.82 | 0 |
+| 16 | weights | 46.18 | 0 |
+| 17 | phase_restore | 46.18 | 0 |
+
+Group candidate summary:
+
+| Group | Phase | Start | Ordinary best | SWA acc | Restored |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 0 | poly | 22.82 | 24.26 | 17.32 | epoch 6 |
+| 1 | weights | 24.26 | 28.86 | 31.56 | SWA |
+| 2 | weights | 31.56 | 34.36 | 27.52 | epoch 10 |
+| 3 | weights | 34.36 | 39.64 | 35.46 | epoch 12 |
+| 4 | weights | 39.64 | 45.26 | 44.08 | epoch 14 |
+| 5 | weights | 45.26 | 46.18 | 44.84 | epoch 16 |
+
+Conclusion: local phase SWA works and gives a positive delta over phase-best
+restore, improving best/final from 45.34 to 46.18. The SWA candidate was useful
+in group 1, where it recovered 31.56% versus the ordinary group's 28.86%.
+However, it still trails the simpler dynamic-stop proxy by 0.46 points and
+CT+SS by 1.24 points. Keep phase SWA default-off for global AT; it remains a
+good component for the future true per-layer training-group scheduler, where
+SWA candidates are evaluated around a single replacement rather than repeated
+global weights-only recovery phases.
