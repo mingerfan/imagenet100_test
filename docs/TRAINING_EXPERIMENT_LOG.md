@@ -2667,3 +2667,94 @@ outscale=0.2 and its max drop is larger. It still trails CT-only by 1.20 points
 and the Swish baseline by 1.72 points. Keep `poly4_degree` as a useful search
 knob; the next degree/form search should test degree 3 and possibly combine
 degree 2 with the more stable `output_scale=0.2` setting.
+
+## 2026-06-01 StablePoly Degree 3 Attempt
+
+Goal: complete a direct degree-2/3/4 comparison for the current StablePoly
+family after adding `poly4_degree`.
+
+Implementation:
+
+- Added config `configs/proxy_imagenet100_96_pa_ct_ss_degree3_fast.yaml`.
+- No trainer/model code change in this step; this uses the already-validated
+  `poly4_degree` path from the degree 2 attempt.
+
+Validation:
+
+```bash
+.venv/bin/python - <<'PY'
+import yaml
+p='configs/proxy_imagenet100_96_pa_ct_ss_degree3_fast.yaml'
+cfg=yaml.safe_load(open(p))
+m=cfg['models'][0]
+kw=m['trainer_kwargs']
+assert m['name'] == 'imagenet100-96-pa-ct-ss-degree3-b256'
+assert kw['poly4_degree'] == 3
+assert kw['poly4_scale_mode'] == 'static'
+assert kw['smartpaf_ct_init'] is True
+assert kw['smartpaf_ss_calibrate'] is True
+assert kw['smartpaf_alternate_training'] is False
+print('yaml ok')
+PY
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py trainers/base_trainer.py
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_degree3_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_degree3_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_degree3_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-degree3-b256` | 16 | 47.26 | 47.26 | 1.96 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree2-b256` | 16 | 47.74 | 47.64 | 2.16 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-outscale02-b256` | 16 | 47.58 | 47.58 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree3-b256` | 16 | 47.26 | 47.26 | 1.96 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 1 | disabled | 8.60 | 0 |
+| 2 | disabled | 15.24 | 0 |
+| 3 | disabled | 19.60 | 0 |
+| 4 | disabled | 23.20 | 0 |
+| 5 | disabled | 25.48 | 0 |
+| 6 | disabled | 28.16 | 0 |
+| 7 | disabled | 31.06 | 0 |
+| 8 | disabled | 30.90 | 0 |
+| 9 | disabled | 31.46 | 0 |
+| 10 | disabled | 37.80 | 0 |
+| 11 | disabled | 41.36 | 0 |
+| 12 | disabled | 43.60 | 0 |
+| 13 | disabled | 45.22 | 0 |
+| 14 | disabled | 47.18 | 0 |
+| 15 | disabled | 45.22 | 0 |
+| 16 | disabled | 47.26 | 0 |
+
+CT and degree evidence:
+
+| Item | Value |
+| --- | ---: |
+| Configured `poly_degree` | 3 |
+| `special_resnet.layers.0.act` CT MSE | 0.0695140 |
+| `special_resnet.layers.1.act` CT MSE | 0.0404400 |
+| Final logged `output_scale` | 0.1 |
+
+Conclusion: degree 3 is stable but not useful on this proxy. It finishes at
+47.26, which is 0.48 points below degree 2 and 0.16 points below the degree-4
+default CT+SS run. Degree search now points to degree 2 as the only positive
+lower-degree setting tested so far. The next useful search is a combination
+test: degree 2 plus the more stable `output_scale=0.2` setting.
