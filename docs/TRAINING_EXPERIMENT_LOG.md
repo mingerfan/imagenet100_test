@@ -3134,3 +3134,22 @@ well behaved after CT; replacing activation-input gradients with Swish helps
 some early transition epochs but slows late adaptation after the second
 StablePoly module activates. PAT may still be useful for degree-3/4 or more
 aggressive PAF families where true polynomial gradients are less stable.
+
+## 2026-06-01 CIFAR 224 AutoFHE Comparison Setup
+
+Goal: compare the Swish baseline, AutoFHE adaptive degree-2 proxy, and the
+Swish PAT-backward ablation on CIFAR-10/CIFAR-100 resized to ImageNet-style
+224px inputs. This checks whether the AutoFHE strategy remains stable outside
+the ImageNet100 96px proxy before attempting a larger ImageNet100 run.
+
+Configs:
+
+- `configs/large_cifar10_224_autofhe_compare.yaml`
+- `configs/large_cifar100_224_autofhe_compare.yaml`
+
+Planned commands:
+
+```bash
+.venv/bin/python -u train.py --config configs/large_cifar10_224_autofhe_compare.yaml --dataset cifar10 --train_dir ./data --val_dir ./data --download --result_dir ./results --gpus 1 2 3 --input_size 224 --force
+.venv/bin/python -u train.py --config configs/large_cifar100_224_autofhe_compare.yaml --dataset cifar100 --train_dir ./data --val_dir ./data --download --result_dir ./results --gpus 1 2 3 --input_size 224 --force
+```

@@ -1,0 +1,124 @@
+# CIFAR-10 at ImageNet-style resolution for collapse/stability comparison.
+# Run with: --dataset cifar10 --input_size 224 --gpus 1 2 3
+
+global:
+  num_classes: 10
+  default_epochs: 40
+  default_batch_size: 128
+  default_learning_rate: 0.0007
+  default_num_workers: 8
+  default_save_freq: 0
+
+models:
+  - name: "cifar10-224-swish-baseline-b128"
+    class: "resnet-basic-swish-layer1block1"
+    params:
+      num_classes: 10
+      pretrained: false
+    epochs: 40
+    batch_size: 128
+    learning_rate: 0.0007
+    num_workers: 8
+    prefetch_factor: 4
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 5
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
+
+  - name: "cifar10-224-autofhe-degree2-b128"
+    class: "resnet-basic-stablepoly4-layer1block1"
+    params:
+      num_classes: 10
+      pretrained: false
+    epochs: 40
+    batch_size: 128
+    learning_rate: 0.0007
+    num_workers: 8
+    prefetch_factor: 4
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    scheduler: cosine
+    warmup_epochs: 5
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.35
+      poly4_scale_mode: learned
+      poly4_degrees: [2, 2]
+      poly4_output_scale: 0.2
+      smartpaf_ct_init: true
+      smartpaf_ct_batches: 8
+      smartpaf_ct_max_samples: 20000
+      smartpaf_ct_steps: 300
+      smartpaf_ct_lr: 0.01
+      smartpaf_progressive: true
+      smartpaf_group_epochs: auto
+      smartpaf_transition_epochs: 8
+      smartpaf_alternate_training: false
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
+
+  - name: "cifar10-224-autofhe-pat-swish-degree2-b128"
+    class: "resnet-basic-stablepoly4-layer1block1"
+    params:
+      num_classes: 10
+      pretrained: false
+    epochs: 40
+    batch_size: 128
+    learning_rate: 0.0007
+    num_workers: 8
+    prefetch_factor: 4
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    scheduler: cosine
+    warmup_epochs: 5
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.35
+      poly4_scale_mode: learned
+      poly4_degrees: [2, 2]
+      poly4_output_scale: 0.2
+      poly4_pat_swish_backward: true
+      smartpaf_ct_init: true
+      smartpaf_ct_batches: 8
+      smartpaf_ct_max_samples: 20000
+      smartpaf_ct_steps: 300
+      smartpaf_ct_lr: 0.01
+      smartpaf_progressive: true
+      smartpaf_group_epochs: auto
+      smartpaf_transition_epochs: 8
+      smartpaf_alternate_training: false
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
