@@ -205,12 +205,14 @@ class StablePoly4(nn.Module):
         scale_mode="learned",
         dynamic_scale_momentum=0.99,
         dynamic_scale_eps=1e-6,
+        poly_degree=4,
     ):
         super().__init__()
         self.output_scale = output_scale
         self.warmup_epochs = warmup_epochs
         self.warmup_act = self._build_warmup_act(warmup_act)
         self.warmup_act_name = self._normalize_warmup_act_name(warmup_act)
+        self.poly_degree = self._normalize_poly_degree(poly_degree)
 
         # 使用更小的初始化值，防止高阶项导致梯度爆炸
         # a, b, c 初始化为接近0的小值
@@ -287,6 +289,10 @@ class StablePoly4(nn.Module):
         self.warmup_act = self._build_warmup_act(warmup_act)
         self.warmup_act_name = self._normalize_warmup_act_name(warmup_act)
 
+    def set_poly_degree(self, degree):
+        """设置多项式最高次数，默认 4；低阶模式屏蔽高阶项。"""
+        self.poly_degree = self._normalize_poly_degree(degree)
+
     def set_collect_stats(self, enabled: bool):
         """是否在 forward 中收集诊断统计"""
         self.collect_stats = bool(enabled)
@@ -323,6 +329,13 @@ class StablePoly4(nn.Module):
         if key not in {"learned", "dynamic", "static"}:
             raise ValueError(f"Unsupported StablePoly4 scale_mode: {mode}")
         return key
+
+    @staticmethod
+    def _normalize_poly_degree(degree):
+        value = int(degree)
+        if value not in {2, 3, 4}:
+            raise ValueError(f"Unsupported StablePoly4 poly_degree: {degree}")
+        return value
 
     def _calc_poly_input(self, x_work):
         if self.scale_mode == "learned":
@@ -405,10 +418,13 @@ class StablePoly4(nn.Module):
         c_clamped = torch.clamp(self.c, min=-0.5, max=0.5)
         d_clamped = torch.clamp(self.d, min=-5.0, max=5.0)
         e_clamped = torch.clamp(self.e, min=-5.0, max=5.0)
+        degree = int(getattr(self, "poly_degree", 4))
+        a_eff = a_clamped if degree >= 4 else torch.zeros_like(a_clamped)
+        b_eff = b_clamped if degree >= 3 else torch.zeros_like(b_clamped)
 
         # Horner 形式计算多项式，数值更稳
         poly_out = (
-            (((a_clamped * x_poly + b_clamped) * x_poly + c_clamped) * x_poly + d_clamped)
+            (((a_eff * x_poly + b_eff) * x_poly + c_clamped) * x_poly + d_clamped)
             * x_poly
             + e_clamped
         )
@@ -427,7 +443,7 @@ class StablePoly4(nn.Module):
         need_fprime = self.enable_deriv_loss or self.collect_stats
         if need_fprime:
             fprime = self.output_scale * (
-                (((4.0 * a_clamped) * x_poly + 3.0 * b_clamped) * x_poly + 2.0 * c_clamped)
+                (((4.0 * a_eff) * x_poly + 3.0 * b_eff) * x_poly + 2.0 * c_clamped)
                 * x_poly
                 + d_clamped
             )

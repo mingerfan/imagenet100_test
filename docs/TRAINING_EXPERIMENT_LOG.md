@@ -2507,3 +2507,163 @@ proxy. It improves final accuracy by 0.16 points over default CT+SS and reduces
 max drop from 2.32 to 0.58, but it remains 1.36 points behind CT-only and 1.88
 points behind the Swish baseline. Keep the kwarg and config as a useful search
 knob; do not treat it as sufficient to close the baseline gap.
+
+## 2026-06-01 StablePoly Degree 2 Attempt
+
+Goal: start testing the paper's PAF forms/degrees direction by making the
+existing StablePoly4 module configurable as a lower-degree polynomial while
+preserving degree 4 as the default.
+
+Implementation:
+
+- Added default-off `StablePoly4(poly_degree=4)`.
+- Added `set_poly_degree()` with supported degrees `2`, `3`, and `4`.
+- Degree 2 masks the cubic and quartic terms in forward and derivative
+  regularization while leaving parameter names/checkpoints compatible.
+- Added trainer kwarg `poly4_degree`; `None` preserves module defaults.
+- CT evaluation now uses the configured degree, so CT and training optimize the
+  same polynomial family.
+- Added config `configs/proxy_imagenet100_96_pa_ct_ss_degree2_fast.yaml`.
+
+Validation:
+
+```bash
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+p='configs/proxy_imagenet100_96_pa_ct_ss_degree2_fast.yaml'
+cfg=yaml.safe_load(open(p))
+m=cfg['models'][0]
+assert m['name'] == 'imagenet100-96-pa-ct-ss-degree2-b256'
+assert m['trainer_kwargs']['poly4_degree'] == 2
+assert m['trainer_kwargs']['poly4_scale_mode'] == 'static'
+assert m['trainer_kwargs']['smartpaf_ct_init'] is True
+assert m['trainer_kwargs']['smartpaf_ss_calibrate'] is True
+print('yaml ok')
+PY
+.venv/bin/python - <<'PY'
+import torch
+from models.gate_net_cmp.block_def import StablePoly4
+
+x = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0])
+m = StablePoly4(output_scale=1.0, warmup_epochs=0, scale_mode='static')
+m.set_poly_schedule(start_epoch=0, transition_epochs=0)
+m.set_poly_degree(2)
+m.static_absmax.fill_(1.0)
+with torch.no_grad():
+    m.a.fill_(0.01)
+    m.b.fill_(0.1)
+    m.c.fill_(0.5)
+    m.d.fill_(1.0)
+    m.e.fill_(0.25)
+    m.set_epoch(1)
+y2 = m(x)
+expected2 = 0.5 * x.square() + x + 0.25
+assert torch.allclose(y2, expected2)
+m.set_poly_degree(4)
+y4 = m(x)
+expected4 = 0.01 * x**4 + 0.1 * x**3 + 0.5 * x**2 + x + 0.25
+assert torch.allclose(y4, expected4)
+print('stablepoly degree smoke ok')
+PY
+.venv/bin/python - <<'PY'
+import torch.nn as nn
+from trainers.base_trainer import Trainer
+
+class DummyPoly(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.poly_degree = 4
+        self.output_scale = 0.1
+        self.range_args = None
+        self.scale_mode = None
+    def set_poly_degree(self, degree):
+        self.poly_degree = degree
+    def set_range_params(self, **kwargs):
+        self.range_args = kwargs
+    def set_scale_mode(self, mode, momentum, eps):
+        self.scale_mode = (mode, momentum, eps)
+
+class DummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.act = DummyPoly()
+
+trainer = Trainer.__new__(Trainer)
+trainer.model = DummyModel()
+trainer.poly4_output_scale = None
+trainer.poly4_degree = 2
+trainer.poly4_range_r = 2.0
+trainer.poly4_range_lambda = 0.0
+trainer.poly4_deriv_L = 3.0
+trainer.poly4_deriv_lambda = 0.0
+trainer.poly4_scale_mode = 'static'
+trainer.poly4_dynamic_scale_momentum = 0.99
+trainer.poly4_dynamic_scale_eps = 1e-6
+trainer._configure_poly4_modules()
+assert trainer.model.act.poly_degree == 2
+assert trainer.model.act.scale_mode == ('static', 0.99, 1e-6)
+print('trainer degree smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_degree2_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_degree2_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_degree2_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-degree2-b256` | 16 | 47.74 | 47.64 | 2.16 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree2-b256` | 16 | 47.74 | 47.64 | 2.16 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-outscale02-b256` | 16 | 47.58 | 47.58 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 1 | disabled | 8.64 | 0 |
+| 2 | disabled | 15.48 | 0 |
+| 3 | disabled | 19.38 | 0 |
+| 4 | disabled | 22.16 | 0 |
+| 5 | disabled | 24.88 | 0 |
+| 6 | disabled | 28.10 | 0 |
+| 7 | disabled | 31.28 | 0 |
+| 8 | disabled | 29.58 | 0 |
+| 9 | disabled | 35.58 | 0 |
+| 10 | disabled | 39.22 | 0 |
+| 11 | disabled | 40.36 | 0 |
+| 12 | disabled | 42.60 | 0 |
+| 13 | disabled | 45.50 | 0 |
+| 14 | disabled | 47.74 | 0 |
+| 15 | disabled | 45.58 | 0 |
+| 16 | disabled | 47.64 | 0 |
+
+CT and degree evidence:
+
+| Item | Value |
+| --- | ---: |
+| Configured `poly_degree` | 2 |
+| `special_resnet.layers.0.act` CT MSE | 0.0695274 |
+| `special_resnet.layers.1.act` CT MSE | 0.0404456 |
+| Final logged `output_scale` | 0.1 |
+
+Conclusion: degree 2 is a small positive PAF-family search result. It improves
+CT+SS best accuracy by 0.32 points over the degree-4 default and by 0.16 points
+over the outscale=0.2 tweak, although its final value is only 0.06 points above
+outscale=0.2 and its max drop is larger. It still trails CT-only by 1.20 points
+and the Swish baseline by 1.72 points. Keep `poly4_degree` as a useful search
+knob; the next degree/form search should test degree 3 and possibly combine
+degree 2 with the more stable `output_scale=0.2` setting.

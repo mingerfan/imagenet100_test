@@ -46,6 +46,7 @@ class Trainer:
         poly4_deriv_L=3.0,
         poly4_scale_mode='learned',
         poly4_output_scale=None,
+        poly4_degree=None,
         poly4_dynamic_scale_momentum=0.99,
         poly4_dynamic_scale_eps=1e-6,
         nan_debug=False,
@@ -132,6 +133,7 @@ class Trainer:
             poly4_deriv_L: StablePoly4导数阈值
             poly4_scale_mode: StablePoly4输入缩放模式 learned/dynamic/static
             poly4_output_scale: StablePoly4 多项式输出缩放；None 保持模块默认值
+            poly4_degree: StablePoly4 多项式最高次数 2/3/4；None 保持模块默认值
             poly4_dynamic_scale_momentum: dynamic scale running absmax 动量
             poly4_dynamic_scale_eps: dynamic/static scale 的最小 absmax
             nan_debug: 是否启用NaN定位钩子（默认关闭）
@@ -212,6 +214,9 @@ class Trainer:
         self.poly4_output_scale = None if poly4_output_scale is None else float(poly4_output_scale)
         if self.poly4_output_scale is not None and self.poly4_output_scale <= 0:
             raise ValueError(f"poly4_output_scale must be positive, got {poly4_output_scale}")
+        self.poly4_degree = None if poly4_degree is None else int(poly4_degree)
+        if self.poly4_degree is not None and self.poly4_degree not in {2, 3, 4}:
+            raise ValueError(f"poly4_degree must be one of 2, 3, 4, got {poly4_degree}")
         self.poly4_dynamic_scale_momentum = float(poly4_dynamic_scale_momentum)
         self.poly4_dynamic_scale_eps = float(poly4_dynamic_scale_eps)
         self.nan_debug = nan_debug
@@ -644,6 +649,8 @@ class Trainer:
         for module in self.model.modules():
             if self.poly4_output_scale is not None and hasattr(module, 'output_scale'):
                 module.output_scale = self.poly4_output_scale
+            if self.poly4_degree is not None and hasattr(module, 'set_poly_degree'):
+                module.set_poly_degree(self.poly4_degree)
             if hasattr(module, 'set_range_params') and callable(module.set_range_params):
                 module.set_range_params(
                     range_r=self.poly4_range_r,
@@ -668,6 +675,8 @@ class Trainer:
             print(f"  - scale_mode: {self.poly4_scale_mode}")
             if self.poly4_output_scale is not None:
                 print(f"  - output_scale: {self.poly4_output_scale:g}")
+            if self.poly4_degree is not None:
+                print(f"  - poly_degree: {self.poly4_degree}")
             if self.poly4_range_lambda > 0:
                 print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")
             if self.poly4_deriv_lambda > 0:
@@ -767,7 +776,10 @@ class Trainer:
         c = torch.clamp(module.c, min=-0.5, max=0.5)
         d = torch.clamp(module.d, min=-5.0, max=5.0)
         e = torch.clamp(module.e, min=-5.0, max=5.0)
-        poly = ((((a * x_poly + b) * x_poly + c) * x_poly + d) * x_poly + e)
+        degree = int(getattr(module, "poly_degree", 4))
+        a_eff = a if degree >= 4 else torch.zeros_like(a)
+        b_eff = b if degree >= 3 else torch.zeros_like(b)
+        poly = ((((a_eff * x_poly + b_eff) * x_poly + c) * x_poly + d) * x_poly + e)
         return poly * float(getattr(module, "output_scale", 1.0))
 
     def _smartpaf_ct_target_eval(self, module, x):
@@ -1443,6 +1455,7 @@ class Trainer:
                         absmax = 1.0
                     in_scale = 1.0 / max(absmax, getattr(module, "dynamic_scale_eps", 1e-6))
                 out_scale = float(getattr(module, "output_scale", 1.0))
+                degree = int(getattr(module, "poly_degree", 4))
                 warmup_epochs = int(getattr(module, "warmup_epochs", 0))
                 cur_epoch = int(module.current_epoch.item()) if hasattr(module, "current_epoch") else None
             except Exception:
@@ -1454,7 +1467,7 @@ class Trainer:
                 f"  - {name}: "
                 f"a={a:.4g} b={b:.4g} c={c:.4g} d={d:.4g} e={e:.4g} "
                 f"scale_mode={scale_mode} log_in_scale={log_in:.4g} in_scale≈{in_scale:.4g} "
-                f"output_scale={out_scale:.4g} warmup_epochs={warmup_epochs}"
+                f"output_scale={out_scale:.4g} poly_degree={degree} warmup_epochs={warmup_epochs}"
                 + (f" current_epoch={cur_epoch}" if cur_epoch is not None else "")
             )
         if printed == 0:
