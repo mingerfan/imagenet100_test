@@ -3240,3 +3240,37 @@ Follow-up fast proxy config:
 - Models: Swish baseline and no-PAT AutoFHE degree-2
 - Workers/prefetch reduced to 4/2 per model
 - Epochs reduced to 12
+
+The multi-model manager was still inefficient for this dataset/host
+combination, so the fast proxy was run as two single-model processes on GPU1
+and GPU2:
+
+```bash
+.venv/bin/python -u train.py --config configs/large_imagenet100_224_autofhe_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 1 --input_size 224 --no_memory_fs --models imagenet100-224-swish-baseline-fast-b128 --force
+.venv/bin/python -u train.py --config configs/large_imagenet100_224_autofhe_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 224 --no_memory_fs --models imagenet100-224-autofhe-degree2-fast-b128 --force
+```
+
+Final 12-epoch result:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-224-autofhe-degree2-fast-b128` | 12 | 71.52 | 71.52 | 0.00 | 0 | 0 | 0 | PASS |
+| `imagenet100-224-swish-baseline-fast-b128` | 12 | 71.40 | 71.40 | 0.00 | 0 | 0 | 0 | PASS |
+
+Transition observations:
+
+- AutoFHE crossed the first StablePoly transition at epoch 5 and the second at
+  epoch 6 without collapse or accuracy drop: validation accuracy improved from
+  47.62 at epoch 5 to 54.28 at epoch 6 and 58.44 at epoch 7.
+- At epoch 8, AutoFHE and the Swish baseline were effectively tied: 62.78 vs
+  62.84. At epoch 9, they remained within 0.20 percentage points: 66.86 vs
+  67.06.
+- The final AutoFHE proxy slightly exceeded the Swish baseline: 71.52 vs 71.40.
+  Both runs completed with process status 0 and no nonfinite, skipped-batch, or
+  activation guard events.
+
+Conclusion: the no-PAT AutoFHE adaptive degree-2 strategy is stable at 224px on
+the available ImageNet100 proxy and did not collapse after staged StablePoly
+replacement. Together with the CIFAR-10 224 result, this supports keeping
+degree-2 no-PAT as the recommended proxy path and keeping Swish PAT backward as
+a default-off ablation.
