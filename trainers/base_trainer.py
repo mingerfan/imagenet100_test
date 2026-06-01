@@ -74,6 +74,7 @@ class Trainer:
         smartpaf_at_stop_after_rejected_poly_groups=0,
         smartpaf_at_restore_phase_best=False,
         smartpaf_at_restore_phase_min_delta=0.0,
+        smartpaf_at_restore_phase_scope='all',
         smartpaf_at_phase_swa=False,
         smartpaf_at_dropout_on_overfit=False,
         smartpaf_at_dropout_gap=10.0,
@@ -151,6 +152,7 @@ class Trainer:
             smartpaf_at_stop_after_rejected_poly_groups: 连续拒绝多少个 poly 组后停止后续 poly AT；0 表示关闭
             smartpaf_at_restore_phase_best: AT phase group 结束时是否恢复组内 best/起点模型
             smartpaf_at_restore_phase_min_delta: phase group 需要超过起点多少百分点才接受
+            smartpaf_at_restore_phase_scope: phase restore 作用范围，all/poly/weights
             smartpaf_at_phase_swa: phase group 内是否额外比较 SWA 平均模型候选
             smartpaf_at_dropout_on_overfit: 是否在训练/验证精度差过大时启用分类头 dropout
             smartpaf_at_dropout_gap: 触发 dropout 的训练/验证精度差，单位百分点
@@ -240,6 +242,11 @@ class Trainer:
         self.smartpaf_at_stop_after_rejected_poly_groups = max(0, int(smartpaf_at_stop_after_rejected_poly_groups))
         self.smartpaf_at_restore_phase_best = bool(smartpaf_at_restore_phase_best)
         self.smartpaf_at_restore_phase_min_delta = float(smartpaf_at_restore_phase_min_delta)
+        self.smartpaf_at_restore_phase_scope = str(smartpaf_at_restore_phase_scope).strip().lower()
+        if self.smartpaf_at_restore_phase_scope not in {'all', 'poly', 'weights'}:
+            raise ValueError(
+                f"Unsupported smartpaf_at_restore_phase_scope: {smartpaf_at_restore_phase_scope}"
+            )
         self.smartpaf_at_phase_swa = bool(smartpaf_at_phase_swa)
         self.smartpaf_at_dropout_on_overfit = bool(smartpaf_at_dropout_on_overfit)
         self.smartpaf_at_dropout_gap = float(smartpaf_at_dropout_gap)
@@ -1070,16 +1077,25 @@ class Trainer:
         except (TypeError, ValueError):
             return self.best_acc
 
+    def _smartpaf_restore_phase_in_scope(self, phase_label):
+        scope = self.smartpaf_at_restore_phase_scope
+        if scope == 'all':
+            return True
+        return phase_label == scope
+
     def _begin_smartpaf_phase_restore_group(self, epoch):
         phase_idx = self._smartpaf_phase_index(epoch)
         if phase_idx is None:
+            return
+        phase_label = self._current_smartpaf_phase(epoch)
+        if not self._smartpaf_restore_phase_in_scope(phase_label):
             return
         start_acc = self._smartpaf_restore_phase_last_restored_acc
         if start_acc is None:
             start_acc = self._last_recorded_val_acc()
         self._smartpaf_restore_phase_last_restored_acc = None
         self._smartpaf_restore_phase_idx = phase_idx
-        self._smartpaf_restore_phase_label = self._current_smartpaf_phase(epoch)
+        self._smartpaf_restore_phase_label = phase_label
         self._smartpaf_restore_phase_start_acc = start_acc
         self._smartpaf_restore_phase_start_state = self._clone_model_state_cpu()
         self._smartpaf_restore_phase_best_acc = self._smartpaf_restore_phase_start_acc
@@ -1173,12 +1189,15 @@ class Trainer:
         phase_idx = self._smartpaf_phase_index(epoch)
         if phase_idx is None:
             return None
+        phase_label = self._current_smartpaf_phase(epoch)
         finalized = None
         if self._smartpaf_restore_phase_idx is None:
-            self._begin_smartpaf_phase_restore_group(epoch)
+            if self._smartpaf_restore_phase_in_scope(phase_label):
+                self._begin_smartpaf_phase_restore_group(epoch)
         elif phase_idx != self._smartpaf_restore_phase_idx:
             finalized = self._finalize_smartpaf_phase_restore_group()
-            self._begin_smartpaf_phase_restore_group(epoch)
+            if self._smartpaf_restore_phase_in_scope(phase_label):
+                self._begin_smartpaf_phase_restore_group(epoch)
         return finalized
 
     def _update_smartpaf_phase_restore_group(self, epoch, val_acc):

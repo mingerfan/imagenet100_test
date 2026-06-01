@@ -2033,3 +2033,155 @@ CT+SS by 1.24 points. Keep phase SWA default-off for global AT; it remains a
 good component for the future true per-layer training-group scheduler, where
 SWA candidates are evaluated around a single replacement rather than repeated
 global weights-only recovery phases.
+
+## 2026-06-01 AT Poly-Scoped Phase SWA Attempt
+
+Added default-off `smartpaf_at_restore_phase_scope` with allowed values
+`all`, `poly`, and `weights`. This keeps the existing phase-local best/SWA
+machinery, but lets a proxy apply it only where it matches the experiment. The
+new proxy scopes phase restore/SWA to `poly` groups only: the rejected or
+accepted PAF coefficient group still gets a local best/SWA candidate, while
+later weights recovery is not interrupted by short global phase restores.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ss_at_group2_polyswa_fast.yaml') as f:
+    data = yaml.safe_load(f)
+kw = data['models'][0]['trainer_kwargs']
+assert kw['smartpaf_at_restore_phase_best'] is True
+assert kw['smartpaf_at_restore_phase_scope'] == 'poly'
+assert kw['smartpaf_at_phase_swa'] is True
+assert kw['smartpaf_at_stop_after_rejected_poly_groups'] == 1
+print(data['models'][0]['name'])
+PY
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from trainers.base_trainer import Trainer
+
+model = nn.Linear(1, 1, bias=False)
+trainer = Trainer.__new__(Trainer)
+trainer.model = model
+trainer.device = torch.device('cpu')
+trainer.resume_strict = True
+trainer.smartpaf_alternate_training = True
+trainer.smartpaf_at_initial_phase = 'poly'
+trainer.smartpaf_at_cycle_epochs = 2
+trainer._smartpaf_at_start_epoch = 5
+trainer._smartpaf_poly_stopped_after_rejections = False
+trainer._smartpaf_poly_param_ids = {id(model.weight)}
+trainer.smartpaf_at_skip_rejected_poly_group = False
+trainer._smartpaf_skipped_poly_phase_idx = None
+trainer.smartpaf_at_restore_phase_best = True
+trainer.smartpaf_at_restore_phase_min_delta = 0.0
+trainer.smartpaf_at_restore_phase_scope = 'poly'
+trainer.smartpaf_at_phase_swa = True
+trainer.best_acc = 20.0
+trainer.history = {'val_acc': [20.0]}
+trainer._smartpaf_restore_phase_idx = None
+trainer._smartpaf_restore_phase_label = None
+trainer._smartpaf_restore_phase_start_acc = None
+trainer._smartpaf_restore_phase_start_state = None
+trainer._smartpaf_restore_phase_best_acc = None
+trainer._smartpaf_restore_phase_best_epoch = None
+trainer._smartpaf_restore_phase_best_state = None
+trainer._smartpaf_restore_phase_last_restored_acc = None
+trainer._smartpaf_restore_phase_swa_model = None
+trainer._smartpaf_restore_phase_swa_updates = 0
+trainer._smartpaf_restore_phase_swa_acc = None
+trainer._validate_with_model = lambda model, epoch: (0.5, 23.0)
+
+with torch.no_grad():
+    model.weight.fill_(1.0)
+trainer._prepare_smartpaf_phase_restore_group(5)
+with torch.no_grad():
+    model.weight.fill_(2.0)
+trainer._update_smartpaf_phase_restore_group(5, 22.0)
+with torch.no_grad():
+    model.weight.fill_(4.0)
+trainer._update_smartpaf_phase_restore_group(6, 21.0)
+result = trainer._prepare_smartpaf_phase_restore_group(7)
+assert result['best_source'] == 'swa'
+assert result['swa_updates'] == 2
+assert abs(float(model.weight.item()) - 3.0) < 1e-6
+assert trainer._smartpaf_restore_phase_idx is None
+trainer._prepare_smartpaf_phase_restore_group(9)
+assert trainer._smartpaf_restore_phase_idx == 2
+print('poly-scoped phase restore smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_polyswa_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_polyswa_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_polyswa_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-polyswa-b256` | 16 | 46.54 | 46.54 | 1.66 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-b256` | 16 | 46.64 | 46.64 | 2.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-polyswa-b256` | 16 | 46.54 | 46.54 | 1.66 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-phaseswa-b256` | 17 | 46.18 | 46.18 | 1.50 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-phasebest-b256` | 17 | 45.34 | 45.34 | 1.36 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-skip-b256` | 16 | 43.52 | 43.52 | 0.58 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 23.00 | 0 |
+| 6 | weights | 24.76 | 0 |
+| 7 | weights | 28.06 | 0 |
+| 8 | weights | 29.02 | 0 |
+| 9 | weights | 30.30 | 0 |
+| 10 | weights | 34.44 | 0 |
+| 11 | weights | 37.34 | 0 |
+| 12 | weights | 41.94 | 0 |
+| 13 | weights | 44.72 | 0 |
+| 14 | weights | 46.08 | 0 |
+| 15 | weights | 44.42 | 0 |
+| 16 | weights | 46.54 | 0 |
+
+Group candidate summary:
+
+| Group | Phase | Start | Ordinary best | SWA acc | Restored |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 0 | poly | 23.00 | 24.76 | 17.58 | epoch 6 |
+
+Conclusion: poly-scoped phase restore/SWA is the strongest phase-restore AT
+variant so far. It avoids the negative effect seen when restoring every weights
+group, improving from phase-SWA's 46.18 to 46.54 and almost matching the simpler
+dynamic-stop proxy at 46.64. It still does not beat CT+SS and still trails the
+normal Swish baseline. Keep it default-off; the evidence says the current global
+AT proxy's only useful behavior is rejecting the first bad poly candidate and
+then letting weights recover uninterrupted.
+
+Paper techniques mentioned locally but still not faithfully applied:
+
+- True per-layer training groups that replace exactly one non-polynomial layer,
+  run a local convergence loop, then advance in inference order.
+- AT scoped to the current replacement and its directly related linear layers,
+  instead of global all-poly versus global non-poly phases.
+- Full paper PAF family search and task-specific selection across `a7`,
+  `2f12g1`, `f2g3`, `f2g2`, and `f1g2`; current proxies mostly exercise one
+  StablePoly4-style family.
+- Replacing all non-polynomial operators, especially MaxPooling, not only the
+  activation modules currently covered by the proxy model.
+- Deployment-oriented FHE latency/depth evaluation for the selected PAF family,
+  rather than accuracy-only proxy training.
