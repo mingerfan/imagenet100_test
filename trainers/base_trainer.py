@@ -85,6 +85,7 @@ class Trainer:
         smartpaf_ct_max_samples=20000,
         smartpaf_ct_steps=300,
         smartpaf_ct_lr=0.01,
+        smartpaf_ct_target='warmup',
         smartpaf_ss_calibrate=False,
         smartpaf_ss_batches=8,
         smartpaf_ss_max_samples=20000,
@@ -163,6 +164,7 @@ class Trainer:
             smartpaf_ct_max_samples: 每个 StablePoly4 最多使用多少个标量激活样本
             smartpaf_ct_steps: 每个 StablePoly4 CT 优化步数
             smartpaf_ct_lr: CT Adam 学习率
+            smartpaf_ct_target: CT 拟合目标，warmup/relu/swish/sigmoid/tanh/identity
             smartpaf_ss_calibrate: 是否在训练前校准 static scale
             smartpaf_ss_batches: SS 校准采样 train batch 数
             smartpaf_ss_max_samples: 每个 StablePoly4 最多使用多少个标量样本估计 scale
@@ -257,6 +259,9 @@ class Trainer:
         self.smartpaf_ct_max_samples = max(256, int(smartpaf_ct_max_samples))
         self.smartpaf_ct_steps = max(1, int(smartpaf_ct_steps))
         self.smartpaf_ct_lr = float(smartpaf_ct_lr)
+        self.smartpaf_ct_target = str(smartpaf_ct_target).strip().lower()
+        if self.smartpaf_ct_target not in {'warmup', 'relu', 'swish', 'silu', 'sigmoid', 'tanh', 'identity'}:
+            raise ValueError(f"Unsupported smartpaf_ct_target: {smartpaf_ct_target}")
         self.smartpaf_ss_calibrate = bool(smartpaf_ss_calibrate)
         self.smartpaf_ss_batches = max(1, int(smartpaf_ss_batches))
         self.smartpaf_ss_max_samples = max(256, int(smartpaf_ss_max_samples))
@@ -756,6 +761,22 @@ class Trainer:
         poly = ((((a * x_poly + b) * x_poly + c) * x_poly + d) * x_poly + e)
         return poly * float(getattr(module, "output_scale", 1.0))
 
+    def _smartpaf_ct_target_eval(self, module, x):
+        target = self.smartpaf_ct_target
+        if target == 'warmup':
+            return module.warmup_act(x)
+        if target in {'swish', 'silu'}:
+            return F.silu(x)
+        if target == 'relu':
+            return F.relu(x)
+        if target == 'sigmoid':
+            return torch.sigmoid(x)
+        if target == 'tanh':
+            return torch.tanh(x)
+        if target == 'identity':
+            return x
+        raise ValueError(f"Unsupported smartpaf_ct_target: {self.smartpaf_ct_target}")
+
     def _run_smartpaf_ct_init(self):
         """Fit StablePoly4 coefficients to their warmup activation on sampled inputs."""
         if not self.smartpaf_ct_init or not self._smartpaf_poly_modules:
@@ -764,7 +785,7 @@ class Trainer:
         print("✓ SmartPAF-lite CT初始化:")
         print(
             f"  - batches={self.smartpaf_ct_batches}, max_samples={self.smartpaf_ct_max_samples}, "
-            f"steps={self.smartpaf_ct_steps}, lr={self.smartpaf_ct_lr}"
+            f"steps={self.smartpaf_ct_steps}, lr={self.smartpaf_ct_lr}, target={self.smartpaf_ct_target}"
         )
 
         was_training = self.model.training
@@ -809,7 +830,7 @@ class Trainer:
                 x = x[:self.smartpaf_ct_max_samples]
             x = x.to(self.device)
             with torch.no_grad():
-                target = module.warmup_act(x).detach()
+                target = self._smartpaf_ct_target_eval(module, x).detach()
 
             params = [module.a, module.b, module.c, module.d, module.e, module.log_in_scale]
             old_requires_grad = [param.requires_grad for param in params]

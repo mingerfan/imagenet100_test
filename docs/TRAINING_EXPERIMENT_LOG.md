@@ -2273,3 +2273,114 @@ path. The useful behavior remains pre-guard poly rejection plus dynamic stop;
 the next accuracy work should focus on the remaining paper-faithful gaps,
 especially per-layer training groups or PAF family selection, rather than
 expecting BN recalibration to recover the gap to CT+SS.
+
+## 2026-06-01 ReLU-Targeted CT Attempt
+
+Added default-off `smartpaf_ct_target` so coefficient tuning can fit different
+local replacement targets instead of always fitting each module's warmup
+activation. Supported targets are `warmup`, `relu`, `swish`/`silu`, `sigmoid`,
+`tanh`, and `identity`. This is a small step toward task-specific PAF selection:
+the training loop can now evaluate whether fitting the original ReLU replacement
+target is better than fitting the warmup/Swish target.
+
+This proxy keeps the rest of the CT+SS setup unchanged and sets
+`smartpaf_ct_target: relu`.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+p = 'configs/proxy_imagenet100_96_pa_ct_ss_ctrelu_fast.yaml'
+with open(p) as f:
+    data = yaml.safe_load(f)
+model = data['models'][0]
+kw = model['trainer_kwargs']
+assert model['name'] == 'imagenet100-96-pa-ctrelu-ss-b256'
+assert kw['smartpaf_ct_init'] is True
+assert kw['smartpaf_ct_target'] == 'relu'
+assert kw['smartpaf_ss_calibrate'] is True
+assert kw['smartpaf_alternate_training'] is False
+print(model['name'])
+PY
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from trainers.base_trainer import Trainer
+
+class DummyPoly(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.warmup_act = nn.SiLU()
+
+trainer = Trainer.__new__(Trainer)
+module = DummyPoly()
+x = torch.tensor([-2.0, -0.5, 0.0, 0.5, 2.0])
+trainer.smartpaf_ct_target = 'relu'
+assert torch.equal(trainer._smartpaf_ct_target_eval(module, x), torch.relu(x))
+trainer.smartpaf_ct_target = 'warmup'
+assert torch.allclose(trainer._smartpaf_ct_target_eval(module, x), torch.nn.functional.silu(x))
+trainer.smartpaf_ct_target = 'identity'
+assert torch.equal(trainer._smartpaf_ct_target_eval(module, x), x)
+print('ct target smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_ctrelu_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_ctrelu_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_ctrelu_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ctrelu-ss-b256` | 16 | 46.58 | 46.58 | 5.70 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-bnrecal-b256` | 17 | 46.76 | 46.56 | 1.52 | 0 | PASS |
+| `imagenet100-96-pa-ctrelu-ss-b256` | 16 | 46.58 | 46.58 | 5.70 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 1 | disabled | 8.72 | 0 |
+| 2 | disabled | 15.86 | 0 |
+| 3 | disabled | 19.06 | 0 |
+| 4 | disabled | 23.14 | 0 |
+| 5 | disabled | 24.60 | 0 |
+| 6 | disabled | 28.94 | 0 |
+| 7 | disabled | 29.62 | 0 |
+| 8 | disabled | 28.90 | 0 |
+| 9 | disabled | 32.38 | 0 |
+| 10 | disabled | 26.68 | 0 |
+| 11 | disabled | 39.44 | 0 |
+| 12 | disabled | 40.52 | 0 |
+| 13 | disabled | 44.36 | 0 |
+| 14 | disabled | 46.14 | 0 |
+| 15 | disabled | 44.30 | 0 |
+| 16 | disabled | 46.58 | 0 |
+
+CT details:
+
+| Module | Target | CT MSE |
+| --- | --- | ---: |
+| `special_resnet.layers.0.act` | relu | 0.0888795 |
+| `special_resnet.layers.1.act` | relu | 0.0550250 |
+
+Conclusion: configurable CT targets work mechanically and provide a useful
+search hook for PAF-family experiments, but `relu` is a negative target choice
+on this proxy. It finishes at 46.58, which is 0.84 points below default CT+SS
+with the warmup/Swish CT target and has a larger max drop at epoch 10. Keep
+`smartpaf_ct_target` available for future target/family searches, but keep the
+default as `warmup`.
