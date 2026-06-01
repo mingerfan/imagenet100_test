@@ -2384,3 +2384,126 @@ on this proxy. It finishes at 46.58, which is 0.84 points below default CT+SS
 with the warmup/Swish CT target and has a larger max drop at epoch 10. Keep
 `smartpaf_ct_target` available for future target/family searches, but keep the
 default as `warmup`.
+
+## 2026-06-01 StablePoly4 Output Scale 0.2 Attempt
+
+Goal: test whether increasing the StablePoly4 polynomial branch output scale
+from the module default 0.1 to 0.2 improves CT+SS recovery on the low-resolution
+ImageNet-100 proxy.
+
+Implementation:
+
+- Added `poly4_output_scale` trainer kwarg.
+- `None` preserves module defaults; positive float values override modules that
+  expose `output_scale`.
+- Added validation for non-positive values.
+- Added config `configs/proxy_imagenet100_96_pa_ct_ss_outscale02_fast.yaml`.
+
+Validation:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+p='configs/proxy_imagenet100_96_pa_ct_ss_outscale02_fast.yaml'
+cfg=yaml.safe_load(open(p))
+m=cfg['models'][0]
+assert m['name'] == 'imagenet100-96-pa-ct-ss-outscale02-b256'
+assert m['trainer_kwargs']['poly4_output_scale'] == 0.2
+print('yaml ok')
+PY
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from trainers.base_trainer import Trainer
+
+class DummyPoly(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.output_scale = 0.1
+        self.range_args = None
+        self.scale_mode = None
+    def set_range_params(self, **kwargs):
+        self.range_args = kwargs
+    def set_scale_mode(self, mode, momentum, eps):
+        self.scale_mode = (mode, momentum, eps)
+
+class DummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.act = DummyPoly()
+
+trainer = Trainer.__new__(Trainer)
+trainer.model = DummyModel()
+trainer.poly4_output_scale = 0.2
+trainer.poly4_range_r = 2.0
+trainer.poly4_range_lambda = 0.0
+trainer.poly4_deriv_L = 3.0
+trainer.poly4_deriv_lambda = 0.0
+trainer.poly4_scale_mode = 'static'
+trainer.poly4_dynamic_scale_momentum = 0.99
+trainer.poly4_dynamic_scale_eps = 1e-6
+trainer._configure_poly4_modules()
+assert trainer.model.act.output_scale == 0.2
+print('output scale smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_outscale02_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_outscale02_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_outscale02_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-outscale02-b256` | 16 | 47.58 | 47.58 | 0.58 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-outscale02-b256` | 16 | 47.58 | 47.58 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-bnrecal-b256` | 17 | 46.76 | 46.56 | 1.52 | 0 | PASS |
+| `imagenet100-96-pa-ctrelu-ss-b256` | 16 | 46.58 | 46.58 | 5.70 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 1 | disabled | 8.60 | 0 |
+| 2 | disabled | 15.16 | 0 |
+| 3 | disabled | 19.90 | 0 |
+| 4 | disabled | 22.58 | 0 |
+| 5 | disabled | 23.30 | 0 |
+| 6 | disabled | 29.22 | 0 |
+| 7 | disabled | 31.30 | 0 |
+| 8 | disabled | 30.94 | 0 |
+| 9 | disabled | 34.00 | 0 |
+| 10 | disabled | 38.98 | 0 |
+| 11 | disabled | 40.54 | 0 |
+| 12 | disabled | 42.70 | 0 |
+| 13 | disabled | 44.44 | 0 |
+| 14 | disabled | 47.32 | 0 |
+| 15 | disabled | 46.74 | 0 |
+| 16 | disabled | 47.58 | 0 |
+
+CT and output-scale evidence:
+
+| Item | Value |
+| --- | ---: |
+| Configured `output_scale` | 0.2 |
+| `special_resnet.layers.0.act` CT MSE | 0.0566172 |
+| `special_resnet.layers.1.act` CT MSE | 0.0325049 |
+
+Conclusion: `poly4_output_scale=0.2` is a small positive CT+SS tweak on this
+proxy. It improves final accuracy by 0.16 points over default CT+SS and reduces
+max drop from 2.32 to 0.58, but it remains 1.36 points behind CT-only and 1.88
+points behind the Swish baseline. Keep the kwarg and config as a useful search
+knob; do not treat it as sufficient to close the baseline gap.

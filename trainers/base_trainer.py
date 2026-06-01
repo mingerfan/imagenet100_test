@@ -45,6 +45,7 @@ class Trainer:
         poly4_range_r=2.0,
         poly4_deriv_L=3.0,
         poly4_scale_mode='learned',
+        poly4_output_scale=None,
         poly4_dynamic_scale_momentum=0.99,
         poly4_dynamic_scale_eps=1e-6,
         nan_debug=False,
@@ -130,6 +131,7 @@ class Trainer:
             poly4_range_r: StablePoly4输入范围阈值
             poly4_deriv_L: StablePoly4导数阈值
             poly4_scale_mode: StablePoly4输入缩放模式 learned/dynamic/static
+            poly4_output_scale: StablePoly4 多项式输出缩放；None 保持模块默认值
             poly4_dynamic_scale_momentum: dynamic scale running absmax 动量
             poly4_dynamic_scale_eps: dynamic/static scale 的最小 absmax
             nan_debug: 是否启用NaN定位钩子（默认关闭）
@@ -207,6 +209,9 @@ class Trainer:
         self.poly4_range_r = poly4_range_r
         self.poly4_deriv_L = poly4_deriv_L
         self.poly4_scale_mode = str(poly4_scale_mode).strip().lower()
+        self.poly4_output_scale = None if poly4_output_scale is None else float(poly4_output_scale)
+        if self.poly4_output_scale is not None and self.poly4_output_scale <= 0:
+            raise ValueError(f"poly4_output_scale must be positive, got {poly4_output_scale}")
         self.poly4_dynamic_scale_momentum = float(poly4_dynamic_scale_momentum)
         self.poly4_dynamic_scale_eps = float(poly4_dynamic_scale_eps)
         self.nan_debug = nan_debug
@@ -637,6 +642,8 @@ class Trainer:
         """
         poly4_count = 0
         for module in self.model.modules():
+            if self.poly4_output_scale is not None and hasattr(module, 'output_scale'):
+                module.output_scale = self.poly4_output_scale
             if hasattr(module, 'set_range_params') and callable(module.set_range_params):
                 module.set_range_params(
                     range_r=self.poly4_range_r,
@@ -659,6 +666,8 @@ class Trainer:
         if poly4_count > 0:
             print("✓ StablePoly4正则/调度配置:")
             print(f"  - scale_mode: {self.poly4_scale_mode}")
+            if self.poly4_output_scale is not None:
+                print(f"  - output_scale: {self.poly4_output_scale:g}")
             if self.poly4_range_lambda > 0:
                 print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")
             if self.poly4_deriv_lambda > 0:
