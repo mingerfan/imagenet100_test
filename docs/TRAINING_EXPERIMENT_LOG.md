@@ -1554,3 +1554,102 @@ trails CT+SS by 3.90 points and CT-only by 5.42 points, so this should remain
 default-off. The next AT step should be closer to the paper's training-group
 logic: keep a local group best/SWA candidate, accept only improving poly
 updates, and stop the group dynamically when it stops helping.
+
+## 2026-06-01 AT Dynamic Stop Attempt
+
+Added default-off `smartpaf_at_stop_after_rejected_poly_groups`. This is a
+small proxy for the SMART-PAF scheduler's group-level stop behavior: after a
+configured number of rejected poly groups, future AT poly phases are disabled
+and the remaining training budget goes to weights. The proxy config sets the
+threshold to `1`, because the previous runs showed every later poly group was
+rejected and only consumed epochs.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_fast.yaml') as f:
+    data = yaml.safe_load(f)
+kw = data['models'][0]['trainer_kwargs']
+assert kw['smartpaf_at_cycle_epochs'] == 2
+assert kw['smartpaf_at_skip_rejected_poly_group'] is True
+assert kw['smartpaf_at_stop_after_rejected_poly_groups'] == 1
+print(data['models'][0]['name'])
+PY
+.venv/bin/python - <<'PY'
+from trainers.base_trainer import Trainer
+t = Trainer.__new__(Trainer)
+t.smartpaf_alternate_training = True
+t.smartpaf_at_initial_phase = 'poly'
+t.smartpaf_at_cycle_epochs = 2
+t._smartpaf_at_start_epoch = 5
+t.smartpaf_at_skip_rejected_poly_group = True
+t.smartpaf_at_stop_after_rejected_poly_groups = 1
+t._smartpaf_skipped_poly_phase_idx = None
+t._smartpaf_last_rejected_poly_phase_idx = None
+t._smartpaf_consecutive_rejected_poly_groups = 0
+t._smartpaf_poly_stopped_after_rejections = False
+assert t._is_smartpaf_poly_phase(5)
+assert t._is_smartpaf_poly_phase(6)
+t._mark_rejected_poly_group(5)
+assert not t._is_smartpaf_poly_phase(6)
+assert not t._is_smartpaf_poly_phase(9)
+print('stop phase smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-b256` | 16 | 46.64 | 46.64 | 2.42 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Epochs | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-b256` | 16 | 46.64 | 46.64 | 2.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-skip-b256` | 16 | 43.52 | 43.52 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-dropout-b256` | 16 | 41.14 | 41.14 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-b256` | 16 | 38.76 | 38.76 | 0.34 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-related-b256` | 16 | 27.00 | 25.04 | 1.96 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 22.30 | 0 |
+| 6 | weights | 25.12 | 0 |
+| 7 | weights | 28.86 | 0 |
+| 8 | weights | 26.84 | 0 |
+| 9 | weights | 30.18 | 0 |
+| 10 | weights | 33.92 | 0 |
+| 11 | weights | 38.84 | 0 |
+| 12 | weights | 40.38 | 0 |
+| 13 | weights | 44.18 | 0 |
+| 14 | weights | 46.46 | 0 |
+| 15 | weights | 44.04 | 0 |
+| 16 | weights | 46.64 | 0 |
+
+Conclusion: dynamic stop is the strongest AT proxy so far. It improves the
+best AT result from 43.52 to 46.64 by avoiding repeated rejected poly phases,
+leaving only a 0.78 point gap to CT+SS and a 2.30 point gap to CT-only. This
+also confirms why earlier AT variants underperformed: the current PAF poly
+updates are not useful in this global epoch proxy, and the scheduler must stop
+spending epochs on them once validation rejects a group. Keep the option
+default-off; the remaining paper-faithful step is still a true per-layer group
+loop with local best/SWA candidate restoration instead of global epoch
+alternation.
