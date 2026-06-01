@@ -3223,3 +3223,20 @@ Planned command:
 ```bash
 .venv/bin/python -u train.py --config configs/large_imagenet100_224_autofhe_compare.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 1 2 3 --input_size 224 --no_memory_fs --force
 ```
+
+First attempt:
+
+- Config: `configs/large_imagenet100_224_autofhe_compare.yaml`
+- Batch size: 128
+- Workers/prefetch: 12/4 per model, three models in parallel
+
+This did not OOM and loaded the dataset correctly, but it was CPU/I/O bound:
+DataLoader workers consumed roughly 1000% CPU while GPUs were mostly idle except
+for intermittent baseline batches. The run was stopped before any epoch result.
+
+Follow-up fast proxy config:
+
+- `configs/large_imagenet100_224_autofhe_fast.yaml`
+- Models: Swish baseline and no-PAT AutoFHE degree-2
+- Workers/prefetch reduced to 4/2 per model
+- Epochs reduced to 12
