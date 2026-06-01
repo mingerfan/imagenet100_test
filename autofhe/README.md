@@ -22,6 +22,10 @@ fit this repo are:
   `smartpaf_ct_init`, and it is the strongest stable technique so far.
 - Layerwise polynomial precision/form selection. This repo now supports
   `poly4_degrees` so different StablePoly modules can use degree 2, 3, or 4.
+- Polynomial-aware training backward. This repo now supports
+  `poly4_pat_swish_backward`, a Swish-specific surrogate backward inspired by
+  AutoFHE PAT. The forward pass remains polynomial; activation-input gradients
+  follow Swish, and polynomial parameters still receive gradients.
 - Dynamic scale to static scale conversion. This repo has
   `smartpaf_ds_to_ss_after_training`, but experiments show it is deployable
   rather than accuracy-improving.
@@ -39,6 +43,7 @@ is:
 - `poly4_output_scale: 0.2`
 - `smartpaf_ct_init: true`
 - `smartpaf_alternate_training: false`
+- `poly4_pat_swish_backward: false` unless a PAT-specific ablation is being run
 
 Evidence:
 
@@ -52,6 +57,8 @@ Evidence:
 
 The degree-2 learned-scale run is only 0.10 percentage points below CT-only and
 has lower polynomial depth, so it is the best current accuracy/cost tradeoff.
+The Swish surrogate backward is implemented for follow-up PAT ablations but is
+not yet promoted as the default because the degree-2 baseline is already stable.
 
 ## Reproduction
 

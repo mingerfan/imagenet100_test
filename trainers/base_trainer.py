@@ -48,6 +48,7 @@ class Trainer:
         poly4_output_scale=None,
         poly4_degree=None,
         poly4_degrees=None,
+        poly4_pat_swish_backward=False,
         poly4_dynamic_scale_momentum=0.99,
         poly4_dynamic_scale_eps=1e-6,
         nan_debug=False,
@@ -137,6 +138,8 @@ class Trainer:
             poly4_degree: StablePoly4 多项式最高次数 2/3/4；None 保持模块默认值
             poly4_degrees: StablePoly4 按模块指定最高次数；list 按模块顺序，
                 dict 按模块名/序号，优先级高于 poly4_degree
+            poly4_pat_swish_backward: AutoFHE PAT 风格的 Swish surrogate
+                backward；forward 仍用多项式分支
             poly4_dynamic_scale_momentum: dynamic scale running absmax 动量
             poly4_dynamic_scale_eps: dynamic/static scale 的最小 absmax
             nan_debug: 是否启用NaN定位钩子（默认关闭）
@@ -221,6 +224,7 @@ class Trainer:
         if self.poly4_degree is not None and self.poly4_degree not in {2, 3, 4}:
             raise ValueError(f"poly4_degree must be one of 2, 3, 4, got {poly4_degree}")
         self.poly4_degrees = self._normalize_poly4_degrees(poly4_degrees)
+        self.poly4_pat_swish_backward = bool(poly4_pat_swish_backward)
         self.poly4_dynamic_scale_momentum = float(poly4_dynamic_scale_momentum)
         self.poly4_dynamic_scale_eps = float(poly4_dynamic_scale_eps)
         self.nan_debug = nan_debug
@@ -732,6 +736,8 @@ class Trainer:
                     momentum=self.poly4_dynamic_scale_momentum,
                     eps=self.poly4_dynamic_scale_eps,
                 )
+            if hasattr(module, 'set_pat_swish_backward') and callable(module.set_pat_swish_backward):
+                module.set_pat_swish_backward(self.poly4_pat_swish_backward)
             if hasattr(module, 'set_warmup_epochs') and callable(module.set_warmup_epochs):
                 poly4_count += 1
 
@@ -740,6 +746,8 @@ class Trainer:
             print(f"  - scale_mode: {self.poly4_scale_mode}")
             if self.poly4_output_scale is not None:
                 print(f"  - output_scale: {self.poly4_output_scale:g}")
+            if self.poly4_pat_swish_backward:
+                print("  - PAT backward: swish surrogate")
             if self.poly4_degrees is not None:
                 print("  - poly_degrees:")
                 for idx, (name, degree) in enumerate(degree_assignments[:8]):

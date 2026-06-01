@@ -3020,3 +3020,70 @@ default-off experimental paths because their best results still trail CT-only.
 The current recommended project setting is CT initialization with learned scale,
 per-module degree selection, and degree 2 for both StablePoly sites on this
 proxy.
+
+## 2026-06-01 AutoFHE PAT Swish Backward Implementation
+
+Goal: add an AutoFHE PAT-style backward path without adding a ReLU configuration
+branch. Since this project uses Swish as the warmup/original smooth activation,
+the implemented option is Swish-specific:
+
+- `poly4_pat_swish_backward`
+
+When enabled, the StablePoly branch keeps the same polynomial forward value,
+but the activation input gradient follows Swish. Polynomial coefficients and
+learned input scale still receive gradients through a detached-input polynomial
+path, so PAT does not freeze coefficient learning.
+
+Implementation sketch:
+
+```python
+swish_surrogate = poly_branch.detach() + silu(x) - silu(x).detach()
+poly_param = polynomial(detached_x_or_detached_scaled_x, params)
+poly_branch = swish_surrogate + poly_param - poly_param.detach()
+```
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import torch
+from models.gate_net_cmp.block_def import StablePoly4
+
+x0 = torch.tensor([-1.0, 0.25, 1.5], requires_grad=True)
+x1 = x0.detach().clone().requires_grad_(True)
+base = StablePoly4(output_scale=1.0, warmup_epochs=0, scale_mode='learned', pat_swish_backward=False)
+pat = StablePoly4(output_scale=1.0, warmup_epochs=0, scale_mode='learned', pat_swish_backward=True)
+for m in (base, pat):
+    m.train()
+    m.set_poly_schedule(start_epoch=0, transition_epochs=0)
+    with torch.no_grad():
+        m.a.zero_(); m.b.zero_(); m.c.fill_(0.5); m.d.fill_(1.0); m.e.zero_(); m.log_in_scale.zero_()
+with torch.no_grad():
+    for name in ('a','b','c','d','e','log_in_scale'):
+        getattr(pat, name).copy_(getattr(base, name))
+y_base = base(x0)
+y_pat = pat(x1)
+assert torch.allclose(y_base, y_pat)
+y_base.sum().backward()
+y_pat.sum().backward()
+sig = torch.sigmoid(x1.detach())
+expected = sig + x1.detach() * sig * (1 - sig)
+assert torch.allclose(x1.grad, expected, atol=1e-6)
+assert not torch.allclose(x0.grad, x1.grad)
+assert pat.c.grad is not None and abs(float(pat.c.grad)) > 0
+assert pat.d.grad is not None and abs(float(pat.d.grad)) > 0
+assert pat.log_in_scale.grad is not None and abs(float(pat.log_in_scale.grad)) > 0
+print('pat swish learned smoke ok')
+PY
+git diff --check
+```
+
+Follow-up proxy config:
+
+- `configs/proxy_imagenet100_96_autofhe_pat_swish_fast.yaml`
+
+Conclusion: the Swish-specific PAT backward is mechanically ready and
+default-off. It should be tested as an ablation against the existing
+`imagenet100-96-autofhe-adaptive-degree2-b256` result before making it a
+recommended default.

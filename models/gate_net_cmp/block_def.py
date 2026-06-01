@@ -206,6 +206,7 @@ class StablePoly4(nn.Module):
         dynamic_scale_momentum=0.99,
         dynamic_scale_eps=1e-6,
         poly_degree=4,
+        pat_swish_backward=False,
     ):
         super().__init__()
         self.output_scale = output_scale
@@ -236,6 +237,7 @@ class StablePoly4(nn.Module):
         self.scale_mode = self._normalize_scale_mode(scale_mode)
         self.dynamic_scale_momentum = float(dynamic_scale_momentum)
         self.dynamic_scale_eps = float(dynamic_scale_eps)
+        self.pat_swish_backward = bool(pat_swish_backward)
         self.range_loss = torch.tensor(0.0)
         self.deriv_loss = torch.tensor(0.0)
         self.collect_stats = False
@@ -292,6 +294,10 @@ class StablePoly4(nn.Module):
     def set_poly_degree(self, degree):
         """设置多项式最高次数，默认 4；低阶模式屏蔽高阶项。"""
         self.poly_degree = self._normalize_poly_degree(degree)
+
+    def set_pat_swish_backward(self, enabled: bool):
+        """Use Swish surrogate gradients for the polynomial branch input."""
+        self.pat_swish_backward = bool(enabled)
 
     def set_collect_stats(self, enabled: bool):
         """是否在 forward 中收集诊断统计"""
@@ -363,6 +369,17 @@ class StablePoly4(nn.Module):
         in_scale = x_work.new_tensor(1.0) / absmax.to(device=x_work.device, dtype=x_work.dtype)
         return x_work * in_scale, in_scale
 
+    def _calc_poly_input_param_only(self, x_work, x_poly):
+        """Poly input for parameter gradients while detaching activation input."""
+        if self.scale_mode == "learned":
+            log_in_scale = torch.clamp(self.log_in_scale, min=-6.0, max=2.0)
+            return x_work.detach() * torch.exp(log_in_scale)
+        return x_poly.detach()
+
+    @staticmethod
+    def _eval_poly(x_poly, a_eff, b_eff, c, d, e):
+        return ((((a_eff * x_poly + b_eff) * x_poly + c) * x_poly + d) * x_poly + e)
+
     @staticmethod
     def _build_warmup_act(warmup_act):
         if warmup_act is None:
@@ -423,11 +440,7 @@ class StablePoly4(nn.Module):
         b_eff = b_clamped if degree >= 3 else torch.zeros_like(b_clamped)
 
         # Horner 形式计算多项式，数值更稳
-        poly_out = (
-            (((a_eff * x_poly + b_eff) * x_poly + c_clamped) * x_poly + d_clamped)
-            * x_poly
-            + e_clamped
-        )
+        poly_out = self._eval_poly(x_poly, a_eff, b_eff, c_clamped, d_clamped, e_clamped)
 
         if self.collect_stats:
             self.last_x_poly_stats = self._calc_stats(x_poly)
@@ -475,7 +488,20 @@ class StablePoly4(nn.Module):
 
         # 混合Swish和多项式输出
         # warmup 期间保持 swish 为 1.0 缩放，逐步过渡到 poly 的输出缩放
-        out = (1 - alpha) * swish_out + alpha * (poly_out * self.output_scale)
+        poly_branch = poly_out * self.output_scale
+        if self.pat_swish_backward and self.training and alpha > 0.0:
+            swish_surrogate = poly_branch.detach() + F.silu(x_work) - F.silu(x_work).detach()
+            x_poly_param = self._calc_poly_input_param_only(x_work, x_poly)
+            poly_param = self._eval_poly(
+                x_poly_param,
+                a_eff,
+                b_eff,
+                c_clamped,
+                d_clamped,
+                e_clamped,
+            ) * self.output_scale
+            poly_branch = swish_surrogate + poly_param - poly_param.detach()
+        out = (1 - alpha) * swish_out + alpha * poly_branch
         
         # 始终检查并处理 NaN/Inf，防止数值不稳定传播
         out = torch.nan_to_num(out, nan=0.0, posinf=100.0, neginf=-100.0)
