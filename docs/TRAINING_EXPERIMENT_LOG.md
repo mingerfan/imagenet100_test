@@ -2853,3 +2853,97 @@ the settings compose mostly as a stability improvement rather than a large
 accuracy gain. It still trails CT-only by 1.18 points and Swish baseline by 1.70
 points, so CT-only remains the stronger deployment candidate unless later PA/SS
 work closes that gap.
+
+## 2026-06-01 CT-Only Degree 2 + Output Scale 0.2 Attempt
+
+Goal: test whether the best CT+SS knobs, degree 2 and `output_scale=0.2`, also
+help the stronger learned-scale CT-only path.
+
+Implementation:
+
+- Added config `configs/proxy_imagenet100_96_pa_ct_degree2_outscale02_fast.yaml`.
+- No trainer/model code change in this step; this uses existing `poly4_degree`
+  and `poly4_output_scale` with `poly4_scale_mode: learned`.
+
+Validation:
+
+```bash
+.venv/bin/python - <<'PY'
+import yaml
+p='configs/proxy_imagenet100_96_pa_ct_degree2_outscale02_fast.yaml'
+cfg=yaml.safe_load(open(p))
+m=cfg['models'][0]
+kw=m['trainer_kwargs']
+assert m['name'] == 'imagenet100-96-pa-ct-degree2-outscale02-b256'
+assert kw['poly4_scale_mode'] == 'learned'
+assert kw['poly4_degree'] == 2
+assert kw['poly4_output_scale'] == 0.2
+assert kw['smartpaf_ct_init'] is True
+assert kw['smartpaf_alternate_training'] is False
+assert 'smartpaf_ss_calibrate' not in kw
+print('yaml ok')
+PY
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py trainers/base_trainer.py
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc 'mkdir -p logs; .venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_degree2_outscale02_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_degree2_outscale02_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_degree2_outscale02_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-degree2-outscale02-b256` | 16 | 48.84 | 48.84 | 0.04 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-degree2-outscale02-b256` | 16 | 48.84 | 48.84 | 0.04 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree2-outscale02-b256` | 16 | 47.76 | 47.76 | 0.56 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree2-b256` | 16 | 47.74 | 47.64 | 2.16 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 1 | disabled | 9.00 | 0 |
+| 2 | disabled | 14.46 | 0 |
+| 3 | disabled | 18.66 | 0 |
+| 4 | disabled | 21.26 | 0 |
+| 5 | disabled | 23.50 | 0 |
+| 6 | disabled | 27.74 | 0 |
+| 7 | disabled | 31.76 | 0 |
+| 8 | disabled | 32.74 | 0 |
+| 9 | disabled | 36.18 | 0 |
+| 10 | disabled | 39.80 | 0 |
+| 11 | disabled | 42.76 | 0 |
+| 12 | disabled | 42.72 | 0 |
+| 13 | disabled | 46.22 | 0 |
+| 14 | disabled | 47.00 | 0 |
+| 15 | disabled | 48.70 | 0 |
+| 16 | disabled | 48.84 | 0 |
+
+CT and config evidence:
+
+| Item | Value |
+| --- | ---: |
+| Configured `poly4_scale_mode` | learned |
+| Configured `poly_degree` | 2 |
+| Configured `output_scale` | 0.2 |
+| `special_resnet.layers.0.act` CT MSE | 0.000162552 |
+| `special_resnet.layers.1.act` CT MSE | 0.0000537013 |
+
+Conclusion: learned-scale CT-only remains stronger than CT+SS. The degree 2
+plus `output_scale=0.2` variant is very stable and nearly matches CT-only, but
+it finishes 0.10 points below the original CT-only run. The useful takeaway is
+not an accuracy gain; it is that degree/output-scale tuning can preserve most
+of CT-only's accuracy while sharply reducing drop. Keep original CT-only as the
+best proxy result in this family, and keep the tuned variant as a stability
+candidate for longer runs.
