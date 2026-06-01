@@ -2758,3 +2758,98 @@ Conclusion: degree 3 is stable but not useful on this proxy. It finishes at
 default CT+SS run. Degree search now points to degree 2 as the only positive
 lower-degree setting tested so far. The next useful search is a combination
 test: degree 2 plus the more stable `output_scale=0.2` setting.
+
+## 2026-06-01 StablePoly Degree 2 + Output Scale 0.2 Attempt
+
+Goal: test whether the two positive CT+SS knobs found so far, degree 2 and
+`output_scale=0.2`, compose into a better proxy result.
+
+Implementation:
+
+- Added config `configs/proxy_imagenet100_96_pa_ct_ss_degree2_outscale02_fast.yaml`.
+- No trainer/model code change in this step; this combines the existing
+  `poly4_degree` and `poly4_output_scale` knobs.
+
+Validation:
+
+```bash
+.venv/bin/python - <<'PY'
+import yaml
+p='configs/proxy_imagenet100_96_pa_ct_ss_degree2_outscale02_fast.yaml'
+cfg=yaml.safe_load(open(p))
+m=cfg['models'][0]
+kw=m['trainer_kwargs']
+assert m['name'] == 'imagenet100-96-pa-ct-ss-degree2-outscale02-b256'
+assert kw['poly4_degree'] == 2
+assert kw['poly4_output_scale'] == 0.2
+assert kw['poly4_scale_mode'] == 'static'
+assert kw['smartpaf_ct_init'] is True
+assert kw['smartpaf_ss_calibrate'] is True
+assert kw['smartpaf_alternate_training'] is False
+print('yaml ok')
+PY
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py trainers/base_trainer.py
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_degree2_outscale02_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_degree2_outscale02_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_degree2_outscale02_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-degree2-outscale02-b256` | 16 | 47.76 | 47.76 | 0.56 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree2-outscale02-b256` | 16 | 47.76 | 47.76 | 0.56 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree2-b256` | 16 | 47.74 | 47.64 | 2.16 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-outscale02-b256` | 16 | 47.58 | 47.58 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-degree3-b256` | 16 | 47.26 | 47.26 | 1.96 | 0 | PASS |
+
+Phase details:
+
+| Epoch | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 1 | disabled | 8.78 | 0 |
+| 2 | disabled | 15.56 | 0 |
+| 3 | disabled | 19.36 | 0 |
+| 4 | disabled | 22.26 | 0 |
+| 5 | disabled | 24.78 | 0 |
+| 6 | disabled | 28.34 | 0 |
+| 7 | disabled | 31.92 | 0 |
+| 8 | disabled | 32.58 | 0 |
+| 9 | disabled | 33.94 | 0 |
+| 10 | disabled | 40.48 | 0 |
+| 11 | disabled | 41.42 | 0 |
+| 12 | disabled | 43.30 | 0 |
+| 13 | disabled | 45.60 | 0 |
+| 14 | disabled | 47.02 | 0 |
+| 15 | disabled | 46.46 | 0 |
+| 16 | disabled | 47.76 | 0 |
+
+CT and config evidence:
+
+| Item | Value |
+| --- | ---: |
+| Configured `poly_degree` | 2 |
+| Configured `output_scale` | 0.2 |
+| `special_resnet.layers.0.act` CT MSE | 0.0566409 |
+| `special_resnet.layers.1.act` CT MSE | 0.0325149 |
+
+Conclusion: degree 2 plus `output_scale=0.2` is the best CT+SS-family proxy so
+far. The best accuracy improves only 0.02 points over degree 2 alone, but final
+accuracy improves by 0.12 and max drop falls from 2.16 to 0.56. This confirms
+the settings compose mostly as a stability improvement rather than a large
+accuracy gain. It still trails CT-only by 1.18 points and Swish baseline by 1.70
+points, so CT-only remains the stronger deployment candidate unless later PA/SS
+work closes that gap.
