@@ -72,6 +72,8 @@ class Trainer:
         smartpaf_at_reject_before_collapse_guard=False,
         smartpaf_at_skip_rejected_poly_group=False,
         smartpaf_at_stop_after_rejected_poly_groups=0,
+        smartpaf_at_restore_phase_best=False,
+        smartpaf_at_restore_phase_min_delta=0.0,
         smartpaf_at_dropout_on_overfit=False,
         smartpaf_at_dropout_gap=10.0,
         smartpaf_at_dropout_p=0.5,
@@ -146,6 +148,8 @@ class Trainer:
             smartpaf_at_reject_before_collapse_guard: 是否在 collapse guard 前拒绝坏 poly 候选
             smartpaf_at_skip_rejected_poly_group: poly 组内某 epoch 被拒后是否跳过该组剩余 poly epoch
             smartpaf_at_stop_after_rejected_poly_groups: 连续拒绝多少个 poly 组后停止后续 poly AT；0 表示关闭
+            smartpaf_at_restore_phase_best: AT phase group 结束时是否恢复组内 best/起点模型
+            smartpaf_at_restore_phase_min_delta: phase group 需要超过起点多少百分点才接受
             smartpaf_at_dropout_on_overfit: 是否在训练/验证精度差过大时启用分类头 dropout
             smartpaf_at_dropout_gap: 触发 dropout 的训练/验证精度差，单位百分点
             smartpaf_at_dropout_p: 分类头输入 dropout 概率
@@ -232,6 +236,8 @@ class Trainer:
         self.smartpaf_at_reject_before_collapse_guard = bool(smartpaf_at_reject_before_collapse_guard)
         self.smartpaf_at_skip_rejected_poly_group = bool(smartpaf_at_skip_rejected_poly_group)
         self.smartpaf_at_stop_after_rejected_poly_groups = max(0, int(smartpaf_at_stop_after_rejected_poly_groups))
+        self.smartpaf_at_restore_phase_best = bool(smartpaf_at_restore_phase_best)
+        self.smartpaf_at_restore_phase_min_delta = float(smartpaf_at_restore_phase_min_delta)
         self.smartpaf_at_dropout_on_overfit = bool(smartpaf_at_dropout_on_overfit)
         self.smartpaf_at_dropout_gap = float(smartpaf_at_dropout_gap)
         self.smartpaf_at_dropout_p = float(smartpaf_at_dropout_p)
@@ -278,6 +284,14 @@ class Trainer:
         self._smartpaf_last_rejected_poly_phase_idx = None
         self._smartpaf_consecutive_rejected_poly_groups = 0
         self._smartpaf_poly_stopped_after_rejections = False
+        self._smartpaf_restore_phase_idx = None
+        self._smartpaf_restore_phase_label = None
+        self._smartpaf_restore_phase_start_acc = None
+        self._smartpaf_restore_phase_start_state = None
+        self._smartpaf_restore_phase_best_acc = None
+        self._smartpaf_restore_phase_best_epoch = None
+        self._smartpaf_restore_phase_best_state = None
+        self._smartpaf_restore_phase_last_restored_acc = None
         self._swa_model = None
         self._swa_updates = 0
         self._nan_debug_running = False
@@ -1021,6 +1035,129 @@ class Trainer:
             return
         if self._smartpaf_last_rejected_poly_phase_idx != phase_idx:
             self._smartpaf_consecutive_rejected_poly_groups = 0
+
+    def _clone_model_state_cpu(self):
+        return {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in self.model.state_dict().items()
+        }
+
+    def _restore_model_state(self, state, reason):
+        if state is None:
+            return False
+        self.model.load_state_dict(state, strict=self.resume_strict)
+        print(f"  ✓ Restored model state ({reason})")
+        return True
+
+    def _last_recorded_val_acc(self):
+        values = self.history.get('val_acc') or []
+        if not values:
+            return self.best_acc
+        try:
+            return float(values[-1])
+        except (TypeError, ValueError):
+            return self.best_acc
+
+    def _begin_smartpaf_phase_restore_group(self, epoch):
+        phase_idx = self._smartpaf_phase_index(epoch)
+        if phase_idx is None:
+            return
+        start_acc = self._smartpaf_restore_phase_last_restored_acc
+        if start_acc is None:
+            start_acc = self._last_recorded_val_acc()
+        self._smartpaf_restore_phase_last_restored_acc = None
+        self._smartpaf_restore_phase_idx = phase_idx
+        self._smartpaf_restore_phase_label = self._current_smartpaf_phase(epoch)
+        self._smartpaf_restore_phase_start_acc = start_acc
+        self._smartpaf_restore_phase_start_state = self._clone_model_state_cpu()
+        self._smartpaf_restore_phase_best_acc = self._smartpaf_restore_phase_start_acc
+        self._smartpaf_restore_phase_best_epoch = None
+        self._smartpaf_restore_phase_best_state = self._smartpaf_restore_phase_start_state
+        print(
+            "SmartPAF-lite AT phase restore group started: "
+            f"idx={phase_idx}, phase={self._smartpaf_restore_phase_label}, "
+            f"start_acc={self._smartpaf_restore_phase_start_acc:.2f}%"
+        )
+
+    def _finalize_smartpaf_phase_restore_group(self, final=False):
+        if self._smartpaf_restore_phase_idx is None:
+            return None
+
+        start_acc = self._smartpaf_restore_phase_start_acc
+        best_acc = self._smartpaf_restore_phase_best_acc
+        best_epoch = self._smartpaf_restore_phase_best_epoch
+        accepted = best_acc > start_acc + self.smartpaf_at_restore_phase_min_delta
+        if accepted:
+            restored_state = self._smartpaf_restore_phase_best_state
+            restored_acc = best_acc
+            reason = (
+                f"AT phase {self._smartpaf_restore_phase_idx} best"
+                f"{f' epoch {best_epoch}' if best_epoch is not None else ''}"
+            )
+        else:
+            restored_state = self._smartpaf_restore_phase_start_state
+            restored_acc = start_acc
+            reason = f"AT phase {self._smartpaf_restore_phase_idx} start"
+
+        self._restore_model_state(restored_state, reason)
+        print(
+            "  - AT phase group finalized: "
+            f"idx={self._smartpaf_restore_phase_idx}, phase={self._smartpaf_restore_phase_label}, "
+            f"start={start_acc:.2f}%, best={best_acc:.2f}%, "
+            f"accepted={int(accepted)}"
+        )
+
+        result = {
+            'phase_idx': self._smartpaf_restore_phase_idx,
+            'phase': self._smartpaf_restore_phase_label,
+            'start_acc': start_acc,
+            'best_acc': best_acc,
+            'best_epoch': best_epoch,
+            'restored_acc': restored_acc,
+            'accepted': accepted,
+            'final': final,
+        }
+        self._smartpaf_restore_phase_last_restored_acc = restored_acc
+        self._smartpaf_restore_phase_idx = None
+        self._smartpaf_restore_phase_label = None
+        self._smartpaf_restore_phase_start_acc = None
+        self._smartpaf_restore_phase_start_state = None
+        self._smartpaf_restore_phase_best_acc = None
+        self._smartpaf_restore_phase_best_epoch = None
+        self._smartpaf_restore_phase_best_state = None
+        return result
+
+    def _prepare_smartpaf_phase_restore_group(self, epoch):
+        if not self.smartpaf_at_restore_phase_best or not self.smartpaf_alternate_training:
+            return None
+        phase_idx = self._smartpaf_phase_index(epoch)
+        if phase_idx is None:
+            return None
+        finalized = None
+        if self._smartpaf_restore_phase_idx is None:
+            self._begin_smartpaf_phase_restore_group(epoch)
+        elif phase_idx != self._smartpaf_restore_phase_idx:
+            finalized = self._finalize_smartpaf_phase_restore_group()
+            self._begin_smartpaf_phase_restore_group(epoch)
+        return finalized
+
+    def _update_smartpaf_phase_restore_group(self, epoch, val_acc):
+        if (
+            not self.smartpaf_at_restore_phase_best
+            or self._smartpaf_restore_phase_idx is None
+        ):
+            return
+        phase_idx = self._smartpaf_phase_index(epoch)
+        if phase_idx != self._smartpaf_restore_phase_idx:
+            return
+        if val_acc > self._smartpaf_restore_phase_best_acc:
+            self._smartpaf_restore_phase_best_acc = float(val_acc)
+            self._smartpaf_restore_phase_best_epoch = epoch
+            self._smartpaf_restore_phase_best_state = self._clone_model_state_cpu()
+            print(
+                "  - AT phase group new best: "
+                f"idx={phase_idx}, epoch={epoch}, val_acc={val_acc:.2f}%"
+            )
 
     def _active_smartpaf_poly_param_ids(self, epoch):
         if self.smartpaf_at_poly_scope == 'all':
@@ -2012,6 +2149,8 @@ class Trainer:
             self._run_smartpaf_ss_calibration()
             self._run_smartpaf_ct_init()
             for epoch in range(self.start_epoch, self.epochs + 1):
+                self._prepare_smartpaf_phase_restore_group(epoch)
+
                 # 为所有需要 epoch 信息的模块更新 epoch
                 self._set_epoch_for_model(epoch)
                 
@@ -2072,6 +2211,8 @@ class Trainer:
                     epoch_time = time.time() - epoch_start
                     smartpaf_phase = f"{smartpaf_phase}_rejected"
 
+                self._update_smartpaf_phase_restore_group(epoch, val_acc)
+
                 # 记录历史
                 self._append_history_row(
                     epoch=epoch,
@@ -2130,6 +2271,36 @@ class Trainer:
                 self.save_history()
                 if collapse_error is not None:
                     raise collapse_error
+
+            finalized_phase = self._finalize_smartpaf_phase_restore_group(final=True)
+            if finalized_phase is not None:
+                restore_start = time.time()
+                val_loss, val_acc = self.validate(epoch='phase_restore')
+                restore_time = time.time() - restore_start
+                current_lr = self.optimizer.param_groups[0]['lr'] if self.optimizer.param_groups else 0.0
+                self._last_train_stats = {
+                    'valid_batches': 0,
+                    'skipped_batches': 0,
+                    'nonfinite_batches': 0,
+                }
+                self._append_history_row(
+                    epoch=self._next_history_epoch(),
+                    train_loss=0.0,
+                    train_acc=0.0,
+                    val_loss=val_loss,
+                    val_acc=val_acc,
+                    learning_rate=current_lr,
+                    epoch_time=restore_time,
+                    smartpaf_phase='phase_restore',
+                    collapse_guard_triggered=0,
+                )
+                if self.save_checkpoints:
+                    is_new_best = val_acc > self.best_acc
+                    if is_new_best:
+                        self.best_acc = val_acc
+                        self.save_checkpoint(self.history['epoch'][-1], is_best=True)
+                    self.save_checkpoint(self.history['epoch'][-1], is_best=False, filename='phase_restored_model.pth')
+                self.save_history()
         finally:
             if self.smartpaf_alternate_training:
                 self._restore_all_trainable()

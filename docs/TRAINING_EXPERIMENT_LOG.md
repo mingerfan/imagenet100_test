@@ -1762,3 +1762,137 @@ higher, and CT-only remains 4.52 points higher. Keep DS-to-SS default-off and
 available for deployment-style runs; current accuracy work should continue to
 focus on the per-layer group scheduler and PAF family choices rather than scale
 conversion alone.
+
+## 2026-06-01 AT Phase Best Restore Attempt
+
+Implemented default-off `smartpaf_at_restore_phase_best` and
+`smartpaf_at_restore_phase_min_delta`. This approximates another part of the
+SMART-PAF training-group scheduler: at the start of each AT phase group, the
+trainer snapshots the current model on CPU; within the group it tracks the
+validation-best model; at the next group boundary it restores the group best if
+it improves over the group start, otherwise it restores the group start. A final
+`phase_restore` validation row records the restored last group model.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py
+.venv/bin/python - <<'PY'
+import yaml
+with open('configs/proxy_imagenet100_96_pa_ct_ss_at_group2_phasebest_fast.yaml') as f:
+    data = yaml.safe_load(f)
+kw = data['models'][0]['trainer_kwargs']
+assert kw['smartpaf_at_cycle_epochs'] == 2
+assert kw['smartpaf_at_restore_phase_best'] is True
+assert kw['smartpaf_at_stop_after_rejected_poly_groups'] == 1
+print(data['models'][0]['name'])
+PY
+.venv/bin/python - <<'PY'
+import torch
+import torch.nn as nn
+from trainers.base_trainer import Trainer
+model = nn.Linear(1, 1, bias=False)
+trainer = Trainer.__new__(Trainer)
+trainer.model = model
+trainer.resume_strict = True
+trainer.smartpaf_alternate_training = True
+trainer.smartpaf_at_initial_phase = 'poly'
+trainer.smartpaf_at_cycle_epochs = 2
+trainer._smartpaf_at_start_epoch = 5
+trainer._smartpaf_poly_stopped_after_rejections = False
+trainer._smartpaf_poly_param_ids = {id(model.weight)}
+trainer.smartpaf_at_skip_rejected_poly_group = False
+trainer._smartpaf_skipped_poly_phase_idx = None
+trainer.smartpaf_at_restore_phase_best = True
+trainer.smartpaf_at_restore_phase_min_delta = 0.0
+trainer.best_acc = 20.0
+trainer.history = {'val_acc': [20.0]}
+trainer._smartpaf_restore_phase_idx = None
+trainer._smartpaf_restore_phase_label = None
+trainer._smartpaf_restore_phase_start_acc = None
+trainer._smartpaf_restore_phase_start_state = None
+trainer._smartpaf_restore_phase_best_acc = None
+trainer._smartpaf_restore_phase_best_epoch = None
+trainer._smartpaf_restore_phase_best_state = None
+trainer._smartpaf_restore_phase_last_restored_acc = None
+with torch.no_grad():
+    model.weight.fill_(1.0)
+trainer._prepare_smartpaf_phase_restore_group(5)
+with torch.no_grad():
+    model.weight.fill_(2.0)
+trainer._update_smartpaf_phase_restore_group(5, 22.0)
+with torch.no_grad():
+    model.weight.fill_(3.0)
+trainer._update_smartpaf_phase_restore_group(6, 21.0)
+trainer.history['val_acc'].append(21.0)
+trainer._prepare_smartpaf_phase_restore_group(7)
+assert abs(float(model.weight.item()) - 2.0) < 1e-6
+assert trainer._smartpaf_restore_phase_idx == 1
+assert abs(trainer._smartpaf_restore_phase_start_acc - 22.0) < 1e-6
+print('phase restore smoke ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_phasebest_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_phasebest_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_phasebest_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-phasebest-b256` | 17 | 45.34 | 45.34 | 1.36 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-b256` | 16 | 46.64 | 46.64 | 2.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-phasebest-b256` | 17 | 45.34 | 45.34 | 1.36 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-skip-b256` | 16 | 43.52 | 43.52 | 0.58 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-preguard-b256` | 16 | 41.42 | 41.42 | 0.00 | 0 | PASS |
+
+Phase details:
+
+| Epoch/Row | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 23.10 | 0 |
+| 6 | weights | 24.52 | 0 |
+| 7 | weights | 29.54 | 0 |
+| 8 | weights | 28.98 | 0 |
+| 9 | weights | 30.08 | 0 |
+| 10 | weights | 32.50 | 0 |
+| 11 | weights | 37.08 | 0 |
+| 12 | weights | 38.92 | 0 |
+| 13 | weights | 41.74 | 0 |
+| 14 | weights | 44.28 | 0 |
+| 15 | weights | 42.92 | 0 |
+| 16 | weights | 45.34 | 0 |
+| 17 | phase_restore | 45.34 | 0 |
+
+Group restore log summary:
+
+| Group | Phase | Start | Best | Restored |
+| ---: | --- | ---: | ---: | --- |
+| 0 | poly | 23.10 | 24.52 | epoch 6 |
+| 1 | weights | 24.52 | 29.54 | epoch 7 |
+| 2 | weights | 29.54 | 32.50 | epoch 10 |
+| 3 | weights | 32.50 | 38.92 | epoch 12 |
+| 4 | weights | 38.92 | 44.28 | epoch 14 |
+| 5 | weights | 44.28 | 45.34 | epoch 16 |
+
+Conclusion: phase-local best restoration is mechanically correct and stable,
+and it reduces max drop from the dynamic-stop run's 2.42 to 1.36 points. It is
+nevertheless a negative accuracy result on this proxy: best/final accuracy is
+45.34, which is 1.30 points below `group2-stop` and 2.08 points below CT+SS.
+Restoring every two-epoch weights group appears too conservative here; the
+better AT proxy remains dynamic poly stop plus uninterrupted weights recovery.
+Keep phase restore default-off. A more faithful next step should make this
+per-layer and compare a local SWA candidate, rather than applying short global
+phase restores.
