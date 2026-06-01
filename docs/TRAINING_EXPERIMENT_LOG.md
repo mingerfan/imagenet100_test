@@ -2185,3 +2185,91 @@ Paper techniques mentioned locally but still not faithfully applied:
   activation modules currently covered by the proxy model.
 - Deployment-oriented FHE latency/depth evaluation for the selected PAF family,
   rather than accuracy-only proxy training.
+
+## 2026-06-01 AT Dynamic Stop + BN Recalibration Attempt
+
+Added a proxy configuration that combines the strongest current AT path,
+dynamic poly stop, with post-training BatchNorm recalibration. The run loads the
+best checkpoint after normal training, recomputes BatchNorm running statistics
+with 128 train batches, then validates and records a `bn_recal` row.
+
+Validation commands:
+
+```bash
+.venv/bin/python - <<'PY'
+import yaml
+p = 'configs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_bnrecal_fast.yaml'
+with open(p) as f:
+    data = yaml.safe_load(f)
+model = data['models'][0]
+kw = model['trainer_kwargs']
+assert model['name'] == 'imagenet100-96-pa-ct-ss-at-group2-stop-bnrecal-b256'
+assert kw['smartpaf_alternate_training'] is True
+assert kw['smartpaf_at_stop_after_rejected_poly_groups'] == 1
+assert kw['bn_recalibrate_after_training'] is True
+assert kw['bn_recalibrate_batches'] == 128
+assert kw['bn_recalibrate_use_best'] is True
+print(model['name'])
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_bnrecal_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_bnrecal_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_pa_ct_ss_at_group2_stop_bnrecal_fast.status' < /dev/null &
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-bnrecal-b256` | 17 | 46.76 | 46.56 | 1.52 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-b256` | 16 | 47.42 | 47.42 | 2.32 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-bnrecal-b256` | 17 | 46.76 | 46.56 | 1.52 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-stop-b256` | 16 | 46.64 | 46.64 | 2.42 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-polyswa-b256` | 16 | 46.54 | 46.54 | 1.66 | 0 | PASS |
+| `imagenet100-96-pa-ct-ss-at-group2-phaseswa-b256` | 17 | 46.18 | 46.18 | 1.50 | 0 | PASS |
+
+Phase details:
+
+| Epoch/Row | Phase | Recorded val acc | Guard |
+| ---: | --- | ---: | ---: |
+| 5 | poly_rejected | 22.06 | 0 |
+| 6 | weights | 23.62 | 0 |
+| 7 | weights | 29.42 | 0 |
+| 8 | weights | 28.66 | 0 |
+| 9 | weights | 33.42 | 0 |
+| 10 | weights | 35.52 | 0 |
+| 11 | weights | 38.92 | 0 |
+| 12 | weights | 39.26 | 0 |
+| 13 | weights | 43.66 | 0 |
+| 14 | weights | 45.94 | 0 |
+| 15 | weights | 44.42 | 0 |
+| 16 | weights | 46.76 | 0 |
+| 17 | bn_recal | 46.56 | 0 |
+
+Log highlights:
+
+| Event | Value |
+| --- | --- |
+| Rejected poly candidate | 18.00 vs best 22.06 |
+| Future poly groups stopped | after 1 rejected group |
+| BN recalibration batches | 128 |
+| BN recalibrated validation | 46.56 |
+
+Conclusion: this run sets a new best AT proxy accuracy at 46.76, slightly above
+the previous dynamic-stop result of 46.64. The added BN recalibration itself did
+not improve the best checkpoint: recalibrated validation was 46.56, 0.20 points
+below the normal epoch-16 best. Keep BN recalibration default-off for this AT
+path. The useful behavior remains pre-guard poly rejection plus dynamic stop;
+the next accuracy work should focus on the remaining paper-faithful gaps,
+especially per-layer training groups or PAF family selection, rather than
+expecting BN recalibration to recover the gap to CT+SS.
