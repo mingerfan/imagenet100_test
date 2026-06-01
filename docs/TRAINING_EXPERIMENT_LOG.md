@@ -3163,3 +3163,43 @@ feature maps. At 224px this can round the final index to `numel()`, causing
 `index_select` to trigger a scatter/gather device-side assert. The sampling code
 now uses integer arithmetic and a debug run confirmed CT initialization reaches
 the first training batch for `cifar10-224-autofhe-degree2-b128`.
+
+Run command:
+
+```bash
+.venv/bin/python -u train.py --config configs/large_cifar10_224_autofhe_compare.yaml --dataset cifar10 --train_dir ./tmp --val_dir ./tmp --result_dir ./results --gpus 1 2 3 --input_size 224 --force
+```
+
+The 40-epoch run was stopped intentionally after all three models passed the
+first StablePoly transition window; the log status is therefore non-zero due to
+manual termination, not model failure.
+
+Result summary at stop:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `cifar10-224-swish-baseline-b128` | 28 | 92.98 | 92.78 | 8.67 | 0 | 0 | 0 | PASS |
+| `cifar10-224-autofhe-degree2-b128` | 22 | 92.41 | 92.41 | 2.78 | 0 | 0 | 0 | PASS |
+| `cifar10-224-autofhe-pat-swish-degree2-b128` | 16 | 90.53 | 90.42 | 2.05 | 0 | 0 | 0 | PASS |
+
+Transition observations:
+
+- No-PAT AutoFHE crossed the first StablePoly transition at epoch 15 without
+  collapse: epoch 14 was 89.68, epoch 15 rose to 90.77, and epoch 22 reached
+  92.41.
+- Swish PAT crossed the same transition stably but underperformed no-PAT:
+  epoch 14 was 90.53, epoch 15 was 89.76, and epoch 16 was 90.42.
+- The current CIFAR-10 224 proxy supports the ImageNet100 96px conclusion:
+  keep Swish PAT backward as an ablation/default-off feature. The stronger
+  recommended proxy is AutoFHE adaptive degree-2 without PAT.
+
+CIFAR-100 data prep status:
+
+- Standard torchvision `cifar-100-python` was not present locally.
+- Concurrent torchvision download failed through the configured HTTP proxy.
+- Direct no-proxy download timed out.
+- `proxychains4` through the configured socks5 proxy returned connection
+  refused.
+
+Therefore CIFAR-100/ImageNet100 follow-up training is pending a usable
+CIFAR-100 data root or a working external download path.
