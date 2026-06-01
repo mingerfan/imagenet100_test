@@ -47,6 +47,7 @@ class Trainer:
         poly4_scale_mode='learned',
         poly4_output_scale=None,
         poly4_degree=None,
+        poly4_degrees=None,
         poly4_dynamic_scale_momentum=0.99,
         poly4_dynamic_scale_eps=1e-6,
         nan_debug=False,
@@ -134,6 +135,8 @@ class Trainer:
             poly4_scale_mode: StablePoly4输入缩放模式 learned/dynamic/static
             poly4_output_scale: StablePoly4 多项式输出缩放；None 保持模块默认值
             poly4_degree: StablePoly4 多项式最高次数 2/3/4；None 保持模块默认值
+            poly4_degrees: StablePoly4 按模块指定最高次数；list 按模块顺序，
+                dict 按模块名/序号，优先级高于 poly4_degree
             poly4_dynamic_scale_momentum: dynamic scale running absmax 动量
             poly4_dynamic_scale_eps: dynamic/static scale 的最小 absmax
             nan_debug: 是否启用NaN定位钩子（默认关闭）
@@ -217,6 +220,7 @@ class Trainer:
         self.poly4_degree = None if poly4_degree is None else int(poly4_degree)
         if self.poly4_degree is not None and self.poly4_degree not in {2, 3, 4}:
             raise ValueError(f"poly4_degree must be one of 2, 3, 4, got {poly4_degree}")
+        self.poly4_degrees = self._normalize_poly4_degrees(poly4_degrees)
         self.poly4_dynamic_scale_momentum = float(poly4_dynamic_scale_momentum)
         self.poly4_dynamic_scale_eps = float(poly4_dynamic_scale_eps)
         self.nan_debug = nan_debug
@@ -368,6 +372,62 @@ class Trainer:
 
         if self.resume_path:
             self._load_checkpoint(self.resume_path, strict=self.resume_strict)
+
+    def _normalize_poly4_degrees(self, degrees):
+        """Normalize optional per-module StablePoly degrees.
+
+        Supported forms:
+        - list/tuple: assigned by StablePoly module order.
+        - dict: keys may be module names, zero-based indexes, or one-based indexes.
+        - comma string: shorthand list, e.g. "2,4".
+        """
+        if degrees is None:
+            return None
+        if isinstance(degrees, str):
+            text = degrees.strip()
+            if text.lower() in {"", "none", "false"}:
+                return None
+            degrees = [part.strip() for part in text.split(",") if part.strip()]
+        if isinstance(degrees, (list, tuple)):
+            normalized = [int(value) for value in degrees]
+            invalid = [value for value in normalized if value not in {2, 3, 4}]
+            if invalid:
+                raise ValueError(f"poly4_degrees values must be 2/3/4, got {invalid}")
+            return normalized
+        if isinstance(degrees, dict):
+            normalized = {}
+            for key, value in degrees.items():
+                degree = int(value)
+                if degree not in {2, 3, 4}:
+                    raise ValueError(f"poly4_degrees values must be 2/3/4, got {degree}")
+                normalized[str(key)] = degree
+            return normalized
+        raise ValueError(
+            "poly4_degrees must be None, a list/tuple, a comma string, or a dict"
+        )
+
+    def _poly4_degree_for_module(self, index, name):
+        if self.poly4_degrees is None:
+            return self.poly4_degree
+        if isinstance(self.poly4_degrees, list):
+            if index >= len(self.poly4_degrees):
+                raise ValueError(
+                    f"poly4_degrees has {len(self.poly4_degrees)} values but "
+                    f"StablePoly4 module index {index} ({name}) needs one"
+                )
+            return self.poly4_degrees[index]
+
+        candidates = (
+            name,
+            str(index),
+            str(index + 1),
+            f"module_{index}",
+            f"module_{index + 1}",
+        )
+        for key in candidates:
+            if key in self.poly4_degrees:
+                return self.poly4_degrees[key]
+        return self.poly4_degree
 
     def _ensure_history_fields(self):
         """Ensure older checkpoints have all current history columns."""
@@ -646,11 +706,16 @@ class Trainer:
         配置StablePoly4的alpha调度与正则项开关/阈值
         """
         poly4_count = 0
-        for module in self.model.modules():
+        degree_assignments = []
+        for name, module in self.model.named_modules():
             if self.poly4_output_scale is not None and hasattr(module, 'output_scale'):
                 module.output_scale = self.poly4_output_scale
-            if self.poly4_degree is not None and hasattr(module, 'set_poly_degree'):
-                module.set_poly_degree(self.poly4_degree)
+            module_degree = None
+            if hasattr(module, 'set_poly_degree'):
+                module_degree = self._poly4_degree_for_module(poly4_count, name)
+                if module_degree is not None:
+                    module.set_poly_degree(module_degree)
+                    degree_assignments.append((name, module_degree))
             if hasattr(module, 'set_range_params') and callable(module.set_range_params):
                 module.set_range_params(
                     range_r=self.poly4_range_r,
@@ -675,7 +740,13 @@ class Trainer:
             print(f"  - scale_mode: {self.poly4_scale_mode}")
             if self.poly4_output_scale is not None:
                 print(f"  - output_scale: {self.poly4_output_scale:g}")
-            if self.poly4_degree is not None:
+            if self.poly4_degrees is not None:
+                print("  - poly_degrees:")
+                for idx, (name, degree) in enumerate(degree_assignments[:8]):
+                    print(f"    {idx + 1}. {name}: degree={degree}")
+                if len(degree_assignments) > 8:
+                    print(f"    ... 其余 {len(degree_assignments) - 8} 个模块已配置")
+            elif self.poly4_degree is not None:
                 print(f"  - poly_degree: {self.poly4_degree}")
             if self.poly4_range_lambda > 0:
                 print(f"  - range_r: {self.poly4_range_r}, lambda_range: {self.poly4_range_lambda}")

@@ -1,0 +1,13 @@
+# AutoFHE research scratch artifacts.
+/paper/
+/code/
+/runs/
+/tmp/
+*.pdf
+*.pth
+*.pt
+*.ckpt
+*.log
+*.status
+__pycache__/
+*.py[cod]

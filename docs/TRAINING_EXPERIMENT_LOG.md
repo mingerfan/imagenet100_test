@@ -2947,3 +2947,76 @@ not an accuracy gain; it is that degree/output-scale tuning can preserve most
 of CT-only's accuracy while sharply reducing drop. Keep original CT-only as the
 best proxy result in this family, and keep the tuned variant as a stability
 candidate for longer runs.
+
+## 2026-06-01 AutoFHE Adaptive Precision Round
+
+Goal: apply the AutoFHE-style layerwise mixed-precision idea to the current
+StablePoly proxy. The repo already had a global `poly4_degree`; this round adds
+`poly4_degrees`, which can assign degree 2/3/4 per StablePoly module by module
+order or module name. The first AutoFHE proxy uses `[2, 2]` because the prior
+degree search showed degree 2 retained CT-only accuracy while reducing
+polynomial depth.
+
+AutoFHE research notes and tooling were added under `autofhe/` with a local
+`.gitignore`. The selection helper ranks candidates by accuracy and polynomial
+depth, preferring lower depth within a 0.25 percentage point accuracy tolerance.
+
+Validation commands:
+
+```bash
+.venv/bin/python -m py_compile trainers/base_trainer.py autofhe/select_precision.py
+.venv/bin/python autofhe/select_precision.py --repo-root .
+.venv/bin/python - <<'PY'
+import yaml
+p='configs/proxy_imagenet100_96_autofhe_adaptive_degree_fast.yaml'
+cfg=yaml.safe_load(open(p))
+kw=cfg['models'][0]['trainer_kwargs']
+assert cfg['models'][0]['name'] == 'imagenet100-96-autofhe-adaptive-degree2-b256'
+assert kw['poly4_degrees'] == [2, 2]
+assert kw['poly4_scale_mode'] == 'learned'
+assert kw['poly4_output_scale'] == 0.2
+print('yaml ok')
+PY
+git diff --check
+```
+
+Proxy command:
+
+```bash
+bash -lc '.venv/bin/python -u train.py --config configs/proxy_imagenet100_96_autofhe_adaptive_degree_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 96 --force > logs/proxy_imagenet100_96_autofhe_adaptive_degree_fast.log 2>&1; echo $? > logs/proxy_imagenet100_96_autofhe_adaptive_degree_fast.status'
+```
+
+Result summary:
+
+| Model | Rows | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-autofhe-adaptive-degree2-b256` | 16 | 48.98 | 48.98 | 1.02 | 0 | 0 | 0 | PASS |
+
+Comparison:
+
+| Model | Rows | Best | Final | Max drop | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-96-swish-baseline-b256` | 16 | 49.46 | 49.46 | 0.00 | 0 | PASS |
+| `imagenet100-96-autofhe-adaptive-degree2-b256` | 16 | 48.98 | 48.98 | 1.02 | 0 | PASS |
+| `imagenet100-96-pa-ct-b256` | 16 | 48.94 | 48.94 | 0.00 | 0 | PASS |
+| `imagenet100-96-pa-ct-degree2-outscale02-b256` | 16 | 48.84 | 48.84 | 0.04 | 0 | PASS |
+
+CT and adaptive precision evidence:
+
+| Item | Value |
+| --- | --- |
+| Configured `poly4_scale_mode` | learned |
+| Configured `poly4_degrees` | `[2, 2]` |
+| Configured `output_scale` | 0.2 |
+| `special_resnet.layers.0.act` CT MSE | 0.000162552 |
+| `special_resnet.layers.1.act` CT MSE | 0.0000537013 |
+| AutoFHE selector recommendation | `imagenet100-96-autofhe-adaptive-degree2-b256` |
+
+Conclusion: the AutoFHE-style adaptive precision path is applicable to this
+project. On this two-activation proxy, the selected low-degree configuration is
+both cheaper by polynomial depth and slightly more accurate than the previous
+CT-only degree-4 run (48.98% vs 48.94%). AT, dynamic scale, and DS-to-SS remain
+default-off experimental paths because their best results still trail CT-only.
+The current recommended project setting is CT initialization with learned scale,
+per-module degree selection, and degree 2 for both StablePoly sites on this
+proxy.
