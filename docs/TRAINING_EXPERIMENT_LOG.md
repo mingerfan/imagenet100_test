@@ -3274,3 +3274,64 @@ the available ImageNet100 proxy and did not collapse after staged StablePoly
 replacement. Together with the CIFAR-10 224 result, this supports keeping
 degree-2 no-PAT as the recommended proxy path and keeping Swish PAT backward as
 a default-off ablation.
+
+## 2026-06-02 Evolution Rank-10 NAS AutoFHE Iteration
+
+Goal: move from the hand-written ResNet proxy to an architecture produced by
+regularized evolution, then iterate AutoFHE changes on that searched structure.
+
+Searched architecture:
+
+- Source copy: `configs/nas_variants/evolution_rank10.json`
+- Original result source: `nas_result/best_models/10.json`
+- Rank/generation: rank 10, generation 153
+- Search metadata: 12.57M reported params, 1.174G FLOPs, FHE latency 10.92M,
+  24 bootstraps, max depth 243
+- Block choices: `[13, 9, 13, 11, 13, 13, 13, 13]`, mostly GatedMBConv4 with
+  LearnableSwish, plus one GatedMBConv1 and one SE block.
+
+Tracked configs:
+
+- `configs/evolution_rank10_imagenet100_224_fast.yaml`
+- `configs/evolution_rank10_poly4_imagenet100_224_fast.yaml`
+- `configs/evolution_rank10_poly4_gate_sigmoid_imagenet100_224_fast.yaml`
+- `tools/create_rank10_poly4_variant.py`
+
+Commands:
+
+```bash
+.venv/bin/python -u train.py --config configs/evolution_rank10_imagenet100_224_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 1 --input_size 224 --no_memory_fs --models evolution-rank10-imagenet100-224-b128 --force
+.venv/bin/python -u train.py --config configs/evolution_rank10_poly4_imagenet100_224_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 --input_size 224 --no_memory_fs --models evolution-rank10-poly4-imagenet100-224-b64 --force
+```
+
+Completed 12-epoch results:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `evolution-rank10-imagenet100-224-b128` | 12 | 68.96 | 68.96 | 0.00 | 0 | 0 | 0 | PASS |
+| `evolution-rank10-poly4-imagenet100-224-b64` | 12 | 65.16 | 61.22 | 9.64 | 0 | 0 | 0 | PASS |
+
+Observations:
+
+- The original evolution architecture trains stably under the same 12-epoch
+  ImageNet100 224 proxy, reaching 68.96.
+- The full Poly4 block-mapped variant is stable through the first transition:
+  epoch 5 was 48.52 and epoch 6 improved to 52.68.
+- Late progressive replacement exposed a real weakness: best accuracy reached
+  65.16 at epoch 10, then validation loss jumped to 151298 at epoch 11 and
+  final accuracy fell to 61.22. No nonfinite, skipped-batch, or collapse-guard
+  event fired, so this is a degradation rather than a hard numerical failure.
+- Root cause hypothesis: mapping the GatedMBConv block id to Poly4 also changed
+  the internal GatedDepthwise gate activation from Sigmoid to StablePoly4. That
+  makes the gate no longer bounded like a probability and correlates with the
+  late validation loss explosion.
+
+Follow-up change:
+
+- `models/gate_net_cmp/block_def.py` now treats `StablePoly4` as a Swish-family
+  activation for GatedDepthwise gate selection, so a Poly4 MBConv keeps the gate
+  activation as Sigmoid while only the main MBConv activation becomes
+  StablePoly4.
+- The conservative follow-up config
+  `configs/evolution_rank10_poly4_gate_sigmoid_imagenet100_224_fast.yaml` has
+  8 StablePoly4 modules instead of 16 and is running as the next iteration.
