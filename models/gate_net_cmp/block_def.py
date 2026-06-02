@@ -126,7 +126,7 @@ def _is_swish_activation(activation) -> bool:
     if act_cls is nn.SiLU:
         return True
     name = act_cls.__name__.lower()
-    return name in ("swish", "learnableswish", "silu")
+    return name in ("swish", "learnableswish", "silu", "stablepoly4")
 
 
 class Activation(nn.Module):
