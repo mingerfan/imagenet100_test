@@ -1,0 +1,69 @@
+# 12-epoch ImageNet-100 proxy comparison for the evolution-searched rank10 NAS
+# model and an AESPA-style Swish-HerPN activation override at body block idx6.
+
+global:
+  num_classes: 100
+  default_epochs: 12
+  default_batch_size: 96
+  default_learning_rate: 0.0007
+  default_num_workers: 4
+  default_save_freq: 0
+
+json_models:
+  - name: "evolution-rank10-proxy12-imagenet100-224-b96"
+    class: "nas-json"
+    json_path: "configs/nas_variants/evolution_rank10.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 96
+    learning_rate: 0.0007
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 3
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
+
+  - name: "evolution-rank10-swish-herpn-idx6-proxy12-imagenet100-224-b96"
+    class: "nas-json"
+    json_path: "configs/nas_variants/evolution_rank10_swish_herpn_idx6.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 96
+    learning_rate: 0.0007
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 3
+    warmup_start_factor: 0.05
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      collapse_guard_enabled: true
+      collapse_guard_drop: 10.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop

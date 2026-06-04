@@ -739,7 +739,7 @@ class NetworkBuilder:
         """构建单个Block"""
         spec = block_cfg.spec
         block_class = spec.block_class
-        activation_class = spec.activation_class
+        activation_class = block_cfg.activation_class
 
         if spec.is_mbconv():
             # MBConv类型（包含MBConv和GatedMBConv）

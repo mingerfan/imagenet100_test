@@ -42,6 +42,7 @@ from models.gate_net_cmp.block_def import (
     LearnableSwish,
     StablePoly4,
     Swish,
+    SwishHerPN,
 )
 
 
@@ -72,6 +73,12 @@ ACTIVATION_TYPES: Dict[str, ActivationSpec] = {
         activation_class=StablePoly4,
         trainable=True,
         description="4阶多项式激活"
+    ),
+    "swish_herpn": ActivationSpec(
+        name="swish_herpn",
+        activation_class=SwishHerPN,
+        trainable=True,
+        description="AESPA-style Hermite basis-normalized Swish"
     ),
 }
 

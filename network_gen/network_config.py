@@ -15,6 +15,7 @@ from .search_space import (
     StrideEncoder,
     ChannelCalculator,
     UNIFIED_BLOCKS,
+    ACTIVATION_TYPES,
     STEM_CONFIGS,
     SECOND_DOWNSAMPLE_CONFIGS,
     StemConfig,
@@ -30,6 +31,7 @@ class BlockConfig:
     in_channels: int
     out_channels: int
     stride: int
+    activation_override: Optional[str] = None
 
     @property
     def spec(self) -> UnifiedBlockSpec:
@@ -38,6 +40,8 @@ class BlockConfig:
 
     @property
     def name(self) -> str:
+        if self.activation_override:
+            return f"{self.spec.name}+{self.activation_override}"
         return self.spec.name
 
     @property
@@ -46,6 +50,11 @@ class BlockConfig:
 
     @property
     def activation_class(self):
+        if self.activation_override:
+            key = self.activation_override.strip().lower()
+            if key not in ACTIVATION_TYPES:
+                raise ValueError(f"Unsupported activation_override: {self.activation_override}")
+            return ACTIVATION_TYPES[key].activation_class
         return self.spec.activation_class
 
     @property
@@ -53,16 +62,22 @@ class BlockConfig:
         return self.spec.factor
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "block_id": self.block_id,
             "in_channels": self.in_channels,
             "out_channels": self.out_channels,
             "stride": self.stride,
         }
+        if self.activation_override:
+            data["activation_override"] = self.activation_override
+        return data
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "BlockConfig":
-        return cls(**d)
+        data = dict(d)
+        if data.get("activation_override") is not None:
+            data["activation_override"] = str(data["activation_override"]).strip().lower()
+        return cls(**data)
 
 
 @dataclass

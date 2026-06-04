@@ -1,0 +1,111 @@
+{
+  "rank": 10,
+  "zen_fitness": 116.8408151626587,
+  "scores": {
+    "zen_score": 89.87755012512207,
+    "std_zen_score": 5.162559938571142,
+    "params": 12571896,
+    "flops": 1174177388.0,
+    "fhe_latency": 10923215.0,
+    "fhe_boot_count": 24,
+    "fhe_max_depth": 243,
+    "fhe_operation_latency": 5329463.0,
+    "fhe_boot_latency": 5593752.0
+  },
+  "generation": 153,
+  "config": {
+    "stem_code": 3,
+    "second_ds_code": 4,
+    "stride_code": 25,
+    "ct_policies": [
+      "keep",
+      "half",
+      "half"
+    ],
+    "block_choices": [
+      12,
+      8,
+      12,
+      11,
+      13,
+      13,
+      13,
+      13
+    ],
+    "blocks": [
+      {
+        "block_id": 12,
+        "in_channels": 40,
+        "out_channels": 166,
+        "stride": 2
+      },
+      {
+        "block_id": 8,
+        "in_channels": 166,
+        "out_channels": 334,
+        "stride": 2
+      },
+      {
+        "block_id": 12,
+        "in_channels": 334,
+        "out_channels": 334,
+        "stride": 1
+      },
+      {
+        "block_id": 11,
+        "in_channels": 334,
+        "out_channels": 668,
+        "stride": 2
+      },
+      {
+        "block_id": 13,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 13,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 13,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      },
+      {
+        "block_id": 13,
+        "in_channels": 668,
+        "out_channels": 668,
+        "stride": 1
+      }
+    ],
+    "initial_ct_count": 4,
+    "stem_out_channels": 40,
+    "num_classes": 100,
+    "name": "net_7845934d_poly4_head3_proxy",
+    "description": "AutoFHE candidate derived from evolution rank-10 by mapping the first 3 Swish/LearnableSwish body blocks to StablePoly4 while keeping the remaining tail blocks unchanged.",
+    "created_at": "2026-01-20T21:10:18.353727"
+  },
+  "source_architecture": "configs/nas_variants/evolution_rank10.json",
+  "variant": "poly4_head3_block_activation_mapping",
+  "replacements": [
+    {
+      "index": 0,
+      "from": 13,
+      "to": 12
+    },
+    {
+      "index": 1,
+      "from": 9,
+      "to": 8
+    },
+    {
+      "index": 2,
+      "from": 13,
+      "to": 12
+    }
+  ]
+}

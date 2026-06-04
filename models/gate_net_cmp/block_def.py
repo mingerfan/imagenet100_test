@@ -126,7 +126,7 @@ def _is_swish_activation(activation) -> bool:
     if act_cls is nn.SiLU:
         return True
     name = act_cls.__name__.lower()
-    return name in ("swish", "learnableswish", "silu", "stablepoly4")
+    return name in ("swish", "learnableswish", "silu", "stablepoly4", "swishherpn")
 
 
 class Activation(nn.Module):
@@ -167,6 +167,59 @@ class Swish(nn.Module):
 
     def forward(self, x):
         return self.swish(x)
+
+
+class SwishHerPN(nn.Module):
+    """
+    AESPA-style Hermite polynomial activation for Swish.
+
+    Uses degree-2 normalized probabilists' Hermite bases with basis-wise
+    BatchNorm. Coefficients are initialized from the standard-normal projection
+    of Swish/SiLU and left trainable for proxy training.
+    """
+
+    def __init__(
+        self,
+        degree=2,
+        coeff0=0.20662,
+        coeff1=0.5,
+        coeff2=0.24860,
+        eps=BN_EPS,
+        trainable_coeffs=True,
+    ):
+        super().__init__()
+        degree = int(degree)
+        if degree not in {1, 2}:
+            raise ValueError(f"SwishHerPN supports degree 1 or 2, got {degree}")
+        self.degree = degree
+        self.basis_norm1 = nn.LazyBatchNorm2d(eps=eps, affine=False)
+        self.basis_norm2 = nn.LazyBatchNorm2d(eps=eps, affine=False) if degree >= 2 else None
+
+        coeffs = torch.tensor([float(coeff1), float(coeff2)], dtype=torch.float32)
+        if trainable_coeffs:
+            self.coeffs = nn.Parameter(coeffs)
+        else:
+            self.register_buffer("coeffs", coeffs)
+        self.gamma = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.beta = nn.Parameter(torch.tensor(float(coeff0), dtype=torch.float32))
+
+    def forward(self, x):
+        orig_dtype = x.dtype
+        x_work = x.float() if orig_dtype in (torch.float16, torch.bfloat16) else x
+
+        h1 = self.basis_norm1(x_work)
+        out = self.coeffs[0].to(dtype=x_work.dtype) * h1
+        if self.degree >= 2:
+            h2 = (x_work * x_work - 1.0) * (2.0 ** -0.5)
+            h2 = torch.nan_to_num(h2, nan=0.0, posinf=1e6, neginf=-1e6)
+            h2 = torch.clamp(h2, min=-1e6, max=1e6)
+            out = out + self.coeffs[1].to(dtype=x_work.dtype) * self.basis_norm2(h2)
+
+        gamma = self.gamma.to(dtype=x_work.dtype)
+        beta = self.beta.to(dtype=x_work.dtype)
+        out = gamma * out + beta
+        out = torch.nan_to_num(out, nan=0.0, posinf=100.0, neginf=-100.0)
+        return out.to(orig_dtype) if out.dtype != orig_dtype else out
 
 
 class LearnableRelu(nn.Module):

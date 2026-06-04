@@ -56,20 +56,27 @@ def create_smart_optimizer(
     poly_weight_decay=0.0,
     beta_weight_decay=0.0,
     poly_lr_mult=1.0,
+    poly_scale_lr_mult=None,
     normal_lr_mult=1.0,
 ):
     """智能优化器：为不同类型的参数使用不同的学习率/权重衰减策略。"""
     poly_params = []
+    poly_scale_params = []
     no_decay_params = []
     normal_params = []
     poly_param_ids = _collect_module_param_ids(model, "StablePoly4")
     bn_param_ids = _collect_batchnorm_param_ids(model)
+    if poly_scale_lr_mult is None:
+        poly_scale_lr_mult = poly_lr_mult
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
         if id(param) in poly_param_ids:
-            poly_params.append(param)
+            if name.endswith(".log_in_scale"):
+                poly_scale_params.append(param)
+            else:
+                poly_params.append(param)
         elif id(param) in bn_param_ids or _is_no_decay_parameter(name):
             no_decay_params.append(param)
         else:
@@ -98,6 +105,14 @@ def create_smart_optimizer(
             "lr": lr * poly_lr_mult,
             "weight_decay": poly_weight_decay,
             "name": "poly",
+            "is_poly": True,
+        })
+    if poly_scale_params:
+        param_groups.append({
+            "params": poly_scale_params,
+            "lr": lr * poly_scale_lr_mult,
+            "weight_decay": poly_weight_decay,
+            "name": "poly_scale",
             "is_poly": True,
         })
 
@@ -436,6 +451,7 @@ class MultiGPUManager:
             poly_weight_decay=model_config.get('poly_weight_decay', 0.0 if uses_stablepoly else 1e-4),
             beta_weight_decay=model_config.get('beta_weight_decay', 0.0),
             poly_lr_mult=model_config.get('poly_lr_mult', 1.0),
+            poly_scale_lr_mult=model_config.get('poly_scale_lr_mult', None),
             normal_lr_mult=model_config.get('normal_lr_mult', 1.0),
         )
 
@@ -489,6 +505,7 @@ class MultiGPUManager:
             'poly_weight_decay',
             'beta_weight_decay',
             'poly_lr_mult',
+            'poly_scale_lr_mult',
             'normal_lr_mult',
             'label_smoothing',
         ):

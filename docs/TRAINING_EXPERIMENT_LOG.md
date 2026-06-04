@@ -3335,3 +3335,1102 @@ Follow-up change:
 - The conservative follow-up config
   `configs/evolution_rank10_poly4_gate_sigmoid_imagenet100_224_fast.yaml` has
   8 StablePoly4 modules instead of 16 and is running as the next iteration.
+
+## 2026-06-02 Rank-10 Stability Follow-ups
+
+Goal: isolate the late-collapse mechanism in the evolution rank-10 Poly4
+variant and find a stable AutoFHE mapping for the searched architecture.
+
+Additional tracked configs and variants:
+
+- `configs/evolution_rank10_poly4_gate_sigmoid_imagenet100_224_fast.yaml`
+- `configs/evolution_rank10_poly4_head5_imagenet100_224_fast.yaml`
+- `configs/evolution_rank10_poly4_head4_static_imagenet100_224_fast.yaml`
+- `configs/evolution_rank10_poly4_head5_static_imagenet100_224_fast.yaml`
+- `configs/nas_variants/evolution_rank10_poly4_head5.json`
+- `configs/nas_variants/evolution_rank10_poly4_head4.json`
+- `tools/create_rank10_partial_poly4_variant.py`
+
+Completed results:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `evolution-rank10-imagenet100-224-b128` | 12 | 68.96 | 68.96 | 0.00 | 0 | 0 | 0 | PASS |
+| `evolution-rank10-poly4-head4-static-imagenet100-224-b96` | 12 | 65.40 | 65.24 | 0.16 | 0 | 0 | 0 | PASS |
+| `evolution-rank10-poly4-imagenet100-224-b64` | 12 | 65.16 | 61.22 | 9.64 | 0 | 0 | 0 | PASS |
+| `evolution-rank10-poly4-head5-static-imagenet100-224-b96` | 12 | 64.90 | 64.90 | 0.00 | 0 | 0 | 0 | PASS |
+| `evolution-rank10-poly4-head5-imagenet100-224-b96` | 10 | 63.90 | 19.70 | 44.20 | 0 | 0 | 1 | COLLAPSE |
+| `evolution-rank10-poly4-gatesigmoid-imagenet100-224-b96` | 10 | 62.46 | 8.40 | 54.06 | 0 | 0 | 1 | COLLAPSE |
+
+Baseline comparison added during this iteration:
+
+| Model | Params | Epochs | Best | Final | Status |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `imagenet100-224-efficientnet-b0-fast-b128` | 4.14M | 12 | 72.74 | 72.74 | PASS |
+| `imagenet100-224-resnet18-fast-b128` | 11.23M | 12 | 72.52 | 72.52 | PASS |
+
+Observations:
+
+- Gate-sigmoid alone did not fix collapse. It reached 62.46 at epoch 9 and
+  collapsed at epoch 10 to 8.40 with the guard firing.
+- Head5 partial replacement improved the pre-collapse peak to 63.90 at epoch 9,
+  but still collapsed at epoch 10 to 19.70. This disproves the simple hypothesis
+  that only adding the sixth StablePoly4 block caused the failure.
+- Head4 with static Poly4 scale crossed the same epoch-10 region without a drop:
+  epoch 9 was 62.58, epoch 10 was 64.22, epoch 11 was 65.40, and final was
+  65.24. This is the best stable rank-10 Poly4 result so far and exceeds the
+  full Poly4 best while avoiding its late degradation.
+- Head5 with static Poly4 scale also crossed epoch 10 without collapse: epoch 9
+  was 62.62, epoch 10 was 63.96, and final/best was 64.90. This supports
+  learned-scale drift as a major contributor to the head5 collapse, but adding
+  the fifth static Poly4 did not recover accuracy and underperformed head4
+  static.
+- Accuracy is still below the unmodified searched architecture: 65.40 vs 68.96.
+  The next useful direction is to recover accuracy without reintroducing
+  learned-scale collapse, for example head4 with learned scale plus
+  restore/reduce-LR guard, or a head4 static run with a less suppressive
+  polynomial output scale/transition schedule.
+
+## 2026-06-03 Rank-10 Learned-Scale Recovery
+
+Goal: keep the stable head4 partial StablePoly4 mapping, recover some of the
+accuracy lost by static scaling, and avoid the learned-scale collapse seen in
+head5/full mappings.
+
+In-progress result:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `evolution-rank10-poly4-head4-learned-recover-imagenet100-224-b96` | 10 | 64.20 | 17.52 | 46.68 | 0 | 0 | 1 | COLLAPSE |
+
+Current trajectory is slightly ahead of head4 static at matched epochs:
+
+| Epoch | Head4 static | Head4 learned-recover |
+| ---: | ---: | ---: |
+| 5 | 50.38 | 50.76 |
+| 6 | 54.62 | 55.32 |
+| 7 | 58.92 | 59.70 |
+| 8 | 60.82 | 62.18 |
+| 9 | 62.58 | 64.20 |
+| 10 | 64.22 | 17.52 |
+
+The learned-scale run uses the AutoFHE-inspired stable recipe already found to
+work well on proxy experiments: degree-2 StablePoly4, output scale 0.2, CT
+initialization, progressive activation transition, and restore-best/reduce-LR
+collapse guard. It has not triggered nonfinite batches, skipped batches, or the
+collapse guard through epoch 9. At epoch 9 it was 1.62 percentage points ahead
+of the static-scale head4 run at the same epoch and within 1.04 percentage
+points of the static run's final 65.24. It then collapsed at epoch 10: val_acc
+dropped from 64.20 to 17.52, with no nonfinite/skipped batches but with the
+collapse guard firing once. The run saved `collapse_epoch_10.pth`, while
+`best_model.pth` remained the epoch-9 checkpoint.
+
+Follow-up change prepared while the run continues:
+
+- `trainers/multi_gpu_manager.py` now supports `poly_scale_lr_mult`, a separate
+  learning-rate multiplier for StablePoly4 `log_in_scale` parameters.
+- Existing configs are backward compatible: if `poly_scale_lr_mult` is omitted,
+  `log_in_scale` keeps using `poly_lr_mult`.
+- New config:
+  `configs/evolution_rank10_poly4_head4_learned_slow_scale_imagenet100_224_fast.yaml`.
+  It matches the learned-recover setup but sets `poly_scale_lr_mult: 0.1`.
+- Dry instantiation check confirmed the intended optimizer groups:
+  `poly` has 20 coefficient parameters at LR 7e-04, while `poly_scale` has 4
+  scale parameters at LR 7e-05.
+
+Rationale: static scale is stable but suppresses accuracy, while unconstrained
+learned scale can drift aggressively. The next controlled ablation is to keep
+Poly4 coefficients fully trainable but slow only `log_in_scale` updates.
+
+Epoch-10 collapse makes this ablation the next priority: restore/reduce-LR did
+not prevent the learned-scale failure mode from appearing in the validation
+history, so scale drift needs to be controlled before the guard fires.
+
+Slow-scale run started:
+
+```bash
+.venv/bin/python -u train.py \
+  --config configs/evolution_rank10_poly4_head4_learned_slow_scale_imagenet100_224_fast.yaml \
+  --dataset imagenet100 \
+  --train_dir /home/xuming/Documents/dataset/imagenet_100/train \
+  --val_dir /home/xuming/Documents/dataset/imagenet_100/val \
+  --result_dir ./results \
+  --gpus 1 \
+  --input_size 224 \
+  --no_memory_fs \
+  --models evolution-rank10-poly4-head4-learned-slow-scale-imagenet100-224-b96 \
+  --force
+```
+
+Startup checks:
+
+- GPU: physical GPU 1.
+- Optimizer groups: `poly` 20 parameters at LR 7e-04, `poly_scale` 4
+  `log_in_scale` parameters at LR 7e-05.
+- CT init completed; first batch had finite logits and finite loss.
+- The run is intended to test whether slower scale learning can keep the
+  epoch-9 gain of learned scale while avoiding the epoch-10 collapse.
+
+First checkpoint:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `evolution-rank10-poly4-head4-learned-slow-scale-imagenet100-224-b96` | 12 | 65.58 | 65.44 | 0 | 0 | 0 | PASS |
+
+Epoch 1 matches the unconstrained learned-recover run exactly at 15.60, so the
+separate lower LR for `log_in_scale` does not damage the initial trajectory.
+Scale values after epoch 1 are still dominated by CT initialization
+(`blocks.0.activation` in_scale about 1.485 and `blocks.2.activation` about
+1.478), so the useful signal for this ablation will come later, especially
+epochs 8-10.
+
+Epoch 2 reached 27.90 versus 27.80 for the unconstrained learned-recover run.
+`log_in_scale` remained essentially at its CT-initialized values, which is the
+intended behavior for this slow-scale ablation in the early warmup phase.
+Epoch 3 reached 38.54 versus 38.82 for unconstrained learned-recover. The
+0.28-point gap is small enough that slow-scale remains a viable ablation; the
+decisive comparison is still whether it can avoid the epoch-10 collapse while
+retaining most of the epoch-9 gain.
+Epoch 4 reached 43.16 versus 43.22 for unconstrained learned-recover, only
+0.06 points lower. `log_in_scale` still matched the CT-initialized values, so
+the reduced scale LR is preserving the early accuracy trajectory while holding
+scale drift near zero through the warmup phase.
+Epoch 5 reached 50.16. This is 0.60 points below unconstrained learned-recover
+at epoch 5 (50.76) and 0.22 points below the static-scale head4 run (50.38).
+The slow-scale run is becoming slightly more conservative near the start of the
+Poly4 transition but remains stable with no nonfinite/skipped batches and no
+collapse-guard event.
+Epoch 6 reached 54.60, essentially matching static head4 at the same epoch
+(54.62) and trailing unconstrained learned-recover by 0.72 points (55.32).
+The scale-control hypothesis is supported by diagnostics: by epoch 5,
+`blocks.0.activation` in_scale was about 1.278, while the unconstrained
+learned-recover run had already driven it down to about 0.422 at epoch 5 and
+continued toward the later collapse. The tradeoff so far is clear: slower scale
+learning loses part of the learned-scale accuracy gain but strongly damps the
+scale drift.
+Epoch 7 reached 58.92, exactly matching static head4 at the same epoch and
+trailing unconstrained learned-recover by 0.78 points (59.70). The run is now
+best understood as a learned-scale stabilization candidate that tracks static
+accuracy, rather than a clear accuracy-recovery candidate so far.
+Epoch 8 reached 61.14, 0.32 points above static head4 at the same epoch
+(60.82) but 1.04 points below unconstrained learned-recover (62.18). The run is
+stable through the first post-warmup region with no nonfinite/skipped batches
+and no collapse-guard event. Epochs 9-10 remain the decisive check.
+Epoch 9 reached 62.36, 0.22 points below static head4 at the same epoch
+(62.58) and 1.84 points below unconstrained learned-recover (64.20). The run
+has not recovered the learned-scale accuracy gain, but it remains stable going
+into the epoch-10 collapse checkpoint where unconstrained learned-recover fell
+to 17.52.
+Epoch 10 reached 64.28 with no collapse-guard event. This directly validates
+the slow-scale hypothesis for stability: the same head4 learned-scale recipe
+that collapsed to 17.52 with unconstrained `log_in_scale` reached 64.28 when
+the scale LR was reduced by 10x. It also slightly exceeded static head4 at the
+same epoch (64.22) and the unconstrained learned-recover best before collapse
+(64.20), but it is still below the static run's final/best result
+(65.24/65.40). The remaining question is whether epochs 11-12 can improve past
+the static head4 best.
+Epoch 11 reached 65.58, exceeding the previous best stable head4 static result
+of 65.40. This makes slow-scale the current best stable rank-10 Poly4 variant.
+It is still below the unmodified evolution rank-10 architecture at 68.96, so
+the remaining target is accuracy recovery, not stability.
+Epoch 12 finished at 65.44, with best remaining 65.58. No nonfinite batches,
+skipped batches, or collapse-guard events occurred. This finalizes
+slow-scale as the best stable rank-10 Poly4 variant so far:
+
+| Variant | Best | Final | Status |
+| --- | ---: | ---: | --- |
+| Original evolution rank10 | 68.96 | 68.96 | PASS |
+| Head4 learned slow-scale Poly4 | 65.58 | 65.44 | PASS |
+| Head4 static Poly4 | 65.40 | 65.24 | PASS |
+| Head5 static Poly4 | 64.90 | 64.90 | PASS |
+| Head4 unconstrained learned Poly4 | 64.20 | 17.52 | COLLAPSE |
+
+Remaining gap to the unmodified searched architecture is 3.38 percentage
+points at best accuracy.
+
+Next ablation:
+
+- New config:
+  `configs/evolution_rank10_poly4_head4_learned_scale02_imagenet100_224_fast.yaml`.
+- It keeps the head4 learned slow-scale recipe but raises
+  `poly_scale_lr_mult` from 0.1 to 0.2.
+- Optimizer dry check confirmed `poly_scale` has 4 `log_in_scale` parameters at
+  LR 1.4e-04, while Poly4 coefficients remain at LR 7e-04.
+- Rationale: 0.1 is stable and now best among stable Poly4 variants, but it
+  gives up much of the unconstrained learned-scale accuracy gain. A 0.2
+  multiplier is the next conservative attempt to recover accuracy while keeping
+  scale drift far below the unconstrained 1.0 run.
+- Scale02 epoch 1 reached 15.62, matching the earlier learned-scale starts
+  (15.60 for scale02=0.1 and 15.60 for unconstrained learned-recover) with no
+  nonfinite/skipped batches and no guard event.
+- Scale02 epoch 2 reached 27.88, essentially matching slow-scale 0.1 at the
+  same epoch (27.90) and unconstrained learned-recover (27.80), with no
+  nonfinite/skipped batches and no guard event.
+- Scale02 epoch 3 reached 38.64, 0.10 points above slow-scale 0.1 (38.54).
+- Scale02 epoch 4 reached 42.48, 0.68 points below slow-scale 0.1 (43.16).
+- Scale02 epoch 5 reached 50.64, 0.48 points above slow-scale 0.1 (50.16)
+  and 0.12 points below unconstrained learned-recover (50.76). Stability
+  remains clean: no nonfinite batches, no skipped batches, and no collapse
+  guard event through epoch 5.
+- Scale diagnostics from the epoch-5 best checkpoint are still controlled:
+  `blocks.0.activation` in_scale is about 1.109 and `blocks.2.activation` is
+  about 1.478. This is far from the aggressive unconstrained epoch-5 drift
+  previously observed around `blocks.0.activation` in_scale 0.422. The 0.2
+  multiplier therefore remains worth continuing to epoch 10 before deciding
+  whether it improves on the stable 0.1 run.
+- Scale02 epoch 6 reached 54.94, 0.34 points above slow-scale 0.1 (54.60)
+  and 0.32 points above static head4 (54.62).
+- Scale02 epoch 7 reached 59.02, 0.10 points above slow-scale 0.1 (58.92)
+  and still below unconstrained learned-recover at the same epoch (59.70).
+- Scale02 epoch 8 reached 61.24, 0.10 points above slow-scale 0.1 (61.14)
+  and 0.42 points above static head4 (60.82).
+- Scale02 epoch 9 reached 62.74, 0.38 points above slow-scale 0.1 (62.36)
+  and 0.16 points above static head4 (62.58).
+- Scale02 epoch 10 reached 64.34 with no collapse-guard event. This passes the
+  exact checkpoint where unconstrained learned-recover collapsed to 17.52, and
+  is slightly ahead of slow-scale 0.1 at the same epoch (64.28). The advantage
+  is small, so the final decision depends on epochs 11-12 and whether best
+  accuracy can exceed the current stable Poly4 best of 65.58.
+- Scale diagnostics from the epoch-10 best checkpoint remain controlled:
+  `blocks.0.activation` in_scale is about 0.689 and `blocks.2.activation` is
+  about 1.230. The scale is moving more than the 0.1 run, as intended, but it
+  has not reproduced the unconstrained learned-scale collapse behavior.
+- Scale02 finished 12 epochs with best 65.50 at epoch 11 and final 65.16.
+  No nonfinite batches, skipped batches, or collapse-guard events occurred.
+  This confirms `poly_scale_lr_mult: 0.2` is stable, but it does not improve on
+  the current best stable Poly4 run (`poly_scale_lr_mult: 0.1`, best 65.58).
+  The result also shows that simply increasing learned-scale LR is not the
+  right next lever: it preserves stability at 0.2 but gives no accuracy gain.
+  The next rank-10 ablation should instead keep the 0.1 scale control and test
+  a different training signal, such as the Swish-specific PAT backward path.
+
+Swish-PAT rank-10 ablation:
+
+- New config:
+  `configs/evolution_rank10_poly4_head4_learned_slow_scale_pat_swish_imagenet100_224_fast.yaml`.
+- It matches the current best stable slow-scale setup and changes only
+  `poly4_pat_swish_backward: true` plus the model/result names.
+- Startup checks confirmed PAT was enabled, `poly` had 20 coefficient
+  parameters at LR 7e-04, and `poly_scale` had 4 `log_in_scale` parameters at
+  LR 7e-05.
+- CT init completed with very small MSE for the two modules that received
+  samples (`blocks.0.activation` 3.8e-09, `blocks.2.activation` 1.7e-12); the
+  first batch had finite logits and finite loss.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Head4 learned slow-scale + Swish-PAT | 12 | 64.82 | 64.54 | 0 | 0 | 0 | PASS |
+| Head4 learned slow-scale no-PAT | 12 | 65.58 | 65.44 | 0 | 0 | 0 | PASS |
+| Head4 learned scale02 no-PAT | 12 | 65.50 | 65.16 | 0 | 0 | 0 | PASS |
+| Head4 static Poly4 | 12 | 65.40 | 65.24 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | slow-scale no-PAT | scale02 no-PAT | slow-scale + PAT |
+| ---: | ---: | ---: | ---: |
+| 1 | 15.60 | 15.62 | 15.60 |
+| 2 | 27.90 | 27.88 | 27.80 |
+| 3 | 38.54 | 38.64 | 38.66 |
+| 4 | 43.16 | 42.48 | 42.98 |
+| 5 | 50.16 | 50.64 | 50.40 |
+| 6 | 54.60 | 54.94 | 54.70 |
+| 7 | 58.92 | 59.02 | 58.90 |
+| 8 | 61.14 | 61.24 | 60.56 |
+| 9 | 62.36 | 62.74 | 62.68 |
+| 10 | 64.28 | 64.34 | 64.40 |
+| 11 | 65.58 | 65.50 | 64.82 |
+| 12 | 65.44 | 65.16 | 64.54 |
+
+Conclusion: Swish-PAT is stable on the searched rank-10 architecture but is a
+negative accuracy result, matching the earlier proxy trend. It slightly helps
+around epoch 10 but loses the late-epoch recovery at epochs 11-12. Best
+checkpoint scale diagnostics are controlled (`blocks.0.activation` in_scale
+about 0.998, `blocks.2.activation` about 1.322), so the loss is not caused by
+scale collapse. Keep PAT default-off for this rank-10 recipe. The best stable
+Poly4 variant remains head4 learned slow-scale no-PAT with best 65.58, leaving
+a 3.38-point gap to the unmodified searched rank10 model at 68.96.
+
+Head3 structure ablation:
+
+- New NAS variant:
+  `configs/nas_variants/evolution_rank10_poly4_head3.json`.
+- New config:
+  `configs/evolution_rank10_poly4_head3_learned_slow_scale_imagenet100_224_fast.yaml`.
+- It maps only the first three Swish/LearnableSwish body blocks to StablePoly4
+  and keeps the best stable learned slow-scale recipe: degree 2, output scale
+  0.2, CT init, progressive transition, and `poly_scale_lr_mult: 0.1`.
+- Startup checks confirmed 3 StablePoly4 modules, `poly` 15 coefficient
+  parameters at LR 7e-04, and `poly_scale` 3 `log_in_scale` parameters at
+  LR 7e-05. The first batch had finite logits and finite loss.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Head4 learned slow-scale Poly4 | 12 | 65.58 | 65.44 | 0 | 0 | 0 | PASS |
+| Head3 learned slow-scale Poly4 | 12 | 65.52 | 65.52 | 0 | 0 | 0 | PASS |
+| Head4 learned scale02 Poly4 | 12 | 65.50 | 65.16 | 0 | 0 | 0 | PASS |
+| Head4 static Poly4 | 12 | 65.40 | 65.24 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Head4 slow-scale | Head3 slow-scale |
+| ---: | ---: | ---: |
+| 1 | 15.60 | 15.62 |
+| 2 | 27.90 | 27.92 |
+| 3 | 38.54 | 38.50 |
+| 4 | 43.16 | 42.86 |
+| 5 | 50.16 | 50.28 |
+| 6 | 54.60 | 54.52 |
+| 7 | 58.92 | 58.86 |
+| 8 | 61.14 | 60.90 |
+| 9 | 62.36 | 62.90 |
+| 10 | 64.28 | 64.72 |
+| 11 | 65.58 | 65.46 |
+| 12 | 65.44 | 65.52 |
+
+Conclusion: head3 is stable and has the best final accuracy among stable Poly4
+variants so far, but its best accuracy is still 0.06 points below head4
+slow-scale. The late-epoch trajectory is useful evidence: replacing fewer
+blocks slightly improves the post-transition region around epochs 9-12, but
+head3 does not beat the current best checkpoint. Best checkpoint scale
+diagnostics are controlled (`blocks.0.activation` in_scale about 1.007,
+`blocks.2.activation` about 1.325). The next structure-side check is head2:
+if reducing the number of StablePoly4 replacements continues to raise late
+accuracy, head2 should move closer to the original rank10 baseline while
+quantifying the accuracy/FHE-coverage tradeoff.
+
+Head2 structure ablation:
+
+- New NAS variant:
+  `configs/nas_variants/evolution_rank10_poly4_head2.json`.
+- New config:
+  `configs/evolution_rank10_poly4_head2_learned_slow_scale_imagenet100_224_fast.yaml`.
+- It maps only the first two Swish/LearnableSwish body blocks to StablePoly4
+  and keeps the same learned slow-scale recipe as head3/head4.
+- Startup checks confirmed 2 StablePoly4 modules, `poly` 10 coefficient
+  parameters at LR 7e-04, and `poly_scale` 2 `log_in_scale` parameters at
+  LR 7e-05.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Head2 learned slow-scale Poly4 | 12 | 66.82 | 66.82 | 0 | 0 | 0 | PASS |
+| Head4 learned slow-scale Poly4 | 12 | 65.58 | 65.44 | 0 | 0 | 0 | PASS |
+| Head3 learned slow-scale Poly4 | 12 | 65.52 | 65.52 | 0 | 0 | 0 | PASS |
+| Head4 static Poly4 | 12 | 65.40 | 65.24 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Head4 slow-scale | Head3 slow-scale | Head2 slow-scale |
+| ---: | ---: | ---: | ---: |
+| 1 | 15.60 | 15.62 | 15.54 |
+| 2 | 27.90 | 27.92 | 27.64 |
+| 3 | 38.54 | 38.50 | 38.56 |
+| 4 | 43.16 | 42.86 | 43.20 |
+| 5 | 50.16 | 50.28 | 51.36 |
+| 6 | 54.60 | 54.52 | 53.54 |
+| 7 | 58.92 | 58.86 | 59.06 |
+| 8 | 61.14 | 60.90 | 61.84 |
+| 9 | 62.36 | 62.90 | 62.98 |
+| 10 | 64.28 | 64.72 | 65.58 |
+| 11 | 65.58 | 65.46 | 66.64 |
+| 12 | 65.44 | 65.52 | 66.82 |
+
+Conclusion: head2 is the new best stable Poly4 variant. It improves best
+accuracy by 1.24 points over the previous head4 slow-scale best (66.82 vs
+65.58) and reduces the gap to the unmodified searched rank10 architecture from
+3.38 points to 2.14 points. The tradeoff is lower StablePoly4/FHE coverage:
+only the first two body blocks are replaced. Scale diagnostics are controlled
+at the best checkpoint (`blocks.0.activation` in_scale about 1.028; the other
+head2 module remains at its default in_scale about 0.368). The structure trend
+is now clear: fewer replacements recover accuracy. The next check is head1 to
+quantify the upper end of the accuracy/coverage tradeoff.
+
+Head1 structure ablation:
+
+- New NAS variant:
+  `configs/nas_variants/evolution_rank10_poly4_head1.json`.
+- New config:
+  `configs/evolution_rank10_poly4_head1_learned_slow_scale_imagenet100_224_fast.yaml`.
+- It maps only the first body Swish/LearnableSwish block to StablePoly4 and
+  keeps the same learned slow-scale recipe as the head2/head3/head4 runs:
+  degree 2, output scale 0.2, CT init, progressive transition, and
+  `poly_scale_lr_mult: 0.1`.
+- Startup checks confirmed 1 StablePoly4 module, `poly` 5 coefficient
+  parameters at LR 7e-04, and `poly_scale` 1 `log_in_scale` parameter at
+  LR 7e-05.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Head1 learned slow-scale Poly4 | 12 | 66.92 | 66.92 | 0 | 0 | 0 | PASS |
+| Head2 learned slow-scale Poly4 | 12 | 66.82 | 66.82 | 0 | 0 | 0 | PASS |
+| Head4 learned slow-scale Poly4 | 12 | 65.58 | 65.44 | 0 | 0 | 0 | PASS |
+| Head3 learned slow-scale Poly4 | 12 | 65.52 | 65.52 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Head2 slow-scale | Head1 slow-scale |
+| ---: | ---: | ---: |
+| 1 | 15.54 | 15.54 |
+| 2 | 27.64 | 27.64 |
+| 3 | 38.56 | 38.66 |
+| 4 | 43.20 | 43.18 |
+| 5 | 51.36 | 51.18 |
+| 6 | 53.54 | 53.82 |
+| 7 | 59.06 | 59.16 |
+| 8 | 61.84 | 61.98 |
+| 9 | 62.98 | 63.08 |
+| 10 | 65.58 | 65.38 |
+| 11 | 66.64 | 66.64 |
+| 12 | 66.82 | 66.92 |
+
+Conclusion: head1 is now the best stable Poly4 variant. It improves best
+accuracy by 0.10 points over head2 and cuts the gap to the unmodified searched
+rank10 architecture to 2.04 points. The tradeoff is even lower StablePoly4
+coverage: only one body block is replaced. Best-checkpoint scale diagnostics
+remain controlled (`blocks.0.activation` in_scale about 1.028). This confirms
+the accuracy/coverage trend: fewer StablePoly4 replacements recover accuracy,
+but still do not match the original searched rank10 network.
+
+Head1 scale-LR ablation:
+
+- New config:
+  `configs/evolution_rank10_poly4_head1_learned_scale02_imagenet100_224_fast.yaml`.
+- It keeps the best head1 learned slow-scale structure and recipe, but raises
+  only `poly_scale_lr_mult` from 0.1 to 0.2. Coefficient LR remains 7e-04;
+  the single `log_in_scale` parameter uses LR 1.4e-04.
+- Data path was revalidated before launch: 128,982 train images, 5,000 val
+  images, and 100 classes through the existing ImageNet-100 symlink subset.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Head1 learned slow-scale Poly4 (`poly_scale_lr_mult=0.1`) | 12 | 66.92 | 66.92 | 0 | 0 | 0 | PASS |
+| Head1 learned scale02 Poly4 (`poly_scale_lr_mult=0.2`) | 12 | 66.82 | 66.82 | 0 | 0 | 0 | PASS |
+| Head2 learned slow-scale Poly4 | 12 | 66.82 | 66.82 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Head1 slow-scale | Head1 scale02 |
+| ---: | ---: | ---: |
+| 1 | 15.54 | 15.60 |
+| 2 | 27.64 | 27.76 |
+| 3 | 38.66 | 38.50 |
+| 4 | 43.18 | 43.14 |
+| 5 | 51.18 | 51.26 |
+| 6 | 53.82 | 54.28 |
+| 7 | 59.16 | 59.58 |
+| 8 | 61.98 | 61.92 |
+| 9 | 63.08 | 63.40 |
+| 10 | 65.38 | 65.26 |
+| 11 | 66.64 | 66.20 |
+| 12 | 66.92 | 66.82 |
+
+Conclusion: increasing `poly_scale_lr_mult` to 0.2 is stable but does not
+improve the best checkpoint. It helps immediately after Poly4 activation
+(epochs 6-7) but loses the late-epoch recovery and finishes 0.10 points below
+the 0.1 slow-scale run. Keep `poly_scale_lr_mult=0.1` as the current best
+head1 recipe.
+
+Single-position replacement ablation:
+
+- Updated `tools/create_rank10_partial_poly4_variant.py` so it can generate
+  exact body-block replacement variants with `--indices`, while preserving the
+  existing `--head-blocks` mode.
+- The rank10 body has 8 blocks with original choices:
+  `[13, 9, 13, 11, 13, 13, 13, 13]`.
+- `idx1` was generated but not trained to completion: its block id is
+  `gated_mbconv1_lswish -> gated_mbconv1_poly4`, and CT init reported
+  `skipped, no activation samples`. Inspection showed this is because
+  `MBConvBlock` with expansion 1 does not call `self.activation`, so this is an
+  ineffective replacement position.
+- New effective NAS variant:
+  `configs/nas_variants/evolution_rank10_poly4_idx2.json`.
+- New config:
+  `configs/evolution_rank10_poly4_idx2_learned_slow_scale_imagenet100_224_fast.yaml`.
+- `idx2` maps only body block index 2 from `gated_mbconv4_lswish` to
+  `gated_mbconv4_poly4`, using the current best learned slow-scale recipe.
+  CT init collected 20,000 activation samples for `blocks.2.activation` with
+  MSE about 1.74e-12.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Idx2 learned slow-scale Poly4 | 12 | 68.82 | 68.82 | 0 | 0 | 0 | PASS |
+| Head1 learned slow-scale Poly4 | 12 | 66.92 | 66.92 | 0 | 0 | 0 | PASS |
+| Head2 learned slow-scale Poly4 | 12 | 66.82 | 66.82 | 0 | 0 | 0 | PASS |
+| Head1 learned scale02 Poly4 | 12 | 66.82 | 66.82 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Head1 slow-scale | Idx2 slow-scale |
+| ---: | ---: | ---: |
+| 1 | 15.54 | 15.54 |
+| 2 | 27.64 | 28.32 |
+| 3 | 38.66 | 39.42 |
+| 4 | 43.18 | 44.26 |
+| 5 | 51.18 | 52.22 |
+| 6 | 53.82 | 56.86 |
+| 7 | 59.16 | 61.54 |
+| 8 | 61.98 | 62.92 |
+| 9 | 63.08 | 65.36 |
+| 10 | 65.38 | 66.82 |
+| 11 | 66.64 | 68.30 |
+| 12 | 66.92 | 68.82 |
+
+Conclusion: single-position replacement is a stronger direction than simply
+reducing the number of leading replacements. Replacing only body block index 2
+recovers 1.90 points over head1 and leaves only a 0.14-point gap to the
+unmodified searched rank10 architecture (68.82 vs 68.96), while still using
+one effective StablePoly4 module. This also narrows the gap to ResNet-18 from
+5.60 points to 3.70 points and to EfficientNet-B0 from 5.82 points to 3.92
+points. Next position-side checks should prioritize effective expansion blocks
+such as later `gated_mbconv4_lswish` blocks; skip expansion-1 positions where
+the activation module is not used.
+
+Idx4/idx5 single-position replacement ablation:
+
+- Forward-hook validation was added before launch for single-index variants:
+  idx0/head1, idx2, idx4, idx5, idx6, and idx7 each call their StablePoly4
+  module once in a forward pass; idx1 and idx3 call it zero times and should
+  be treated as ineffective replacement positions.
+- New NAS variants:
+  `configs/nas_variants/evolution_rank10_poly4_idx4.json` and
+  `configs/nas_variants/evolution_rank10_poly4_idx5.json`.
+- New config:
+  `configs/evolution_rank10_poly4_idx45_learned_slow_scale_imagenet100_224_fast.yaml`.
+- Both runs used the same learned slow-scale recipe as idx2 and were trained
+  in parallel on GPU2/GPU3.
+- CT init was valid for both replacements: idx4 collected 20,000 samples with
+  MSE about 1.36e-10; idx5 collected 20,000 samples with MSE about 2.14e-10.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Idx2 learned slow-scale Poly4 | 12 | 68.82 | 68.82 | 0 | 0 | 0 | PASS |
+| Idx5 learned slow-scale Poly4 | 12 | 68.78 | 68.78 | 0 | 0 | 0 | PASS |
+| Idx4 learned slow-scale Poly4 | 12 | 68.32 | 68.24 | 0 | 0 | 0 | PASS |
+| Head1 learned slow-scale Poly4 | 12 | 66.92 | 66.92 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Idx2 | Idx4 | Idx5 |
+| ---: | ---: | ---: | ---: |
+| 1 | 15.54 | 15.52 | 15.54 |
+| 2 | 28.32 | 28.16 | 28.22 |
+| 3 | 39.42 | 38.92 | 39.18 |
+| 4 | 44.26 | 43.12 | 43.74 |
+| 5 | 52.22 | 52.30 | 52.04 |
+| 6 | 56.86 | 56.36 | 55.80 |
+| 7 | 61.54 | 60.42 | 60.46 |
+| 8 | 62.92 | 63.26 | 62.74 |
+| 9 | 65.36 | 65.16 | 64.94 |
+| 10 | 66.82 | 67.64 | 67.46 |
+| 11 | 68.30 | 68.32 | 68.22 |
+| 12 | 68.82 | 68.24 | 68.78 |
+
+Conclusion: idx2 remains the best single-position StablePoly4 replacement, but
+idx5 is effectively tied within 0.04 points and idx4 is also strong. The
+single-position trend is now robust: replacing one effective late MBConv4
+activation recovers nearly all of the original rank10 accuracy, while leading
+replacement at idx0/head1 is much worse. Continue with idx6 and idx7 before
+choosing a final single-position recipe or testing two-position combinations.
+
+Idx6/idx7 single-position replacement ablation:
+
+- New NAS variants:
+  `configs/nas_variants/evolution_rank10_poly4_idx6.json` and
+  `configs/nas_variants/evolution_rank10_poly4_idx7.json`.
+- New config:
+  `configs/evolution_rank10_poly4_idx67_learned_slow_scale_imagenet100_224_fast.yaml`.
+- Both runs used the same learned slow-scale recipe as idx2/idx4/idx5 and were
+  trained in parallel on GPU2/GPU3.
+- CT init was valid for both replacements: idx6 collected 20,000 samples with
+  MSE about 1.05e-10; idx7 collected 20,000 samples with MSE about 1.17e-10.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| EfficientNet-B0 ImageNet-100 baseline | 12 | 72.74 | 72.74 | 0 | 0 | 0 | PASS |
+| ResNet-18 ImageNet-100 baseline | 12 | 72.52 | 72.52 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Idx6 learned slow-scale Poly4 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Idx7 learned slow-scale Poly4 | 12 | 68.94 | 68.94 | 0 | 0 | 0 | PASS |
+| Idx2 learned slow-scale Poly4 | 12 | 68.82 | 68.82 | 0 | 0 | 0 | PASS |
+| Idx5 learned slow-scale Poly4 | 12 | 68.78 | 68.78 | 0 | 0 | 0 | PASS |
+| Idx4 learned slow-scale Poly4 | 12 | 68.32 | 68.24 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Idx2 | Idx5 | Idx6 | Idx7 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 15.54 | 15.54 | 15.52 | 15.50 |
+| 2 | 28.32 | 28.22 | 28.32 | 28.12 |
+| 3 | 39.42 | 39.18 | 39.42 | 39.14 |
+| 4 | 44.26 | 43.74 | 43.84 | 43.36 |
+| 5 | 52.22 | 52.04 | 52.00 | 51.68 |
+| 6 | 56.86 | 55.80 | 56.88 | 56.80 |
+| 7 | 61.54 | 60.46 | 60.88 | 60.36 |
+| 8 | 62.92 | 62.74 | 63.18 | 63.06 |
+| 9 | 65.36 | 64.94 | 65.84 | 65.24 |
+| 10 | 66.82 | 67.46 | 67.22 | 67.54 |
+| 11 | 68.30 | 68.22 | 68.62 | 68.54 |
+| 12 | 68.82 | 68.78 | 68.96 | 68.94 |
+
+Conclusion: idx6 is now the best single-position StablePoly4 replacement and
+matches the unmodified searched rank10 model at 68.96. Idx7 is effectively
+tied at 68.94. This changes the next search direction from only `idx2+idx5`
+or `idx2+idx4` to combinations involving the best late positions:
+`idx2+idx6`, `idx6+idx7`, `idx2+idx7`, and `idx5+idx7`.
+
+Two-position follow-up launched:
+
+- `configs/nas_variants/evolution_rank10_poly4_idx2_7.json`
+- `configs/nas_variants/evolution_rank10_poly4_idx5_7.json`
+- `configs/evolution_rank10_poly4_idx27_idx57_learned_slow_scale_imagenet100_224_fast.yaml`
+- `configs/nas_variants/evolution_rank10_poly4_idx2_6.json`
+- `configs/nas_variants/evolution_rank10_poly4_idx6_7.json`
+- `configs/evolution_rank10_poly4_idx26_idx67pair_learned_slow_scale_imagenet100_224_fast.yaml`
+
+Early health checks: `idx2+idx7` and `idx2+idx6` both completed CT init with
+finite first batches and valid coefficient fits. Full two-position results are
+still running and should decide whether replacing two effective activations can
+keep the no-loss behavior seen in single-position idx6.
+
+Two-position follow-up results:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Idx6 learned slow-scale Poly4 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Idx7 learned slow-scale Poly4 | 12 | 68.94 | 68.94 | 0 | 0 | 0 | PASS |
+| Idx5+idx7 learned slow-scale Poly4 | 12 | 68.52 | 68.52 | 0 | 0 | 0 | PASS |
+| Idx6+idx7 learned slow-scale Poly4 | 12 | 68.50 | 68.50 | 0 | 0 | 0 | PASS |
+| Idx2+idx7 learned slow-scale Poly4 | 12 | 68.12 | 68.12 | 0 | 0 | 0 | PASS |
+| Idx2+idx6 learned slow-scale Poly4 | 12 | 68.08 | 68.08 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Idx6 | Idx7 | Idx2+idx6 | Idx2+idx7 | Idx5+idx7 | Idx6+idx7 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 15.52 | 15.50 | 15.52 | 15.52 | 15.48 | 15.48 |
+| 2 | 28.32 | 28.12 | 28.02 | 28.20 | 28.02 | 27.94 |
+| 3 | 39.42 | 39.14 | 38.94 | 38.86 | 37.62 | 37.94 |
+| 4 | 43.84 | 43.36 | 44.12 | 43.86 | 43.54 | 43.70 |
+| 5 | 52.00 | 51.68 | 51.38 | 51.32 | 51.88 | 51.56 |
+| 6 | 56.88 | 56.80 | 56.66 | 56.12 | 55.10 | 54.82 |
+| 7 | 60.88 | 60.36 | 60.08 | 60.68 | 59.80 | 59.74 |
+| 8 | 63.18 | 63.06 | 63.10 | 62.60 | 62.78 | 62.96 |
+| 9 | 65.84 | 65.24 | 64.98 | 64.72 | 65.08 | 65.14 |
+| 10 | 67.22 | 67.54 | 66.60 | 67.08 | 66.66 | 66.86 |
+| 11 | 68.62 | 68.54 | 67.92 | 67.80 | 67.78 | 67.90 |
+| 12 | 68.96 | 68.94 | 68.08 | 68.12 | 68.52 | 68.50 |
+
+Conclusion: replacing two effective activations is stable under the CT +
+learned slow-scale recipe, but it consistently lowers accuracy by 0.44 to 0.88
+points versus the best single-position idx6 run. The current best FHE-friendly
+recipe for the searched rank10 architecture is therefore a single StablePoly4
+replacement at body block idx6. It matches the original searched rank10 model
+at 68.96 on this ImageNet-100 12-epoch recipe, while using one effective
+polynomial activation. Do not expand to three-position replacement unless a new
+training technique is introduced; the next useful improvement direction is to
+preserve idx6 and tune training or polynomial parameterization rather than
+increase replacement coverage.
+
+Idx6 tuning follow-up:
+
+- New config:
+  `configs/evolution_rank10_poly4_idx6_tuning_learned_slow_scale_imagenet100_224_fast.yaml`.
+- Both runs keep `configs/nas_variants/evolution_rank10_poly4_idx6.json` and
+  change only one knob from the current best idx6 recipe:
+  - `scale005`: lower `poly_scale_lr_mult` from 0.1 to 0.05.
+  - `outscale01`: lower `poly4_output_scale` from 0.2 to 0.1.
+- CT and first-batch checks were valid for both runs. `scale005` kept the same
+  CT fit quality as idx6, MSE about 1.05e-10. `outscale01` fit was worse but
+  still finite, MSE about 1.27e-08.
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Idx6 learned slow-scale Poly4 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Original evolution rank10 | 12 | 68.96 | 68.96 | 0 | 0 | 0 | PASS |
+| Idx6 outscale01 Poly4 | 12 | 68.78 | 68.78 | 0 | 0 | 0 | PASS |
+| Idx6 scale005 Poly4 | 12 | 68.54 | 68.54 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Idx6 baseline | Idx6 scale005 | Idx6 outscale01 |
+| ---: | ---: | ---: | ---: |
+| 1 | 15.52 | 15.54 | 15.50 |
+| 2 | 28.32 | 28.04 | 28.10 |
+| 3 | 39.42 | 39.30 | 39.14 |
+| 4 | 43.84 | 43.90 | 43.74 |
+| 5 | 52.00 | 51.60 | 51.96 |
+| 6 | 56.88 | 56.54 | 56.80 |
+| 7 | 60.88 | 60.58 | 60.88 |
+| 8 | 63.18 | 63.44 | 63.30 |
+| 9 | 65.84 | 65.38 | 65.50 |
+| 10 | 67.22 | 67.50 | 67.06 |
+| 11 | 68.62 | 68.40 | 68.62 |
+| 12 | 68.96 | 68.54 | 68.78 |
+
+Conclusion: neither lower scale LR nor lower polynomial output scale improves
+the best idx6 recipe. Both are stable, but late-epoch accuracy is lower. Keep
+`poly_scale_lr_mult=0.1` and `poly4_output_scale=0.2` as the current best
+single-position idx6 recipe. Since both coverage expansion and these first
+parameter tweaks reduce accuracy, the next experiment should target training
+length or schedule quality while keeping the idx6 structure and default Poly4
+knobs fixed.
+
+## 2026-06-04 Rank10 idx6 Matched 16-Epoch Comparison
+
+Purpose: verify whether the current best FHE-friendly single-position idx6
+StablePoly4 replacement still matches the original evolution rank10 architecture
+under a longer matched 16-epoch ImageNet-100 run.
+
+Important dataset boundary: all numbers in this section use the local
+ImageNet-100 subset, not ImageNet-1k. The validation set has 5,000 images across
+100 classes.
+
+Command:
+
+```bash
+.venv/bin/python -u train.py \
+  --config configs/evolution_rank10_idx6_matched16_imagenet100_224.yaml \
+  --dataset imagenet100 \
+  --train_dir /home/xuming/Documents/dataset/imagenet_100/train \
+  --val_dir /home/xuming/Documents/dataset/imagenet_100/val \
+  --result_dir ./results \
+  --gpus 2 3 \
+  --input_size 224 \
+  --no_memory_fs \
+  --models evolution-rank10-matched16-imagenet100-224-b96 evolution-rank10-poly4-idx6-matched16-imagenet100-224-b96 \
+  --force
+```
+
+Run paths:
+
+- Config: `configs/evolution_rank10_idx6_matched16_imagenet100_224.yaml`
+- Log: `logs/evolution_rank10_idx6_matched16_imagenet100_224.log`
+- Status: `logs/evolution_rank10_idx6_matched16_imagenet100_224.status` = 0
+- Results: `results/evolution_rank10_idx6_matched16_imagenet100_224`
+
+Architecture notes:
+
+- `evolution-rank10-matched16-imagenet100-224-b96` uses the evolution-searched
+  rank10 NAS json at `configs/nas_variants/evolution_rank10.json`.
+- The searched candidate metadata records rank 10, generation 153, 12.57M
+  parameters in the search score, 1.174G FLOPs, and block choices
+  `[13, 9, 13, 11, 13, 13, 12, 13]`.
+- `evolution-rank10-poly4-idx6-matched16-imagenet100-224-b96` uses
+  `configs/nas_variants/evolution_rank10_poly4_idx6.json`, which keeps the same
+  architecture and maps only body block index 6 from block id 13 to block id 12
+  to replace one Swish/LearnableSwish activation with StablePoly4.
+
+Idx6 StablePoly4 recipe:
+
+- `poly4_scale_mode: learned`
+- `poly4_output_scale: 0.2`
+- `poly4_degree: 2`
+- `poly_scale_lr_mult: 0.1`
+- `smartpaf_ct_init: true`
+- `smartpaf_ct_max_samples: 20000`
+- `smartpaf_transition_epochs: 6`
+- CT fit: `blocks.6.activation`, samples 20,000, MSE `1.05201e-10`
+
+Result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Original evolution rank10 matched16 b96 | 16 | 72.04 | 72.04 | 0 | 0 | 0 | PASS |
+| Idx6 StablePoly4 matched16 b96 | 16 | 72.04 | 72.04 | 0 | 0 | 0 | PASS |
+
+Matched-epoch trajectory:
+
+| Epoch | Original rank10 | Idx6 StablePoly4 | Delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 14.96 | 15.52 | +0.56 |
+| 2 | 27.18 | 28.08 | +0.90 |
+| 3 | 38.42 | 39.36 | +0.94 |
+| 4 | 44.90 | 43.92 | -0.98 |
+| 5 | 51.96 | 52.14 | +0.18 |
+| 6 | 56.74 | 56.66 | -0.08 |
+| 7 | 59.36 | 60.18 | +0.82 |
+| 8 | 63.22 | 62.34 | -0.88 |
+| 9 | 65.30 | 64.58 | -0.72 |
+| 10 | 66.86 | 66.54 | -0.32 |
+| 11 | 68.04 | 68.60 | +0.56 |
+| 12 | 69.04 | 68.98 | -0.06 |
+| 13 | 70.92 | 70.66 | -0.26 |
+| 14 | 71.58 | 71.08 | -0.50 |
+| 15 | 71.74 | 71.58 | -0.16 |
+| 16 | 72.04 | 72.04 | +0.00 |
+
+Baseline context from the existing 12-epoch 224px ImageNet-100 runs:
+
+| Model | Epochs | Best | Final | Notes |
+| --- | ---: | ---: | ---: | --- |
+| EfficientNet-B0 b128 | 12 | 72.74 | 72.74 | standard baseline |
+| ResNet-18 b128 | 12 | 72.52 | 72.52 | standard baseline |
+| Original evolution rank10 b128 | 12 | 68.96 | 68.96 | searched rank10 baseline |
+| Original evolution rank10 matched16 b96 | 16 | 72.04 | 72.04 | longer matched run |
+| Idx6 StablePoly4 matched16 b96 | 16 | 72.04 | 72.04 | one effective polynomial activation |
+
+Conclusion: the idx6 StablePoly4 proxy recipe is stable and accuracy-neutral in
+this matched 16-epoch ImageNet-100 comparison. It exactly matches the original
+evolution rank10 final and best accuracy at 72.04 with no nonfinite batches,
+skipped batches, or collapse guard triggers. The 16-epoch schedule also narrows
+the gap to the 12-epoch ResNet-18 and EfficientNet-B0 baselines, but does not
+exceed them. The current best direction remains a single idx6 StablePoly4
+replacement; expanding replacement coverage to two positions was stable but
+lower accuracy in the prior ablations.
+
+## 2026-06-04 Rank10 idx6 Matched 24-Epoch Follow-up
+
+Purpose: continue the best rank10/idx6 recipe by extending the matched schedule
+from 16 to 24 epochs. The goal is to test whether longer training can push the
+evolution rank10 architecture and the idx6 StablePoly4 proxy past the existing
+12-epoch ResNet-18 and EfficientNet-B0 ImageNet-100 baselines.
+
+New config:
+
+- `configs/evolution_rank10_idx6_matched24_imagenet100_224.yaml`
+
+Only the schedule length and model names changed from the matched16 config:
+
+- epochs: 16 -> 24
+- batch size: remains 96
+- learning rate: remains 0.0007
+- optimizer/scheduler: AdamW + cosine
+- Poly4 recipe: remains learned scale, output scale 0.2, degree 2, CT init,
+  slow scale LR multiplier 0.1, progressive transition.
+
+Note: because the Poly4 run keeps `poly4_warmup_ratio: 0.35`, the single idx6
+StablePoly4 module starts at epoch 8 and begins affecting training at epoch 9
+in the 24-epoch run. This preserves the proportional schedule from matched16
+rather than fixing the absolute matched16 start epoch.
+
+Command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/evolution_rank10_idx6_matched24_imagenet100_224.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 3 --input_size 224 --no_memory_fs --models evolution-rank10-matched24-imagenet100-224-b96 evolution-rank10-poly4-idx6-matched24-imagenet100-224-b96 --force > logs/evolution_rank10_idx6_matched24_imagenet100_224.log 2>&1; echo $? > logs/evolution_rank10_idx6_matched24_imagenet100_224.status' < /dev/null &
+```
+
+Run state at startup:
+
+- Parent PID: 3919379
+- Train PID: 3919381
+- Log: `logs/evolution_rank10_idx6_matched24_imagenet100_224.log`
+- Status file when complete: `logs/evolution_rank10_idx6_matched24_imagenet100_224.status`
+- Results: `results/evolution_rank10_idx6_matched24_imagenet100_224`
+- Original rank10 uses GPU2; idx6 StablePoly4 uses GPU3.
+- CT fit for `blocks.6.activation`: samples 20,000, MSE `1.05201e-10`.
+- First-batch diagnostics for both models had finite logits and finite loss.
+
+Final result:
+
+| Model | Epochs | Best | Final | Max drop | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Original evolution rank10 matched24 b96 | 24 | 74.08 | 74.08 | 0.16 | 0 | 0 | 0 | PASS |
+| Idx6 StablePoly4 matched24 b96 | 24 | 73.96 | 73.96 | 0.10 | 0 | 0 | 0 | PASS |
+
+Epoch-by-epoch validation accuracy:
+
+| Epoch | Original rank10 | Idx6 StablePoly4 | Delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 14.96 | 15.56 | +0.60 |
+| 2 | 27.08 | 28.10 | +1.02 |
+| 3 | 38.46 | 39.10 | +0.64 |
+| 4 | 44.90 | 43.84 | -1.06 |
+| 5 | 52.04 | 51.88 | -0.16 |
+| 6 | 56.72 | 55.88 | -0.84 |
+| 7 | 59.46 | 60.16 | +0.70 |
+| 8 | 62.68 | 61.90 | -0.78 |
+| 9 | 64.76 | 62.66 | -2.10 |
+| 10 | 66.08 | 66.00 | -0.08 |
+| 11 | 67.20 | 67.66 | +0.46 |
+| 12 | 68.18 | 67.74 | -0.44 |
+| 13 | 70.20 | 70.30 | +0.10 |
+| 14 | 70.60 | 70.38 | -0.22 |
+| 15 | 72.14 | 71.42 | -0.72 |
+| 16 | 71.98 | 71.60 | -0.38 |
+| 17 | 72.26 | 72.22 | -0.04 |
+| 18 | 72.90 | 73.12 | +0.22 |
+| 19 | 73.36 | 73.28 | -0.08 |
+| 20 | 73.66 | 73.18 | -0.48 |
+| 21 | 73.56 | 73.46 | -0.10 |
+| 22 | 73.72 | 73.64 | -0.08 |
+| 23 | 73.82 | 73.74 | -0.08 |
+| 24 | 74.08 | 73.96 | -0.12 |
+
+Baseline context. All rows in this table are ImageNet-100 224px results, not
+ImageNet-1k results:
+
+| Model | Epochs | Best | Final | Notes |
+| --- | ---: | ---: | ---: | --- |
+| Original evolution rank10 matched24 b96 | 24 | 74.08 | 74.08 | best current rank10 result |
+| Idx6 StablePoly4 matched24 b96 | 24 | 73.96 | 73.96 | one effective polynomial activation |
+| EfficientNet-B0 b128 | 12 | 72.74 | 72.74 | standard baseline |
+| ResNet-18 b128 | 12 | 72.52 | 72.52 | standard baseline |
+| Original evolution rank10 matched16 b96 | 16 | 72.04 | 72.04 | previous matched schedule |
+| Idx6 StablePoly4 matched16 b96 | 16 | 72.04 | 72.04 | previous matched Poly4 schedule |
+| Original evolution rank10 b128 | 12 | 68.96 | 68.96 | short searched-arch baseline |
+
+Observations:
+
+- The original rank10 24-epoch run finishes at 74.08, beating the 12-epoch
+  EfficientNet-B0 baseline by 1.34 points and the 12-epoch ResNet-18 baseline by
+  1.56 points on ImageNet-100.
+- The idx6 StablePoly4 24-epoch run finishes at 73.96, beating EfficientNet-B0 by
+  1.22 points and ResNet-18 by 1.44 points on ImageNet-100.
+- StablePoly4 remains very close to the original searched architecture: final
+  gap is -0.12 points, with zero nonfinite batches, zero skipped batches, and
+  zero collapse guard triggers.
+- The idx6 run uses proportional Poly4 scheduling, so `poly4_warmup_ratio: 0.35`
+  delays the single StablePoly4 module to start at epoch 8 / begin affecting
+  epoch 9. Epoch 9 still shows a short disruption, but the model recovers and
+  tracks the original closely through the end.
+
+Conclusion: extending the matched rank10 schedule to 24 epochs is enough to move
+both the original searched architecture and the single idx6 StablePoly4 variant
+above the existing 12-epoch ResNet-18 and EfficientNet-B0 ImageNet-100 baselines.
+The result should not be interpreted as ImageNet-1k accuracy.
+
+## 2026-06-05 AESPA/HerPN Swish Proxy Setup
+
+Purpose: test whether the AESPA paper's basis-wise Hermite polynomial
+normalization idea can help this repo's Swish/LearnableSwish NAS models without
+adding a ReLU-specific configuration path.
+
+Implementation:
+
+- Added `SwishHerPN` in `models/gate_net_cmp/block_def.py`.
+- The activation uses degree-2 normalized probabilists' Hermite bases:
+  `h1=x`, `h2=(x^2-1)/sqrt(2)`.
+- Basis-wise normalization is implemented with `LazyBatchNorm2d(affine=False)`
+  on each nonconstant basis, matching AESPA/HerPN's scale-control idea while
+  still working with the current activation constructors that do not pass a
+  channel count.
+- Coefficients are initialized from the standard-normal projection of Swish:
+  `c0≈0.20662`, `c1≈0.5`, `c2≈0.24860`. `c1/c2`, final `gamma`, and final
+  `beta` are trainable during proxy training.
+- `SwishHerPN` is treated as Swish-like by the gated blocks, so gate paths that
+  previously used Sigmoid for Swish/LearnableSwish still use Sigmoid.
+
+Architecture integration:
+
+- Added `swish_herpn` to `ACTIVATION_TYPES`.
+- Added optional `activation_override` to `BlockConfig`.
+- The override changes only a block's activation class; it does not change
+  `block_id`, convolution type, expansion factor, SE, gated depthwise conv, CT
+  policies, or searched architecture metadata.
+- Added `tools/create_rank10_partial_activation_variant.py`.
+- Generated `configs/nas_variants/evolution_rank10_swish_herpn_idx6.json`,
+  which keeps rank10 body block idx6 as `block_id=13` and sets
+  `activation_override: swish_herpn` only for that block.
+
+Verification:
+
+- `python -m py_compile` passed for the touched Python files.
+- Single-activation CPU forward/backward smoke test passed with finite outputs
+  and gradients.
+- NAS JSON build smoke test passed: the generated model contains exactly one
+  `SwishHerPN` module at `blocks.6.activation`, and a batch-size-2 224x224
+  forward/backward pass produced finite logits.
+
+Proxy config prepared:
+
+- `configs/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast.yaml`
+- 12 epochs, batch size 96, learning rate 0.0007, AdamW + cosine, no AMP,
+  label smoothing 0.05.
+- Includes both:
+  - `evolution-rank10-proxy12-imagenet100-224-b96`
+  - `evolution-rank10-swish-herpn-idx6-proxy12-imagenet100-224-b96`
+
+Proxy command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast.yaml --dataset imagenet100 --train_dir /home/xuming/Documents/dataset/imagenet_100/train --val_dir /home/xuming/Documents/dataset/imagenet_100/val --result_dir ./results --gpus 2 3 --input_size 224 --no_memory_fs --force > logs/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast.log 2>&1; echo $? > logs/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast.status' < /dev/null &
+```
+
+Run state at startup:
+
+- Parent PID: 483195
+- Train PID: 483197
+- Log: `logs/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast.log`
+- Status file when complete:
+  `logs/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast.status`
+- Results: `results/evolution_rank10_swish_herpn_idx6_proxy_imagenet100_224_fast`
+- Original rank10 proxy12 uses GPU2; idx6 Swish-HerPN proxy12 uses GPU3.
+- Both models started with finite first-batch setup and no status file yet.
+
+Result summary:
+
+| Model | Epochs | Best | Final | Avg epoch sec | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Original evolution rank10 proxy12 b96 | 12 | 69.04 | 69.04 | 679.37 | 0 | 0 | 0 | PASS |
+| Idx6 Swish-HerPN proxy12 b96 | 12 | 69.06 | 69.06 | 852.58 | 0 | 0 | 0 | PASS |
+
+Epoch-by-epoch validation accuracy:
+
+| Epoch | Original rank10 | Idx6 Swish-HerPN | Delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 14.98 | 14.84 | -0.14 |
+| 2 | 27.04 | 30.24 | +3.20 |
+| 3 | 38.60 | 41.06 | +2.46 |
+| 4 | 44.80 | 46.38 | +1.58 |
+| 5 | 51.76 | 51.26 | -0.50 |
+| 6 | 56.94 | 57.82 | +0.88 |
+| 7 | 60.70 | 60.98 | +0.28 |
+| 8 | 64.02 | 64.18 | +0.16 |
+| 9 | 65.70 | 66.24 | +0.54 |
+| 10 | 67.48 | 67.60 | +0.12 |
+| 11 | 68.74 | 68.92 | +0.18 |
+| 12 | 69.04 | 69.06 | +0.02 |
+
+Baseline context. All rows are ImageNet-100 224px results:
+
+| Model | Epochs | Best | Final | Notes |
+| --- | ---: | ---: | ---: | --- |
+| Original evolution rank10 matched24 b96 | 24 | 74.08 | 74.08 | best current rank10 result |
+| Idx6 StablePoly4 matched24 b96 | 24 | 73.96 | 73.96 | low-degree Poly4 replacement |
+| EfficientNet-B0 b128 | 12 | 72.74 | 72.74 | standard baseline |
+| ResNet-18 b128 | 12 | 72.52 | 72.52 | standard baseline |
+| Idx6 Swish-HerPN proxy12 b96 | 12 | 69.06 | 69.06 | AESPA/HerPN-inspired activation override |
+| Original evolution rank10 proxy12 b96 | 12 | 69.04 | 69.04 | direct proxy control |
+| Original evolution rank10 b128 | 12 | 68.96 | 68.96 | prior short searched-arch baseline |
+
+Observations:
+
+- Swish-HerPN is stable in this idx6 proxy: no nonfinite batches, no skipped
+  batches, and no collapse guard triggers.
+- Accuracy is essentially neutral at 12 epochs: +0.02 points over the direct
+  original proxy control. The early lead at epochs 2-4 shrinks by the end.
+- Training cost is higher: average epoch time rises from 679.37s to 852.58s,
+  about a 25.5% increase in this PyTorch training setup. In an FHE deployment,
+  the basis-wise normalization would need folding or dedicated handling at
+  inference time; the proxy only proves training stability and accuracy.
+
+Conclusion: AESPA/HerPN's basis-wise Hermite normalization idea can be adapted to
+the current Swish-based NAS model without a ReLU-specific configuration path, but
+the single idx6 Swish-HerPN replacement is accuracy-neutral rather than clearly
+better. It is worth keeping as an experimental activation override, while the
+current strongest polynomial direction remains idx6 StablePoly4 matched24.
