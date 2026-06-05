@@ -39,6 +39,9 @@ class MutationOperator:
         initial_min_channels: int = 16,
         initial_max_channels: Optional[int] = 64,
         allowed_block_ids: Optional[List[int]] = None,
+        allowed_stem_codes: Optional[List[int]] = None,
+        allowed_second_ds_codes: Optional[List[int]] = None,
+        allowed_ct_policies: Optional[List[str]] = None,
     ):
         """Initialize mutation operator
 
@@ -69,6 +72,9 @@ class MutationOperator:
         self.initial_max_channels = initial_max_channels
         self._channel_calculator = None
         self.allowed_block_ids = allowed_block_ids  # None means all 22 blocks allowed
+        self.allowed_stem_codes = allowed_stem_codes
+        self.allowed_second_ds_codes = allowed_second_ds_codes
+        self.allowed_ct_policies = allowed_ct_policies or ["keep", "half"]
 
     def mutate(self, parent_config):
         """Apply random mutation to network config
@@ -260,11 +266,11 @@ class MutationOperator:
     def _mutate_stem(self, config):
         """Mutate stem configuration (0-3)"""
         current_stem = config.stem_code
-        new_stem = random.randint(0, 3)
-
-        # Ensure different
-        while new_stem == current_stem:
-            new_stem = random.randint(0, 3)
+        candidates = self.allowed_stem_codes if self.allowed_stem_codes is not None else list(range(4))
+        candidates = [code for code in candidates if code != current_stem]
+        if not candidates:
+            return
+        new_stem = random.choice(candidates)
 
         config.stem_code = new_stem
 
@@ -350,8 +356,13 @@ class MutationOperator:
         idx = random.randint(0, len(config.ct_policies) - 1)
         current_policy = config.ct_policies[idx]
 
-        # Toggle between 'keep' and 'half'
-        new_policy = 'half' if current_policy == 'keep' else 'keep'
+        candidates = [
+            policy for policy in self.allowed_ct_policies
+            if policy != current_policy
+        ]
+        if not candidates:
+            return
+        new_policy = random.choice(candidates)
         config.ct_policies[idx] = new_policy
 
         # ✅ FIX: Recalculate channels after CT policy change
@@ -361,11 +372,15 @@ class MutationOperator:
     def _mutate_downsample(self, config):
         """Mutate second downsample method (0-5)"""
         current_ds = config.second_ds_code
-        new_ds = random.randint(0, 5)
-
-        # Ensure different
-        while new_ds == current_ds:
-            new_ds = random.randint(0, 5)
+        candidates = (
+            self.allowed_second_ds_codes
+            if self.allowed_second_ds_codes is not None
+            else list(range(6))
+        )
+        candidates = [code for code in candidates if code != current_ds]
+        if not candidates:
+            return
+        new_ds = random.choice(candidates)
 
         config.second_ds_code = new_ds
 

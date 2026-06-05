@@ -15,7 +15,9 @@ network_config: "network_gen/configs/imagenet_224.yaml"
 evaluation:
   resolution: 224
   batch_size: 16                 # Smaller batch for testing
-  gpu: 1
+  gpus: all
+  exclude_gpus: []
+  parallel_evaluations: true
   use_dataloader: false
 
 # Fitness Function

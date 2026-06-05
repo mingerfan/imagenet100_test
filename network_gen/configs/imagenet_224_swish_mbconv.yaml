@@ -1,0 +1,39 @@
+# Phase-1 NAS search space: structure-only Swish MBConv.
+# No Poly4, no self-gated blocks in the searchable body.
+
+name: "imagenet_224_swish_mbconv"
+description: "ImageNet-100 224x224 proxy search space: Swish-only non-gated MBConv1/4"
+
+dataset:
+  name: "imagenet"
+  num_classes: 100
+  input_size: 224
+
+search_space:
+  ct_slots: 32768
+  initial_ct_count: 1
+  initial_min_channels: 28
+  initial_max_channels: 96
+
+  stem:
+    enabled: true
+    allowed_codes: [1]        # No selfgate + Swish
+
+  second_downsample:
+    enabled: true
+    allowed_codes: [0, 2, 5]  # AvgPool, NoSG+Swish Conv, None
+
+  blocks:
+    allowed_block_ids: [1, 3, 5, 7]  # MBConv1/4 + Swish, with/without SE
+    first_layers_constraints: null
+
+  stride:
+    allowed_block_counts: [4, 6, 8, 10, 12, 14, 16]
+    num_strides: 3
+
+  ct_policies:
+    allowed: ["keep", "half"]
+
+output:
+  base_dir: "generated_networks/imagenet_224_swish_mbconv"
+  save_format: "json"

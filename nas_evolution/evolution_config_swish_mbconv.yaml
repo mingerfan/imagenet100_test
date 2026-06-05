@@ -1,0 +1,41 @@
+# Phase-1 regularized evolution config.
+# Search structure with all-Swish, non-gated MBConv candidates first; use
+# CIFAR-100 short training offline after evolution for more reliable screening.
+
+search:
+  population_size: 200
+  num_generations: 1500
+  sample_size: 25
+  mutation_rate: 1.0
+  diversity_quota: 0.01
+
+network_config: "network_gen/configs/imagenet_224_swish_mbconv.yaml"
+
+evaluation:
+  resolution: 224
+  batch_size: 64
+  gpus: all
+  exclude_gpus: []
+  parallel_evaluations: true
+  use_dataloader: false
+
+fitness:
+  type: "zen_ranking"
+  epsilon: 1.0e-10
+  latency_baseline: 22334905.50
+
+logging:
+  checkpoint_interval: 10
+  log_interval: 1
+  save_history: true
+  output_dir: "nas_results/swish_mbconv_phase1"
+
+seed: 42
+
+mutation_probs:
+  block: 0.45
+  stem: 0.0
+  stride: 0.25
+  ct_policy: 0.15
+  downsample: 0.10
+  initial_ct: 0.05

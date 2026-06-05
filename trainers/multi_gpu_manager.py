@@ -229,8 +229,8 @@ class MultiGPUManager:
             train_dir: 训练集目录
             val_dir: 验证集目录
             result_dir: 结果保存目录
-            gpus: 可用的PyTorch可见GPU设备列表；None表示所有可见GPU并避开physical GPU 0
-            excluded_gpus: 运行时强制排除的GPU列表，默认排除physical GPU 0
+            gpus: 可用的PyTorch可见GPU设备列表；None表示所有可见GPU
+            excluded_gpus: 运行时强制排除的physical GPU列表；默认不排除
             num_classes: 类别数量
             default_epochs: 默认训练epoch数
             default_batch_size: 默认批次大小
@@ -246,11 +246,10 @@ class MultiGPUManager:
         self.train_dir = train_dir
         self.val_dir = val_dir
         self.result_dir = result_dir
-        self.excluded_gpus = [0] if excluded_gpus is None else list(excluded_gpus)
+        self.excluded_gpus = [] if excluded_gpus is None else list(excluded_gpus)
         try:
             gpu_selection = resolve_gpu_selection(
                 gpus,
-                allow_gpu0=0 not in self.excluded_gpus,
                 excluded_physical_gpus=self.excluded_gpus,
             )
         except ValueError as exc:

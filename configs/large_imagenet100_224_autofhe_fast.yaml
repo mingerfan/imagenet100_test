@@ -2,7 +2,7 @@
 # This avoids running the PAT ablation first because prior 96px ImageNet100 and
 # CIFAR10 224 results both showed PAT stable but weaker than no-PAT.
 # Run with:
-#   --dataset imagenet100 --input_size 224 --gpus 1 2 3 --no_memory_fs
+#   --dataset imagenet100 --input_size 224 --gpus all --no_memory_fs
 
 global:
   num_classes: 100

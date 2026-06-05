@@ -14,6 +14,24 @@ import numpy as np
 from scipy.stats import spearmanr, kendalltau, pearsonr
 
 
+def _to_float(value, default=0.0):
+    try:
+        if value in (None, ''):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value, default=0):
+    try:
+        if value in (None, ''):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def load_training_results(nas_result_dir):
     """Load training results from CSV
 
@@ -38,13 +56,19 @@ def load_training_results(nas_result_dir):
             results.append({
                 'category': row['category'],
                 'arch_id': row['arch_id'],
-                'aznas_fitness': float(row['aznas_fitness']),
-                'expressivity': float(row['expressivity']),
-                'progressivity': float(row['progressivity']),
-                'trainability': float(row['trainability']),
-                'fhe_latency': float(row['fhe_latency']),
-                'best_val_acc': float(row['best_val_acc']),
-                'generation': int(row['generation'])
+                'zen_fitness': _to_float(row.get('zen_fitness', row.get('aznas_fitness'))),
+                'zen_score': _to_float(row.get('zen_score')),
+                'synflow_score': _to_float(row.get('synflow_score'), default=float('nan')),
+                'params': _to_float(row.get('params')),
+                'flops': _to_float(row.get('flops')),
+                'fhe_latency': _to_float(row.get('fhe_latency')),
+                'best_val_acc': _to_float(row.get('best_val_acc')),
+                'generation': _to_int(row.get('generation')),
+                # Legacy fields, kept for older CSVs.
+                'aznas_fitness': _to_float(row.get('aznas_fitness'), default=float('nan')),
+                'expressivity': _to_float(row.get('expressivity'), default=float('nan')),
+                'progressivity': _to_float(row.get('progressivity'), default=float('nan')),
+                'trainability': _to_float(row.get('trainability'), default=float('nan')),
             })
 
     return results
@@ -59,24 +83,27 @@ def compute_correlations(results):
     Returns:
         Dict with correlation results
     """
-    # Extract metrics
-    aznas_fitness = np.array([r['aznas_fitness'] for r in results])
-    expressivity = np.array([r['expressivity'] for r in results])
-    progressivity = np.array([r['progressivity'] for r in results])
-    trainability = np.array([r['trainability'] for r in results])
-    fhe_latency = np.array([r['fhe_latency'] for r in results])
     accuracy = np.array([r['best_val_acc'] for r in results])
 
     # Compute correlations
     correlations = {}
 
     metrics = {
-        'AZ-NAS Fitness': aznas_fitness,
-        'Expressivity': expressivity,
-        'Progressivity': progressivity,
-        'Trainability': trainability,
-        'FHE Latency': -fhe_latency  # Negate so lower is better aligns with higher correlation
+        'Zen Fitness': np.array([r['zen_fitness'] for r in results]),
+        'ZEN Score': np.array([r['zen_score'] for r in results]),
+        'SynFlow Score': np.array([r['synflow_score'] for r in results]),
+        'Params': np.array([r['params'] for r in results]),
+        'FLOPs': np.array([r['flops'] for r in results]),
+        'FHE Latency': -np.array([r['fhe_latency'] for r in results]),
     }
+    if any(np.isfinite(r['aznas_fitness']) for r in results):
+        metrics['Legacy AZ-NAS Fitness'] = np.array([r['aznas_fitness'] for r in results])
+    if any(np.isfinite(r['expressivity']) for r in results):
+        metrics['Legacy Expressivity'] = np.array([r['expressivity'] for r in results])
+    if any(np.isfinite(r['progressivity']) for r in results):
+        metrics['Legacy Progressivity'] = np.array([r['progressivity'] for r in results])
+    if any(np.isfinite(r['trainability']) for r in results):
+        metrics['Legacy Trainability'] = np.array([r['trainability'] for r in results])
 
     for name, values in metrics.items():
         # Filter out invalid values
@@ -151,9 +178,12 @@ def print_correlation_report(correlations, results):
 
     # Find best metric
     print("\nBest Predictive Metric:")
-    best_metric = max(correlations.items(),
-                     key=lambda x: abs(x[1]['spearman_r']))
-    print(f"  {best_metric[0]}: Spearman ρ = {best_metric[1]['spearman_r']:.4f}")
+    if correlations:
+        best_metric = max(correlations.items(),
+                         key=lambda x: abs(x[1]['spearman_r']))
+        print(f"  {best_metric[0]}: Spearman ρ = {best_metric[1]['spearman_r']:.4f}")
+    else:
+        print("  Not enough valid samples")
 
 
 def analyze_by_category(results):
@@ -166,25 +196,29 @@ def analyze_by_category(results):
     print("PERFORMANCE BY CATEGORY")
     print("="*80)
 
-    for category in ['best', 'middle', 'worst']:
+    for category in sorted({r['category'] for r in results}):
         cat_results = [r for r in results if r['category'] == category]
         if not cat_results:
             continue
 
         accuracies = [r['best_val_acc'] for r in cat_results]
-        fitness_scores = [r['aznas_fitness'] for r in cat_results]
+        fitness_scores = [r['zen_fitness'] for r in cat_results]
 
         print(f"\n{category.upper()} Category ({len(cat_results)} architectures):")
         print(f"  Accuracy: {np.mean(accuracies):.2f}% ± {np.std(accuracies):.2f}%")
         print(f"  Range: [{np.min(accuracies):.2f}%, {np.max(accuracies):.2f}%]")
-        print(f"  AZ-NAS Fitness: {np.mean(fitness_scores):.4f} ± {np.std(fitness_scores):.4f}")
+        print(f"  Zen Fitness: {np.mean(fitness_scores):.4f} ± {np.std(fitness_scores):.4f}")
 
     # Statistical test between categories
     print("\n" + "-"*80)
     print("Category Comparison:")
     print("-"*80)
 
-    best_acc = [r['best_val_acc'] for r in results if r['category'] == 'best']
+    best_acc = [
+        r['best_val_acc']
+        for r in results
+        if r['category'] in ('best', 'top')
+    ]
     middle_acc = [r['best_val_acc'] for r in results if r['category'] == 'middle']
     worst_acc = [r['best_val_acc'] for r in results if r['category'] == 'worst']
 
@@ -217,15 +251,15 @@ def save_correlation_results(correlations, results, output_dir):
     }
 
     # By category
-    for category in ['best', 'middle', 'worst']:
+    for category in sorted({r['category'] for r in results}):
         cat_results = [r for r in results if r['category'] == category]
         if cat_results:
             output['by_category'][category] = {
                 'count': len(cat_results),
                 'accuracy_mean': float(np.mean([r['best_val_acc'] for r in cat_results])),
                 'accuracy_std': float(np.std([r['best_val_acc'] for r in cat_results])),
-                'fitness_mean': float(np.mean([r['aznas_fitness'] for r in cat_results])),
-                'fitness_std': float(np.std([r['aznas_fitness'] for r in cat_results]))
+                'fitness_mean': float(np.mean([r['zen_fitness'] for r in cat_results])),
+                'fitness_std': float(np.std([r['zen_fitness'] for r in cat_results]))
             }
 
     json_path = Path(output_dir) / 'correlation_analysis.json'

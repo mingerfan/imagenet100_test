@@ -4,7 +4,7 @@
 
 为了评估NAS搜索指标的准确性，系统实现了分层采样策略，从进化搜索的所有架构历史中采样三类架构：
 
-1. **Top 15**: 最佳的15个架构（AZ-NAS fitness最高）
+1. **Top 15**: 最佳的15个架构（Zen fitness最高）
 2. **Middle 15**: 从中间50%随机抽样15个架构
 3. **Worst 15**: 从最差25%随机抽样15个架构
 
@@ -13,7 +13,7 @@
 ## 分层采样逻辑
 
 ### 1. Top 15 架构
-- 按AZ-NAS fitness降序排序，取前15个
+- 按 Zen fitness 降序排序，取前15个
 - 代表搜索空间中的最佳架构
 - 用于验证NAS搜索是否能准确找到高性能架构
 
@@ -59,11 +59,12 @@ nas_results/
 {
   "category": "top",              // 类别: "top", "middle", "worst"
   "rank_in_category": 1,          // 在该类别中的排名
-  "aznas_fitness": -1.234,        // AZ-NAS适应度分数
+  "zen_fitness": -1.234,          // Zen/FHE适应度分数
   "scores": {                     // 所有评估指标
-    "expressivity": 19.25,
-    "progressivity": -0.18,
-    "trainability": -0.30,
+    "zen_score": 19.25,
+    "synflow_score": 123456.0,
+    "params": 1200000,
+    "flops": 320000000.0,
     "fhe_latency": 6707024.0,
     "fhe_boot_count": 37,
     "fhe_max_depth": 377,
@@ -103,6 +104,13 @@ nas_results/
    - 支持块类型：MBConv风格块（0-15）
    - 用途：在FHE优化下，只使用MBConv块进行轻量化搜索
 
+4. **imagenet_224_swish_mbconv.yaml**
+   - 块数量：4/6/8/10/12/14/16
+   - Stem：固定 `NoSG + Swish`
+   - 第二次降采样：`AvgPool`、`NoSG + Swish Conv` 或 `None`
+   - Body：仅允许 `MBConv1/4 + Swish`，可带 SE，不含 Poly4/selfgated
+   - 用途：Phase 1 结构搜索，先找深度、通道、CT policy 和 MBConv1/4 的权衡
+
 ### 约束条件说明
 
 #### Poly4激活函数约束
@@ -141,9 +149,52 @@ uv run python nas_evolution/run_evolution.py \
 uv run python nas_evolution/run_evolution.py \
   --config nas_evolution/evolution_config.yaml \
   --network_config network_gen/configs/imagenet_224_mbconv_style.yaml
+
+# Phase 1 推荐配置：全 Swish、无 selfgated、MBConv1/4
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config_swish_mbconv.yaml \
+  --gpus all
 ```
 
-### 2. 进化统计可视化
+### 2. 多 GPU 评估
+
+NAS 进化的初始化种群会批量评估，支持按 GPU 并行分发；后续每一代仍按 regularized evolution 的单 offspring 语义串行评估，避免改变选择和老化逻辑。
+
+```bash
+# 使用所有 PyTorch 可见 GPU
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --gpus all
+
+# 8 卡设备
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --gpus 0-7
+
+# 旧机器避开 physical GPU 0
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --gpus all \
+  --exclude_gpus 0
+
+# 兼容旧单卡写法
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config.yaml \
+  --gpu 1
+```
+
+配置文件中也可以设置：
+
+```yaml
+evaluation:
+  gpus: all
+  exclude_gpus: []
+  parallel_evaluations: true
+```
+
+`batch_size` 是每个评估 worker 的 batch size，不是跨 GPU 聚合后的 global batch size。
+
+### 3. 进化统计可视化
 
 进化搜索运行完成后，系统自动生成可视化图表保存在 `nas_results/<run_name>/plots/` 目录：
 
@@ -158,7 +209,7 @@ nas_results/<run_name>/plots/
 
 这些图表帮助了解进化过程中的性能改进轨迹。
 
-### 3. 分析采样结果
+### 4. 分析采样结果
 
 ```bash
 # 分析统计信息并生成可视化
@@ -171,7 +222,91 @@ uv run python nas_evolution/analyze_sampling.py nas_results/<run_name>
 - `stratified_sampling_scatter.png`: Fitness vs 其他指标的散点图
 - `architectures_for_training.json`: 所有45个架构的配置（用于训练）
 
-### 4. 训练和评估架构
+### 5. CIFAR-100 代理短训
+
+ZCP 在跨网络类型比较时不够稳定，因此当前推荐用 CIFAR-100@224 做离线代理短训，而不是把短训放进 evolution 内循环。
+
+```bash
+# 默认选择 top50 + middle20 + worst20，12 epoch 代理评估
+uv run python tools/train_nas_architectures.py \
+  --nas-results nas_results/swish_mbconv_phase1 \
+  --selection top50_middle20_worst20 \
+  --dataset cifar100 \
+  --input-size 224 \
+  --epochs 12 \
+  --batch-size 128 \
+  --gpus all \
+  --download
+
+# 如果要先做更便宜的筛选，可以改成 2 epoch
+uv run python tools/train_nas_architectures.py \
+  --nas-results nas_results/swish_mbconv_phase1 \
+  --selection top50_middle20_worst20 \
+  --dataset cifar100 \
+  --input-size 224 \
+  --epochs 2 \
+  --gpus all \
+  --download
+```
+
+输出：
+- `training_results.csv`: `zen_fitness`、`zen_score`、`synflow_score`、`params`、`flops`、`fhe_latency` 与 `best_val_acc`
+- `training_summary.json`: 按 category 汇总准确率
+- `selected_architectures.json`: 本次短训实际选中的架构
+
+### 6. Phase 2 replacement masks
+
+在 Phase 1 搜出的 Swish 结构上，再离线生成有限数量的替换 mask。默认只改 body block，不碰 stem/second downsample。支持的动作：
+
+- `stablepoly4`: `1->0, 3->2, 5->4, 7->6`
+- `hermitepoly4`: `activation_override: poly4_herpn`
+- `swish_herpn`: `activation_override: swish_herpn`
+- `gated_lswish`: `1->9, 3->11, 5->13, 7->15`
+
+```bash
+uv run python tools/nas_replacement_planner.py score-sites \
+  --arch nas_results/swish_mbconv_phase1/best_models/rank1_fitness*.json \
+  --output results/rank1_replacement_scores.json
+
+uv run python tools/nas_replacement_planner.py generate-masks \
+  --arch nas_results/swish_mbconv_phase1/best_models/rank1_fitness*.json \
+  --scores results/rank1_replacement_scores.json \
+  --output-dir configs/nas_replacement_masks/rank1 \
+  --top-site-actions 6 \
+  --max-replacements 3 \
+  --max-masks 30
+```
+
+默认预算：
+- 全部 masks 先训 2 epoch
+- 用 `promoted8` 选择前 8 个训 10 epoch
+- 用 `promoted3` 选择前 3 个训 20 epoch
+
+```bash
+uv run python tools/train_nas_architectures.py \
+  --json configs/nas_replacement_masks/rank1/*.json \
+  --selection all \
+  --dataset cifar100 \
+  --input-size 224 \
+  --epochs 2 \
+  --result-dir results/rank1_masks_e2 \
+  --gpus all \
+  --download
+
+uv run python tools/train_nas_architectures.py \
+  --selection promoted8 \
+  --training-results results/rank1_masks_e2/training_results.csv \
+  --dataset cifar100 \
+  --input-size 224 \
+  --epochs 10 \
+  --result-dir results/rank1_masks_e10 \
+  --gpus all \
+  --download
+```
+
+接受规则：若 `best_acc >= baseline_best_acc - 0.5pp`，保留；或者 `fhe_latency <= 0.9 * baseline_latency` 且 `best_acc >= baseline_best_acc - 1.0pp`，保留。
+
+### 7. 手动训练和评估架构
 
 使用 `architectures_for_training.json` 中的配置重建模型并训练：
 
@@ -195,7 +330,7 @@ for arch in architectures:
 
     # 记录结果
     category = arch['category']
-    aznas_fitness = arch['aznas_fitness']
+    zen_fitness = arch['zen_fitness']
     # ... 保存训练准确率等 ...
 ```
 
@@ -215,8 +350,8 @@ for arch in architectures:
    - 记录最终测试准确率、训练时间等
 
 3. **相关性分析**
-   - 计算AZ-NAS fitness与实际准确率的相关系数（Spearman, Kendall Tau）
-   - 分析各个指标（expressivity, progressivity, trainability, FHE latency）的预测能力
+   - 计算 Zen fitness、ZEN score、SynFlow、FHE latency 与实际准确率的相关系数（Spearman, Kendall Tau）
+   - 分析结构复杂度指标（params、FLOPs）和 FHE latency 的预测能力
    - 验证top架构的实际性能是否优于middle和worst
 
 4. **可视化结果**
@@ -226,11 +361,11 @@ for arch in architectures:
    from scipy.stats import spearmanr, kendalltau
 
    # 绘制相关性散点图
-   fitness = [arch['aznas_fitness'] for arch in results]
+   fitness = [arch['zen_fitness'] for arch in results]
    accuracy = [arch['test_accuracy'] for arch in results]
 
    plt.scatter(fitness, accuracy, c=['green']*15 + ['orange']*15 + ['red']*15)
-   plt.xlabel('AZ-NAS Fitness')
+   plt.xlabel('Zen Fitness')
    plt.ylabel('Test Accuracy (%)')
 
    # 计算相关系数
@@ -245,7 +380,7 @@ for arch in architectures:
 
 如果NAS搜索指标准确：
 - ✅ Top 15架构的平均准确率应该显著高于Middle和Worst
-- ✅ AZ-NAS fitness与实际准确率应有较强正相关（ρ > 0.6）
+- ✅ Zen fitness与实际准确率应有较强正相关（ρ > 0.6）
 - ✅ 各个零成本代理指标应与准确率有合理相关性
 - ✅ FHE延迟应与实际推理时间成比例
 
@@ -303,9 +438,9 @@ allowed_block_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # MBC
    - 可以设置random seed保证可重复性
 
 3. **适应度计算**
-   - AZ-NAS fitness使用非线性排名聚合
-   - fitness值越高越好（负值较小表示更好）
-   - fitness = Σ log(Rank(metric)/m)，惩罚任何弱维度
+   - Zen fitness使用 ZEN score 与 FHE latency multiplier
+   - fitness值越高越好
+   - 延迟 multiplier 有意保留“过小模型惩罚”，不是单调奖励更小 latency
 
 4. **块约束说明**
    - Poly4约束：自动在所有网络中执行，无需手动配置
@@ -320,15 +455,17 @@ allowed_block_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # MBC
 ## 相关文件
 
 - `regularized_evolution.py`: 主进化算法，包含 `_get_stratified_sample()` 方法、配置加载和可视化生成
-- `mutations.py`: 突变算子，现在支持 `allowed_block_ids` 参数用于块类型过滤
+- `mutations.py`: 突变算子，支持 `allowed_block_ids`、stem、second downsample 和 CT policy 限制
 - `network_generator.py`: 网络生成器，实现Poly4约束和分组共享一致性
 - `utils.py`: 包含 `EvolutionLogger` 类的 `plot_evolution_stats()` 方法，生成进化统计图表
 - `analyze_sampling.py`: 分析脚本，生成采样统计和可视化
 - `evolution_config.yaml`: 主进化配置文件
-- `network_gen/configs/imagenet_224*.yaml`: 网络配置文件（3个配置选项）
+- `network_gen/configs/imagenet_224*.yaml`: 网络配置文件
+- `tools/train_nas_architectures.py`: NAS JSON 离线短训入口
+- `tools/nas_replacement_planner.py`: Phase 2 replacement mask 生成入口
 
 ## 参考
 
 - Real et al. "Regularized Evolution for Image Classifier Architecture Search" (2019)
 - Abdelfattah et al. "Zero-Cost Proxies for Lightweight NAS" (2021)
-- 论文中的AZ-NAS非线性排名聚合方法
+- Lin et al. "Zen-NAS: A Zero-Shot NAS for High-Performance Deep Image Recognition" (2021)
