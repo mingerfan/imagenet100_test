@@ -126,7 +126,7 @@ def _is_swish_activation(activation) -> bool:
     if act_cls is nn.SiLU:
         return True
     name = act_cls.__name__.lower()
-    return name in ("swish", "learnableswish", "silu", "stablepoly4", "swishherpn")
+    return name in ("swish", "learnableswish", "silu", "stablepoly4", "hermitepoly4", "swishherpn")
 
 
 class Activation(nn.Module):
@@ -433,6 +433,16 @@ class StablePoly4(nn.Module):
     def _eval_poly(x_poly, a_eff, b_eff, c, d, e):
         return ((((a_eff * x_poly + b_eff) * x_poly + c) * x_poly + d) * x_poly + e)
 
+    def _eval_poly_branch(self, x_poly, a_eff, b_eff, c, d, e):
+        return self._eval_poly(x_poly, a_eff, b_eff, c, d, e)
+
+    def _eval_poly_derivative(self, x_poly, a_eff, b_eff, c, d):
+        return self.output_scale * (
+            (((4.0 * a_eff) * x_poly + 3.0 * b_eff) * x_poly + 2.0 * c)
+            * x_poly
+            + d
+        )
+
     @staticmethod
     def _build_warmup_act(warmup_act):
         if warmup_act is None:
@@ -493,7 +503,7 @@ class StablePoly4(nn.Module):
         b_eff = b_clamped if degree >= 3 else torch.zeros_like(b_clamped)
 
         # Horner 形式计算多项式，数值更稳
-        poly_out = self._eval_poly(x_poly, a_eff, b_eff, c_clamped, d_clamped, e_clamped)
+        poly_out = self._eval_poly_branch(x_poly, a_eff, b_eff, c_clamped, d_clamped, e_clamped)
 
         if self.collect_stats:
             self.last_x_poly_stats = self._calc_stats(x_poly)
@@ -508,11 +518,7 @@ class StablePoly4(nn.Module):
         # 多项式导数正则（包含 output_scale）
         need_fprime = self.enable_deriv_loss or self.collect_stats
         if need_fprime:
-            fprime = self.output_scale * (
-                (((4.0 * a_eff) * x_poly + 3.0 * b_eff) * x_poly + 2.0 * c_clamped)
-                * x_poly
-                + d_clamped
-            )
+            fprime = self._eval_poly_derivative(x_poly, a_eff, b_eff, c_clamped, d_clamped)
         if self.collect_stats:
             self.last_fprime_stats = self._calc_stats(fprime)
         if self.enable_deriv_loss:
@@ -545,7 +551,7 @@ class StablePoly4(nn.Module):
         if self.pat_swish_backward and self.training and alpha > 0.0:
             swish_surrogate = poly_branch.detach() + F.silu(x_work) - F.silu(x_work).detach()
             x_poly_param = self._calc_poly_input_param_only(x_work, x_poly)
-            poly_param = self._eval_poly(
+            poly_param = self._eval_poly_branch(
                 x_poly_param,
                 a_eff,
                 b_eff,
@@ -585,6 +591,53 @@ class StablePoly4(nn.Module):
                 "max": float(t.max().item()),
             }
         return {"p50": float("nan"), "p90": float("nan"), "p99": float("nan"), "max": float("nan")}
+
+
+class HermitePoly4(StablePoly4):
+    """
+    StablePoly4 variant using AESPA/HerPN-style Hermite bases.
+
+    The public training interface intentionally matches StablePoly4 so existing
+    progressive scheduling, CT hooks, logging, and optimizer grouping can reuse
+    the same controls.
+    """
+
+    def __init__(self, *args, basis_norm=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.basis_norm_enabled = bool(basis_norm)
+        self.basis_norm1 = nn.LazyBatchNorm2d(eps=BN_EPS, affine=False)
+        self.basis_norm2 = nn.LazyBatchNorm2d(eps=BN_EPS, affine=False)
+        self.basis_norm3 = nn.LazyBatchNorm2d(eps=BN_EPS, affine=False)
+        self.basis_norm4 = nn.LazyBatchNorm2d(eps=BN_EPS, affine=False)
+
+    @staticmethod
+    def _hermite_bases(x):
+        h1 = x
+        h2 = (x * x - 1.0) * (2.0 ** -0.5)
+        h3 = (x * x * x - 3.0 * x) * (6.0 ** -0.5)
+        h4 = (x * x * x * x - 6.0 * x * x + 3.0) * (24.0 ** -0.5)
+        return h1, h2, h3, h4
+
+    def _maybe_norm_basis(self, idx, basis):
+        if not self.basis_norm_enabled or basis.dim() != 4:
+            return basis
+        norm = (self.basis_norm1, self.basis_norm2, self.basis_norm3, self.basis_norm4)[idx]
+        return norm(basis)
+
+    def _eval_poly_branch(self, x_poly, a_eff, b_eff, c, d, e):
+        h1, h2, h3, h4 = self._hermite_bases(x_poly)
+        h1 = self._maybe_norm_basis(0, h1)
+        h2 = self._maybe_norm_basis(1, h2)
+        h3 = self._maybe_norm_basis(2, h3)
+        h4 = self._maybe_norm_basis(3, h4)
+        out = e + d * h1 + c * h2 + b_eff * h3 + a_eff * h4
+        return torch.nan_to_num(out, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    def _eval_poly_derivative(self, x_poly, a_eff, b_eff, c, d):
+        dh2 = (2.0 ** 0.5) * x_poly
+        dh3 = (3.0 * x_poly * x_poly - 3.0) * (6.0 ** -0.5)
+        dh4 = (4.0 * x_poly * x_poly * x_poly - 12.0 * x_poly) * (24.0 ** -0.5)
+        return self.output_scale * (d + c * dh2 + b_eff * dh3 + a_eff * dh4)
 
 
 class BasicBlock(nn.Module):

@@ -858,7 +858,10 @@ class Trainer:
         degree = int(getattr(module, "poly_degree", 4))
         a_eff = a if degree >= 4 else torch.zeros_like(a)
         b_eff = b if degree >= 3 else torch.zeros_like(b)
-        poly = ((((a_eff * x_poly + b_eff) * x_poly + c) * x_poly + d) * x_poly + e)
+        if hasattr(module, "_eval_poly_branch") and callable(module._eval_poly_branch):
+            poly = module._eval_poly_branch(x_poly, a_eff, b_eff, c, d, e)
+        else:
+            poly = ((((a_eff * x_poly + b_eff) * x_poly + c) * x_poly + d) * x_poly + e)
         return poly * float(getattr(module, "output_scale", 1.0))
 
     def _smartpaf_ct_target_eval(self, module, x):

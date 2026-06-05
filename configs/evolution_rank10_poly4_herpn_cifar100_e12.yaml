@@ -1,0 +1,168 @@
+# 12-epoch CIFAR-100 follow-up for the best quick HerPN Poly4 replacements.
+
+global:
+  num_classes: 100
+  default_epochs: 12
+  default_batch_size: 256
+  default_learning_rate: 0.001
+  default_num_workers: 4
+  default_save_freq: 0
+
+json_models:
+  - name: "cifar100-rank10-original-e12-b256"
+    class: "nas-json"
+    json_path: "configs/nas_variants/evolution_rank10.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
+
+  - name: "cifar100-rank10-stablepoly4-idx6-e12-b256"
+    class: "nas-json"
+    json_path: "configs/nas_variants/evolution_rank10_poly4_idx6.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    poly_scale_lr_mult: 0.1
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.25
+      poly4_scale_mode: learned
+      poly4_degree: 2
+      poly4_output_scale: 0.2
+      smartpaf_ct_init: true
+      smartpaf_ct_batches: 2
+      smartpaf_ct_max_samples: 5000
+      smartpaf_ct_steps: 80
+      smartpaf_ct_lr: 0.01
+      smartpaf_progressive: false
+      smartpaf_transition_epochs: 2
+      smartpaf_alternate_training: false
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
+
+  - name: "cifar100-rank10-hermitepoly4-idx6-e12-b256"
+    class: "nas-json"
+    json_path: "configs/nas_variants/evolution_rank10_poly4_herpn_idx6.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    poly_scale_lr_mult: 0.1
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.25
+      poly4_scale_mode: learned
+      poly4_degree: 2
+      poly4_output_scale: 0.2
+      smartpaf_ct_init: true
+      smartpaf_ct_batches: 2
+      smartpaf_ct_max_samples: 5000
+      smartpaf_ct_steps: 80
+      smartpaf_ct_lr: 0.01
+      smartpaf_progressive: false
+      smartpaf_transition_epochs: 2
+      smartpaf_alternate_training: false
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop
+
+  - name: "cifar100-rank10-hermitepoly4-idx5-6-7-e12-b256"
+    class: "nas-json"
+    json_path: "configs/nas_variants/evolution_rank10_poly4_herpn_idx5_6_7.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    poly_weight_decay: 0.0
+    poly_scale_lr_mult: 0.1
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      gate_reg_lambda: 0.0
+      poly4_warmup_ratio: 0.25
+      poly4_scale_mode: learned
+      poly4_degree: 2
+      poly4_output_scale: 0.2
+      smartpaf_ct_init: true
+      smartpaf_ct_batches: 2
+      smartpaf_ct_max_samples: 5000
+      smartpaf_ct_steps: 80
+      smartpaf_ct_lr: 0.01
+      smartpaf_progressive: false
+      smartpaf_transition_epochs: 2
+      smartpaf_alternate_training: false
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_patience: 1
+      collapse_guard_action: stop

@@ -29,6 +29,17 @@ def _collect_module_param_ids(model, class_name):
     return param_ids
 
 
+def _collect_poly_activation_param_ids(model):
+    param_ids = set()
+    for module in model.modules():
+        if hasattr(module, "set_poly_schedule") and callable(module.set_poly_schedule):
+            for param in module.parameters(recurse=True):
+                param_ids.add(id(param))
+    if not param_ids:
+        param_ids = _collect_module_param_ids(model, "StablePoly4")
+    return param_ids
+
+
 def _collect_batchnorm_param_ids(model):
     param_ids = set()
     for module in model.modules():
@@ -64,7 +75,7 @@ def create_smart_optimizer(
     poly_scale_params = []
     no_decay_params = []
     normal_params = []
-    poly_param_ids = _collect_module_param_ids(model, "StablePoly4")
+    poly_param_ids = _collect_poly_activation_param_ids(model)
     bn_param_ids = _collect_batchnorm_param_ids(model)
     if poly_scale_lr_mult is None:
         poly_scale_lr_mult = poly_lr_mult

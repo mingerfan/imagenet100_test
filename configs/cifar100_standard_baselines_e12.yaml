@@ -1,0 +1,114 @@
+# 12-epoch CIFAR-100 standard-network baselines for Poly4/HerPN comparison.
+
+global:
+  num_classes: 100
+  default_epochs: 12
+  default_batch_size: 256
+  default_learning_rate: 0.001
+  default_num_workers: 4
+  default_save_freq: 0
+
+models:
+  - name: "cifar100-resnet20-e12-b256"
+    class: "resnet20"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_action: stop
+
+  - name: "cifar100-resnet56-e12-b256"
+    class: "resnet56"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_action: stop
+
+  - name: "cifar100-resnet18-e12-b256"
+    class: "resnet18"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_action: stop
+
+  - name: "cifar100-efficientnet-b0-e12-b256"
+    class: "efficientnet-b0"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 12
+    batch_size: 256
+    learning_rate: 0.001
+    num_workers: 4
+    prefetch_factor: 2
+    use_amp: false
+    val_force_fp32: true
+    save_freq: 0
+    optimizer_type: adamw
+    weight_decay: 0.0001
+    scheduler: cosine
+    warmup_epochs: 1
+    warmup_start_factor: 0.1
+    min_lr_ratio: 0.01
+    grad_clip_max_norm: 1.0
+    label_smoothing: 0.05
+    trainer_kwargs:
+      collapse_guard_enabled: true
+      collapse_guard_drop: 15.0
+      collapse_guard_action: stop

@@ -4434,3 +4434,123 @@ the current Swish-based NAS model without a ReLU-specific configuration path, bu
 the single idx6 Swish-HerPN replacement is accuracy-neutral rather than clearly
 better. It is worth keeping as an experimental activation override, while the
 current strongest polynomial direction remains idx6 StablePoly4 matched24.
+
+## 2026-06-05 CIFAR-100 Hermite Poly4 Quick Sweep
+
+Purpose: test whether the AESPA/HerPN normalization idea is more useful when
+applied directly to the Poly4 path, and whether replacing more than one Swish /
+LearnableSwish activation can help. This is a deliberately small CIFAR-100
+screening run using `/home/xuming/Documents/dataset/cifar-100-python.tar.gz`
+extracted under `/home/xuming/Documents/dataset`.
+
+Implementation:
+
+- Added `HermitePoly4`, a `StablePoly4`-compatible activation that evaluates
+  `a,b,c,d,e` as normalized probabilists' Hermite-basis coefficients instead of
+  monomial coefficients.
+- Added basis-wise `LazyBatchNorm2d(affine=False)` for 4D activation tensors.
+- Kept the existing `StablePoly4` scheduling/CT/logging interface, so
+  `poly4_warmup_ratio`, CT initialization, `poly_scale_lr_mult`, and summary
+  tooling remain usable.
+- Registered activation override key `poly4_herpn`.
+- Generated activation-override NAS variants:
+  - `configs/nas_variants/evolution_rank10_poly4_herpn_idx6.json`
+  - `configs/nas_variants/evolution_rank10_poly4_herpn_idx5_6_7.json`
+  - `configs/nas_variants/evolution_rank10_poly4_herpn_all8.json`
+
+Validation:
+
+```bash
+.venv/bin/python -m py_compile models/gate_net_cmp/block_def.py network_gen/search_space.py trainers/base_trainer.py trainers/multi_gpu_manager.py
+.venv/bin/python - <<'PY'
+import torch
+from models.json_registered import nas_json_model
+from models.gate_net_cmp.block_def import HermitePoly4, StablePoly4
+
+variants = [
+    ('orig', 'configs/nas_variants/evolution_rank10.json', 0),
+    ('stable_idx6', 'configs/nas_variants/evolution_rank10_poly4_idx6.json', None),
+    ('herpn_idx6', 'configs/nas_variants/evolution_rank10_poly4_herpn_idx6.json', 1),
+    ('herpn_idx567', 'configs/nas_variants/evolution_rank10_poly4_herpn_idx5_6_7.json', 3),
+    ('herpn_all8', 'configs/nas_variants/evolution_rank10_poly4_herpn_all8.json', 8),
+]
+for name, path, expected in variants:
+    model = nas_json_model(path, num_classes=100, pretrained=False)
+    hcount = sum(1 for m in model.modules() if isinstance(m, HermitePoly4))
+    scount = sum(1 for m in model.modules() if isinstance(m, StablePoly4) and not isinstance(m, HermitePoly4))
+    if expected is not None:
+        assert hcount == expected
+    model.train()
+    y = model(torch.randn(2, 3, 32, 32))
+    y.float().sum().backward()
+    print(name, torch.isfinite(y).all().item(), hcount, scount)
+PY
+git diff --check
+```
+
+6-epoch quick command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/evolution_rank10_poly4_herpn_cifar100_quick.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 3 --input_size 32 --no_memory_fs --force > logs/evolution_rank10_poly4_herpn_cifar100_quick.log 2>&1; echo $? > logs/evolution_rank10_poly4_herpn_cifar100_quick.status' < /dev/null &
+```
+
+6-epoch result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `cifar100-rank10-hermitepoly4-idx5-6-7-e6-b256` | 6 | 30.87 | 30.87 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-hermitepoly4-idx6-e6-b256` | 6 | 30.72 | 30.72 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-stablepoly4-idx6-e6-b256` | 6 | 30.27 | 30.27 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-original-e6-b256` | 6 | 30.25 | 30.25 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-hermitepoly4-all8-e6-b256` | 6 | 29.75 | 29.75 | 0 | 0 | 0 | PASS |
+
+Observation: at 6 epochs, replacing idx5/6/7 with HermitePoly4 was the best
+rank10 variant, +0.62 over the original. Replacing all eight body activations
+was worse, suggesting that broad replacement is not automatically better.
+
+12-epoch follow-up command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/evolution_rank10_poly4_herpn_cifar100_e12.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 3 --input_size 32 --no_memory_fs --force > logs/evolution_rank10_poly4_herpn_cifar100_e12.log 2>&1; echo $? > logs/evolution_rank10_poly4_herpn_cifar100_e12.status' < /dev/null &
+```
+
+12-epoch rank10 result:
+
+| Model | Epochs | Best | Final | Nonfinite | Skipped | Guard | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `cifar100-rank10-original-e12-b256` | 12 | 36.77 | 36.77 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-hermitepoly4-idx6-e12-b256` | 12 | 36.11 | 36.11 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-stablepoly4-idx6-e12-b256` | 12 | 35.92 | 35.92 | 0 | 0 | 0 | PASS |
+| `cifar100-rank10-hermitepoly4-idx5-6-7-e12-b256` | 12 | 35.66 | 34.53 | 0 | 0 | 0 | PASS |
+
+Observation: the 6-epoch multi-position gain did not hold at 12 epochs.
+HermitePoly4 idx5/6/7 hit 35.66 but ended at 34.53, and its validation loss
+exploded late despite finite batches. Single idx6 HermitePoly4 was stable and
+slightly better than single idx6 StablePoly4, but both trailed the original
+rank10 control.
+
+Standard-network baseline command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_standard_baselines_e12.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 3 --input_size 32 --no_memory_fs --force > logs/cifar100_standard_baselines_e12.log 2>&1; echo $? > logs/cifar100_standard_baselines_e12.status' < /dev/null &
+```
+
+12-epoch standard-network comparison:
+
+| Model | Params | Epochs | Best | Final | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `cifar100-resnet18-e12-b256` | 11.23M | 12 | 49.26 | 49.26 | ImageNet-style ResNet, 32px input |
+| `cifar100-resnet56-e12-b256` | 0.86M | 12 | 44.05 | 44.05 | CIFAR-style ResNet |
+| `cifar100-rank10-original-e12-b256` | 12.60M | 12 | 36.77 | 36.77 | searched rank10 control |
+| `cifar100-resnet20-e12-b256` | 0.28M | 12 | 36.74 | 36.74 | CIFAR-style ResNet |
+| `cifar100-rank10-hermitepoly4-idx6-e12-b256` | 12.60M | 12 | 36.11 | 36.11 | one HermitePoly4 override |
+| `cifar100-rank10-stablepoly4-idx6-e12-b256` | 12.60M | 12 | 35.92 | 35.92 | one StablePoly4 block mapping |
+| `cifar100-rank10-hermitepoly4-idx5-6-7-e12-b256` | 12.60M | 12 | 35.66 | 34.53 | three HermitePoly4 overrides |
+| `cifar100-efficientnet-b0-e12-b256` | 4.14M | 12 | 30.66 | 30.66 | ImageNet-style EfficientNet-B0, 32px input |
+
+Conclusion: on this small CIFAR-100 screen, applying AESPA/HerPN directly to
+Poly4 is stable for one replacement and can show early gains, but it does not
+beat the original rank10 control by 12 epochs. More importantly, all rank10
+variants are far below the stronger standard baselines ResNet56 and ResNet18
+under the same short CIFAR-100 schedule. Multi-position HermitePoly4 replacement
+needs a slower or staged schedule before it is worth scaling back to ImageNet-100.
