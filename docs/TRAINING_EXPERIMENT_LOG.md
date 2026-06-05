@@ -4554,3 +4554,75 @@ beat the original rank10 control by 12 epochs. More importantly, all rank10
 variants are far below the stronger standard baselines ResNet56 and ResNet18
 under the same short CIFAR-100 schedule. Multi-position HermitePoly4 replacement
 needs a slower or staged schedule before it is worth scaling back to ImageNet-100.
+
+## 2026-06-05 CIFAR-100 Longer Baselines and 40-Epoch Rank10 Replacement Sweep
+
+Purpose: address the concern that 6/12 epochs are too short to judge the
+activation replacement behavior. Standard-network baselines were started with a
+60-epoch budget, then stopped early once enough context was available. The main
+rank10 comparison was run for 40 epochs and expanded to include more
+multi-position Swish/LearnableSwish-to-Poly4 replacement patterns.
+
+Baseline command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_poly4_herpn_long_e60.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 3 --input_size 32 --no_memory_fs --force > logs/cifar100_poly4_herpn_long_e60.log 2>&1; echo $? > logs/cifar100_poly4_herpn_long_e60.status' < /dev/null &
+```
+
+Baseline note: this run was intentionally stopped after the user requested
+ending baseline training quickly. Completed and partial results are still useful
+for scale:
+
+| Model | Epochs in CSV | Best | Final | Status |
+| --- | ---: | ---: | ---: | --- |
+| `cifar100-resnet56-e60-b256` | 60 | 62.29 | 62.20 | completed |
+| `cifar100-resnet20-e60-b256` | 60 | 57.46 | 57.44 | completed |
+| `cifar100-resnet18-e60-b256` | 60 | 54.38 | 54.04 | completed |
+| `cifar100-resnet110-e60-b256` | 35 | 60.39 | 60.39 | stopped early |
+| `cifar100-efficientnet-b0-e60-b256` | 42 | 49.00 | 48.90 | stopped early |
+
+Rank10 replacement command:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_rank10_poly_replacement_e40.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 3 --input_size 32 --no_memory_fs --force > logs/cifar100_rank10_poly_replacement_e40.log 2>&1; echo $? > logs/cifar100_rank10_poly_replacement_e40.status' < /dev/null &
+```
+
+Additional generated variants:
+
+- `configs/nas_variants/evolution_rank10_poly4_head6.json`
+- `configs/nas_variants/evolution_rank10_poly4_herpn_head4.json`
+
+40-epoch rank10 result:
+
+| Model | Replaced activations | Epochs | Best | Final | Notes |
+| --- | --- | ---: | ---: | ---: | --- |
+| `cifar100-rank10-original-e40-b256` | none | 40 | 40.28 | 39.17 | control, best at epoch 22 |
+| `cifar100-rank10-stablepoly4-idx6-e40-b256` | idx6 | 40 | 38.77 | 37.78 | single StablePoly4 |
+| `cifar100-rank10-hermitepoly4-idx6-e40-b256` | idx6 | 40 | 38.35 | 37.85 | single HermitePoly4 |
+| `cifar100-rank10-hermitepoly4-idx5-6-7-e40-b256` | idx5/6/7 | 40 | 37.56 | 36.58 | val loss exploded late |
+| `cifar100-rank10-stablepoly4-head4-e40-b256` | head4 | 40 | 36.81 | 33.09 | broad replacement hurt final accuracy |
+| `cifar100-rank10-hermitepoly4-head4-e40-b256` | head4 | 40 | 36.42 | 35.84 | better final than Stable head4, still below control |
+| `cifar100-rank10-hermitepoly4-all8-e40-b256` | all8 | 40 | 35.03 | 34.27 | val loss reached 1e15 scale |
+| `cifar100-rank10-stablepoly4-head6-e40-b256` | head6 | 40 | 36.94 | 33.71 | summary marked collapse from large drop |
+
+Standard-network comparison:
+
+| Model | Best | Final | Relation to rank10 control |
+| --- | ---: | ---: | --- |
+| `cifar100-resnet56-e60-b256` | 62.29 | 62.20 | +22.01 best points |
+| `cifar100-resnet20-e60-b256` | 57.46 | 57.44 | +17.18 best points |
+| `cifar100-resnet18-e60-b256` | 54.38 | 54.04 | +14.10 best points |
+| `cifar100-efficientnet-b0-e60-b256` | 49.00 | 48.90 | +8.72 best points, stopped at epoch 42 |
+| `cifar100-rank10-original-e40-b256` | 40.28 | 39.17 | rank10 control |
+| `cifar100-rank10-hermitepoly4-idx6-e40-b256` | 38.35 | 37.85 | -1.93 best points |
+| `cifar100-rank10-stablepoly4-idx6-e40-b256` | 38.77 | 37.78 | -1.51 best points |
+
+Conclusion: with a more meaningful 40-epoch CIFAR-100 run, the original rank10
+network remains the best rank10 variant. Single-location Poly4 replacement is
+only mildly worse than control, and HermitePoly4 has a slightly better final
+accuracy than StablePoly4 for idx6, but neither improves the control. Replacing
+more activations at once is consistently worse and often numerically suspicious:
+head4/head6/all8 lose several accuracy points, and Hermite all8 produces
+astronomical validation losses despite finite batches. The next experiment
+should not simply replace more Swish activations simultaneously; it should use a
+staged/progressive replacement schedule or stronger coefficient/scale control.
