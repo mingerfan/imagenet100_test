@@ -31,7 +31,8 @@ python nas_evolution/run_evolution.py --gpus all --exclude_gpus 0
 
 ## NAS 搜索约束
 
-- 当前推荐两阶段流程：Phase 1 使用 `nas_evolution/evolution_config_swish_mbconv.yaml` 做全 Swish、无 selfgated、MBConv1/4 结构搜索；Phase 2 使用 `tools/nas_replacement_planner.py` 离线生成有限 replacement masks。
+- 当前推荐两阶段流程：优先使用 `tools/run_nas_two_stage.py` 一键编排。Phase 1 使用 `nas_evolution/evolution_config_swish_mbconv.yaml` 做全 Swish、无 selfgated、MBConv1/4 结构搜索；Phase 2 对 promoted 架构生成有限 replacement masks 并按 `2 -> 10 -> 20` epoch 晋级训练。
 - NAS evolution 的 `evaluation.batch_size` 是单个评估 worker 的 batch size；短训工具 `tools/train_nas_architectures.py` 的 `--batch-size` 也是单 GPU worker batch size。
 - 默认代理训练使用 CIFAR-100@224；ImageNet-100 留作后期筛选，不建议放进 evolution 内循环。
+- Phase 1 代理短训使用 `swish_proxy` preset，不启用 SmartPAF/AutoFHE；replacement mask 默认使用两个正向 no-PAT/no-AT preset：`replacement_autofhe_degree2` 和 `replacement_learned_slow_scale`。AT/PAT 只作为显式实验选项。
 - replacement mask 默认只改 body blocks，不改 stem/second downsample；v1 支持 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`，不生成 `gated_poly4`。

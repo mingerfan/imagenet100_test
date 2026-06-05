@@ -306,7 +306,107 @@ uv run python tools/train_nas_architectures.py \
 
 接受规则：若 `best_acc >= baseline_best_acc - 0.5pp`，保留；或者 `fhe_latency <= 0.9 * baseline_latency` 且 `best_acc >= baseline_best_acc - 1.0pp`，保留。
 
-### 7. 手动训练和评估架构
+### 7. 两阶段一键流程、产物位置与大训衔接
+
+推荐使用 `tools/run_nas_two_stage.py` 编排 Phase 1 结构搜索、CIFAR-100@224
+代理短训、Phase 2 replacement mask 生成和 `2 -> 10 -> 20` epoch 晋级短训。
+
+```bash
+uv run python tools/run_nas_two_stage.py \
+  --run-root results/nas_two_stage_swish_mbconv \
+  --gpus all \
+  --download
+```
+
+如果 Phase 1 evolution 已经跑完，可以复用已有目录：
+
+```bash
+uv run python tools/run_nas_two_stage.py \
+  --nas-results nas_results/swish_mbconv_phase1 \
+  --run-root results/nas_two_stage_from_existing \
+  --gpus all \
+  --download
+```
+
+所有训练入口都支持手动指定数据集路径：
+
+```bash
+uv run python tools/run_nas_two_stage.py \
+  --dataset imagenet100 \
+  --train-dir /path/to/imagenet100/train \
+  --val-dir /path/to/imagenet100/val \
+  --input-size 224 \
+  --gpus all
+```
+
+产物默认位置：
+
+- Phase 1 搜索结构：
+  `results/nas_two_stage/phase1_evolution/best_models/*.json`
+- Phase 1 代理短训结果：
+  `results/nas_two_stage/phase1_proxy/training_results.csv`
+- Phase 2 replacement mask 结构：
+  `results/nas_two_stage/replacement_masks/<source_arch_name>/*.json`
+- Phase 2 晋级短训结果：
+  `results/nas_two_stage/replacement_train_e2/training_results.csv`、
+  `results/nas_two_stage/replacement_train_e10/training_results.csv`、
+  `results/nas_two_stage/replacement_train_e20/training_results.csv`
+- 流程清单：
+  `results/nas_two_stage/two_stage_manifest.json`
+
+如果使用自定义 `--run-root`，上述路径都在该目录下。直接运行
+`nas_evolution/run_evolution.py` 时，搜索结构保存在配置的
+`logging.output_dir/best_models/*.json`；推荐配置
+`nas_evolution/evolution_config_swish_mbconv.yaml` 默认写入
+`nas_results/swish_mbconv_phase1/best_models/*.json`。
+
+Phase 1 代理短训默认使用 `swish_proxy`，不启用 SmartPAF/AutoFHE。
+Phase 2 replacement mask 默认使用两个 no-PAT/no-AT 的正向 preset：
+`replacement_autofhe_degree2` 和 `replacement_learned_slow_scale`。AT/PAT 只作为
+显式实验选项保留，不走默认路径。
+
+搜索出的 JSON 结构可以直接通过 `nas-json` 接入大规模训练。最终候选可以写入
+普通训练 YAML：
+
+```yaml
+json_models:
+  - name: "final-nas-candidate"
+    class: "nas-json"
+    json_path: "results/nas_two_stage/replacement_masks/<source>/<candidate>.json"
+    params:
+      num_classes: 100
+      pretrained: false
+    epochs: 60
+    batch_size: 128
+    learning_rate: 0.0007
+```
+
+然后启动 ImageNet-100@224 大训：
+
+```bash
+uv run python train.py \
+  --config configs/final_nas_train.yaml \
+  --dataset imagenet100 \
+  --train_dir /path/to/imagenet100/train \
+  --val_dir /path/to/imagenet100/val \
+  --input_size 224 \
+  --gpus all
+```
+
+也可以直接短训或验证单个 JSON：
+
+```bash
+uv run python tools/train_nas_architectures.py \
+  --json results/nas_two_stage/replacement_masks/<source>/<candidate>.json \
+  --selection all \
+  --dataset imagenet100 \
+  --train-dir /path/to/imagenet100/train \
+  --val-dir /path/to/imagenet100/val \
+  --input-size 224 \
+  --gpus all
+```
+
+### 8. 手动训练和评估架构
 
 使用 `architectures_for_training.json` 中的配置重建模型并训练：
 

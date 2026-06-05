@@ -25,6 +25,15 @@ from utils.nas_training import (
     save_results,
 )
 
+TRAINING_PRESETS = (
+    "swish_proxy",
+    "replacement_autofhe_degree2",
+    "replacement_learned_slow_scale",
+    "replacement_smartpaf",
+    "replacement_smartpaf_at",
+    "replacement_autofhe_pat",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -69,6 +78,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--label-smoothing", type=float, default=0.05)
     parser.add_argument("--warmup-epochs", type=int, default=2)
+    parser.add_argument(
+        "--training-preset",
+        choices=TRAINING_PRESETS,
+        default="swish_proxy",
+        help=(
+            "Training defaults to apply. swish_proxy is for phase-1 short training; "
+            "replacement_autofhe_degree2 and replacement_learned_slow_scale are "
+            "the recommended phase-2 mask presets."
+        ),
+    )
+    parser.add_argument(
+        "--smartpaf-calibration-batches",
+        type=int,
+        default=8,
+        help="CT/SS calibration batches used by replacement presets.",
+    )
+    parser.add_argument(
+        "--smartpaf-ct-steps",
+        type=int,
+        default=300,
+        help="CT coefficient fitting steps used by replacement presets.",
+    )
+    parser.add_argument(
+        "--smartpaf-transition-epochs",
+        type=float,
+        default=None,
+        help="Override progressive StablePoly transition length for replacement presets.",
+    )
     return parser.parse_args()
 
 
@@ -181,6 +218,145 @@ def default_data_dirs(dataset_name: str, train_dir: str | None, val_dir: str | N
     raise ValueError(f"Explicit --train-dir/--val-dir required for dataset {dataset_name}")
 
 
+def _auto_transition_epochs(epochs: int) -> float:
+    if epochs <= 4:
+        return 1.0
+    if epochs <= 10:
+        return 2.0
+    return 6.0
+
+
+def _replacement_base_kwargs(args: argparse.Namespace) -> Dict:
+    transition_epochs = (
+        float(args.smartpaf_transition_epochs)
+        if args.smartpaf_transition_epochs is not None
+        else _auto_transition_epochs(args.epochs)
+    )
+    return {
+        "gate_reg_lambda": 0.0,
+        "poly4_warmup_ratio": 0.35,
+        "poly4_scale_mode": "learned",
+        "poly4_degree": 2,
+        "poly4_output_scale": 0.2,
+        "smartpaf_ct_init": True,
+        "smartpaf_ct_batches": args.smartpaf_calibration_batches,
+        "smartpaf_ct_max_samples": 20000,
+        "smartpaf_ct_steps": args.smartpaf_ct_steps,
+        "smartpaf_ct_lr": 0.01,
+        "smartpaf_progressive": True,
+        "smartpaf_group_epochs": "auto",
+        "smartpaf_transition_epochs": transition_epochs,
+        "smartpaf_alternate_training": False,
+        "smartpaf_freeze_bn_during_poly_phase": True,
+        "collapse_guard_enabled": True,
+        "collapse_guard_drop": 10.0,
+        "collapse_guard_patience": 1,
+        "collapse_guard_action": "stop",
+        "collapse_guard_lr_factor": 0.2,
+    }
+
+
+def _replacement_static_scale_kwargs(args: argparse.Namespace, *, alternate_training: bool) -> Dict:
+    kwargs = _replacement_base_kwargs(args)
+    kwargs.update(
+        {
+            "poly4_scale_mode": "static",
+            "poly4_dynamic_scale_eps": 1e-6,
+            "smartpaf_ss_calibrate": True,
+            "smartpaf_ss_batches": args.smartpaf_calibration_batches,
+            "smartpaf_ss_max_samples": 20000,
+            "smartpaf_ss_percentile": 1.0,
+            "smartpaf_ss_margin": 1.0,
+            "smartpaf_alternate_training": alternate_training,
+            "collapse_guard_action": "restore_best_reduce_lr" if alternate_training else "stop",
+        }
+    )
+    if alternate_training:
+        kwargs.update(
+            {
+                "smartpaf_at_cycle_epochs": 2 if args.epochs >= 10 else 1,
+                "smartpaf_at_start_epoch": "auto",
+                "smartpaf_at_initial_phase": "poly",
+                "smartpaf_at_poly_scope": "active",
+                "smartpaf_revalidate_rejected_phase": True,
+                "smartpaf_at_reject_nonimproving_poly": True,
+                "smartpaf_at_accept_min_delta": 0.0,
+                "smartpaf_at_reject_lr_factor": 1.0,
+                "smartpaf_at_reject_before_collapse_guard": True,
+            }
+        )
+    return kwargs
+
+
+def build_training_config(args: argparse.Namespace) -> Dict:
+    training_config = {
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "num_workers": args.num_workers,
+        "save_checkpoints": args.save_freq > 0,
+        "save_freq": args.save_freq,
+        "use_amp": args.use_amp,
+        "val_force_fp32": True,
+        "optimizer_type": "adamw",
+        "weight_decay": args.weight_decay,
+        "scheduler": "cosine",
+        "warmup_epochs": args.warmup_epochs,
+        "warmup_start_factor": 0.05,
+        "min_lr_ratio": 0.01,
+        "grad_clip_max_norm": 1.0,
+        "label_smoothing": args.label_smoothing,
+        "trainer_kwargs": {
+            "collapse_guard_enabled": True,
+            "collapse_guard_drop": 10.0,
+            "collapse_guard_patience": 1,
+            "collapse_guard_action": "stop",
+        },
+    }
+
+    if args.training_preset == "swish_proxy":
+        return training_config
+
+    training_config["poly_weight_decay"] = 0.0
+
+    if args.training_preset == "replacement_autofhe_degree2":
+        training_config["trainer_kwargs"] = _replacement_base_kwargs(args)
+    elif args.training_preset == "replacement_learned_slow_scale":
+        training_config["poly_scale_lr_mult"] = 0.1
+        trainer_kwargs = _replacement_base_kwargs(args)
+        trainer_kwargs.update(
+            {
+                "collapse_guard_action": "restore_best_reduce_lr",
+                "collapse_guard_lr_factor": 0.2,
+            }
+        )
+        training_config["trainer_kwargs"] = trainer_kwargs
+    elif args.training_preset == "replacement_smartpaf":
+        training_config["poly_lr_mult"] = 0.02
+        training_config["trainer_kwargs"] = _replacement_static_scale_kwargs(
+            args,
+            alternate_training=False,
+        )
+    elif args.training_preset == "replacement_smartpaf_at":
+        training_config["poly_lr_mult"] = 0.02
+        training_config["trainer_kwargs"] = _replacement_static_scale_kwargs(
+            args,
+            alternate_training=True,
+        )
+    elif args.training_preset == "replacement_autofhe_pat":
+        trainer_kwargs = _replacement_base_kwargs(args)
+        trainer_kwargs.update(
+            {
+                "poly4_pat_swish_backward": True,
+            }
+        )
+        training_config["trainer_kwargs"] = trainer_kwargs
+    else:
+        raise ValueError(f"Unsupported training preset: {args.training_preset}")
+
+    return training_config
+
+
 def main() -> None:
     args = parse_args()
     dataset_name = normalize_dataset_name(args.dataset)
@@ -212,30 +388,8 @@ def main() -> None:
         json.dump(selected, f, indent=2)
     print(f"Selected {len(selected)} architectures -> {selected_path}")
 
-    training_config = {
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "learning_rate": args.learning_rate,
-        "num_workers": args.num_workers,
-        "save_checkpoints": args.save_freq > 0,
-        "save_freq": args.save_freq,
-        "use_amp": args.use_amp,
-        "val_force_fp32": True,
-        "optimizer_type": "adamw",
-        "weight_decay": args.weight_decay,
-        "scheduler": "cosine",
-        "warmup_epochs": args.warmup_epochs,
-        "warmup_start_factor": 0.05,
-        "min_lr_ratio": 0.01,
-        "grad_clip_max_norm": 1.0,
-        "label_smoothing": args.label_smoothing,
-        "trainer_kwargs": {
-            "collapse_guard_enabled": True,
-            "collapse_guard_drop": 10.0,
-            "collapse_guard_patience": 1,
-            "collapse_guard_action": "stop",
-        },
-    }
+    training_config = build_training_config(args)
+    print(f"Training preset: {args.training_preset}")
     model_configs, arch_map = build_nas_model_configs(
         selected,
         dataset_num_classes=dataset_info["num_classes"],
@@ -281,6 +435,7 @@ def main() -> None:
         "input_size": args.input_size,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
+        "training_preset": args.training_preset,
     }
     with open(result_dir / "run_summary.json", "w", encoding="utf-8") as f:
         json.dump(run_summary, f, indent=2)

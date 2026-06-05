@@ -116,33 +116,34 @@ python train.py --exclude_gpus 0
 
 ### 2.1 两阶段 NAS 搜索与代理短训
 
-当前推荐流程是先做结构搜索，再做有限 replacement mask 筛选：
+当前推荐流程是先做结构搜索，再做有限 replacement mask 筛选。一键入口会按以下顺序执行：
+Phase 1 evolution -> Swish 架构代理短训 -> promoted 架构生成 replacement masks -> `2 -> 10 -> 20` epoch mask 晋级训练。
 
 ```bash
-# Phase 1: 全 Swish、无 selfgated、MBConv1/4 结构搜索
-uv run python nas_evolution/run_evolution.py \
-  --config nas_evolution/evolution_config_swish_mbconv.yaml \
-  --gpus all
-
-# 用 CIFAR-100@224 对 evolution 采样架构做代理短训
-uv run python tools/train_nas_architectures.py \
-  --nas-results nas_results/swish_mbconv_phase1 \
-  --selection top50_middle20_worst20 \
-  --dataset cifar100 \
-  --input-size 224 \
-  --epochs 12 \
+uv run python tools/run_nas_two_stage.py \
+  --run-root results/nas_two_stage_swish_mbconv \
   --gpus all \
   --download
+```
 
-# Phase 2: 对选出的结构生成最多 30 个 replacement masks
-uv run python tools/nas_replacement_planner.py score-sites \
-  --arch nas_results/swish_mbconv_phase1/best_models/rank1_fitness*.json \
-  --output results/rank1_replacement_scores.json
+如果 Phase 1 evolution 已经跑完，可以从已有结果继续：
 
-uv run python tools/nas_replacement_planner.py generate-masks \
-  --arch nas_results/swish_mbconv_phase1/best_models/rank1_fitness*.json \
-  --scores results/rank1_replacement_scores.json \
-  --output-dir configs/nas_replacement_masks/rank1
+```bash
+uv run python tools/run_nas_two_stage.py \
+  --nas-results nas_results/swish_mbconv_phase1 \
+  --run-root results/nas_two_stage_from_existing \
+  --gpus all \
+  --download
+```
+
+Phase 1 的代理短训默认使用 `swish_proxy` preset，不启用 SmartPAF/AutoFHE。replacement mask 训练默认自动选择两个有正向证据的 no-PAT/no-AT preset：2 epoch 筛选用 `replacement_autofhe_degree2`（learned scale + CT + degree2/output_scale0.2 + progressive），10/20 epoch 晋级用 `replacement_learned_slow_scale`（在前者基础上用 `poly_scale_lr_mult=0.1` 控制 scale）。AT/PAT 保留为显式实验选项，不走默认路径。
+
+```bash
+uv run python tools/run_nas_two_stage.py \
+  --nas-results nas_results/swish_mbconv_phase1 \
+  --replacement-training-preset replacement_autofhe_degree2 \
+  --gpus all \
+  --download
 ```
 
 Phase 2 默认只改 body blocks，不改 stem 和第二次降采样。默认候选动作是 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`；第一版不生成 `gated_poly4`。mask 训练建议按 `2 -> 10 -> 20` epoch 晋级：先训练全部 masks 2 epoch，再用 `promoted8` 选前 8 个训 10 epoch，最后用 `promoted3` 训 20 epoch。
