@@ -8,6 +8,16 @@ from torchvision import models
 from .registry import register_model
 
 
+def _replace_relu_with_silu(module: nn.Module) -> nn.Module:
+    """Recursively replace ReLU modules with SiLU/Swish modules."""
+    for name, child in module.named_children():
+        if isinstance(child, nn.ReLU):
+            setattr(module, name, nn.SiLU(inplace=child.inplace))
+        else:
+            _replace_relu_with_silu(child)
+    return module
+
+
 @register_model('resnet18')
 def resnet18(num_classes=100, pretrained=True):
     """
@@ -26,6 +36,28 @@ def resnet18(num_classes=100, pretrained=True):
     in_features = model.fc.in_features
     model.fc = nn.Linear(in_features, num_classes)
     
+    return model
+
+
+@register_model('resnet18_silu')
+def resnet18_silu(num_classes=100, pretrained=True):
+    """
+    创建将所有 ReLU 替换为 SiLU/Swish 的 ResNet18 模型
+
+    Args:
+        num_classes: 类别数量，默认为100
+        pretrained: 是否使用预训练权重，默认为True
+
+    Returns:
+        model: ReLU 全部替换为 SiLU 的 ResNet18模型
+    """
+    model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None)
+    _replace_relu_with_silu(model)
+
+    # 修改最后一层全连接层
+    in_features = model.fc.in_features
+    model.fc = nn.Linear(in_features, num_classes)
+
     return model
 
 
