@@ -72,6 +72,11 @@ class EvolutionCheckpoint:
             'timestamp': datetime.now().isoformat(),
             'population_size': len(population),
             'history_size': len(population.history),
+            'population': {
+                'max_size': population.max_size,
+                'diversity_quota': population.diversity_quota,
+                'latency_baseline': population.latency_baseline,
+            },
             'config': self._serialize_config(config)
         }
 
@@ -137,6 +142,8 @@ class EvolutionCheckpoint:
         print(f"Checkpoint loaded: generation {generation}")
         print(f"  Population size: {len(population)}")
         print(f"  History size: {len(population.history)}")
+        print(f"  Diversity quota: {population.diversity_quota}")
+        print(f"  Latency baseline: {population.latency_baseline}")
         print(f"  Cache size: {len(eval_cache)}")
 
         return generation, population, eval_cache

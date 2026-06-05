@@ -58,7 +58,21 @@ def parse_args():
         '--gpu',
         type=int,
         default=None,
-        help='Override GPU device ID from config'
+        help='Override single GPU device ID from config'
+    )
+
+    parser.add_argument(
+        '--gpus',
+        nargs='+',
+        default=None,
+        help='Override GPU list/range from config, e.g. --gpus all, --gpus 0-7, --gpus 1 2 3'
+    )
+
+    parser.add_argument(
+        '--exclude_gpus',
+        nargs='+',
+        default=None,
+        help='Exclude physical GPU ids, e.g. --exclude_gpus 0 or --exclude_gpus 0,7'
     )
 
     parser.add_argument(
@@ -88,6 +102,9 @@ def parse_args():
 def main():
     """Main entry point"""
     args = parse_args()
+    if args.gpu is not None and args.gpus is not None:
+        print("ERROR: use either --gpu or --gpus, not both")
+        return 1
 
     # Load configuration
     print(f"Loading configuration from: {args.config}")
@@ -101,8 +118,15 @@ def main():
     # Override config with command line arguments
     if args.output_dir:
         config.logging.output_dir = args.output_dir
+    if args.gpus is not None:
+        config.evaluation.gpus = args.gpus
+        config.evaluation.gpu = None
     if args.gpu is not None:
         config.evaluation.gpu = args.gpu
+        if hasattr(config.evaluation, 'gpus'):
+            config.evaluation.gpus = None
+    if args.exclude_gpus is not None:
+        config.evaluation.exclude_gpus = args.exclude_gpus
     if args.population_size:
         config.search.population_size = args.population_size
     if args.num_generations:
@@ -123,7 +147,9 @@ def main():
     print(f"  Generations: {config.search.num_generations}")
     print(f"  Tournament sample size: {config.search.sample_size}")
     print(f"  Output directory: {config.logging.output_dir}")
-    print(f"  GPU: {config.evaluation.gpu}")
+    print(f"  GPU: {getattr(config.evaluation, 'gpu', None)}")
+    print(f"  GPUs: {getattr(config.evaluation, 'gpus', None)}")
+    print(f"  Exclude GPUs: {getattr(config.evaluation, 'exclude_gpus', None)}")
     print(f"  Resolution: {config.evaluation.resolution}")
     print(f"  Batch size: {config.evaluation.batch_size}")
 

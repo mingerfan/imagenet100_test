@@ -280,6 +280,9 @@ class Population:
         """
         data = {
             'max_size': self.max_size,
+            'diversity_quota': self.diversity_quota,
+            'latency_baseline': self.latency_baseline,
+            'next_individual_id': Individual._next_id,
             'individuals': [ind.to_dict() for ind in self.individuals],
             'history': [ind.to_dict() for ind in self.history]
         }
@@ -299,8 +302,20 @@ class Population:
         with open(filepath) as f:
             data = json.load(f)
 
-        population = cls(max_size=data['max_size'])
+        population = cls(
+            max_size=data['max_size'],
+            diversity_quota=data.get('diversity_quota', 0.01),
+            latency_baseline=data.get('latency_baseline', 22334905.50),
+        )
         population.individuals = [Individual.from_dict(d) for d in data['individuals']]
         population.history = [Individual.from_dict(d) for d in data['history']]
+
+        max_id = -1
+        for ind in population.individuals + population.history:
+            max_id = max(max_id, int(ind.id))
+        Individual._next_id = max(
+            int(data.get('next_individual_id', 0)),
+            max_id + 1,
+        )
 
         return population

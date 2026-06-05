@@ -1,5 +1,5 @@
 # CIFAR-10 at ImageNet-style resolution for collapse/stability comparison.
-# Run with: --dataset cifar10 --input_size 224 --gpus 1 2 3
+# Run with: --dataset cifar10 --input_size 224 --gpus all
 
 global:
   num_classes: 10

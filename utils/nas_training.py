@@ -10,6 +10,45 @@ from typing import Dict, List, Optional, Tuple
 import csv
 
 
+CATEGORY_DIRS = {
+    'best': 'best_models',
+    'top': 'best_models',
+    'middle': 'middle_models',
+    'worst': 'worst_models',
+}
+
+MODEL_TRAINING_KEYS = (
+    'epochs',
+    'batch_size',
+    'learning_rate',
+    'num_workers',
+    'prefetch_factor',
+    'save_checkpoints',
+    'save_freq',
+    'use_amp',
+    'val_force_fp32',
+    'optimizer_type',
+    'weight_decay',
+    'poly_weight_decay',
+    'beta_weight_decay',
+    'poly_lr_mult',
+    'poly_scale_lr_mult',
+    'normal_lr_mult',
+    'scheduler',
+    'warmup_epochs',
+    'warmup_start_factor',
+    'min_lr_ratio',
+    'grad_clip_max_norm',
+    'label_smoothing',
+    'resume',
+    'resume_mode',
+)
+
+
+def _fitness_from_arch(data: Dict) -> float:
+    return float(data.get('zen_fitness', data.get('aznas_fitness', 0.0)))
+
+
 def load_nas_architectures(
     nas_result_dir: str,
     categories: Optional[List[str]] = None,
@@ -19,7 +58,7 @@ def load_nas_architectures(
     categories = categories or ['best', 'middle', 'worst']
 
     for category in categories:
-        model_dir = Path(nas_result_dir) / f'{category}_models'
+        model_dir = Path(nas_result_dir) / CATEGORY_DIRS.get(category, f'{category}_models')
         if not model_dir.exists():
             continue
 
@@ -32,7 +71,7 @@ def load_nas_architectures(
                 'arch_id': json_file.stem,
                 'json_path': str(json_file),
                 'scores': data.get('scores', {}) if isinstance(data, dict) else {},
-                'aznas_fitness': data.get('aznas_fitness', 0.0) if isinstance(data, dict) else 0.0,
+                'zen_fitness': _fitness_from_arch(data) if isinstance(data, dict) else 0.0,
                 'generation': data.get('generation', 0) if isinstance(data, dict) else 0,
             })
 
@@ -53,27 +92,25 @@ def build_nas_model_configs(
         name = f"{arch['category']}/{arch['arch_id']}"
         result_dir = os.path.join(result_root, arch['category'], arch['arch_id'])
 
-        model_configs.append({
+        model_config = {
             'name': name,
             'class': 'nas-json',
             'params': {
                 'json_path': arch['json_path'],
                 'num_classes': dataset_num_classes,
             },
-            'epochs': training_config.get('epochs'),
-            'batch_size': training_config.get('batch_size'),
-            'learning_rate': training_config.get('learning_rate'),
-            'num_workers': training_config.get('num_workers'),
-            'save_checkpoints': training_config.get('save_checkpoints', True),
-            'save_freq': training_config.get('save_freq', 10),
-            'use_amp': training_config.get('use_amp', True),
-            'val_force_fp32': training_config.get('val_force_fp32', True),
             'result_dir': result_dir,
             'trainer_kwargs': {
                 'val_batch_stats_path': os.path.join(result_dir, 'val_batch_stats.csv'),
                 'val_batch_stats_anomaly_only': True,
             },
-        })
+        }
+        for key in MODEL_TRAINING_KEYS:
+            if key in training_config and training_config[key] is not None:
+                model_config[key] = training_config[key]
+        if training_config.get('trainer_kwargs'):
+            model_config['trainer_kwargs'].update(training_config['trainer_kwargs'])
+        model_configs.append(model_config)
 
         arch_map[name] = arch
 
@@ -90,7 +127,8 @@ def build_nas_results(details: Dict[str, Dict], arch_map: Dict[str, Dict]) -> Li
         results.append({
             'category': arch['category'],
             'arch_id': arch['arch_id'],
-            'aznas_fitness': arch.get('aznas_fitness', 0.0),
+            'json_path': arch.get('json_path', ''),
+            'zen_fitness': arch.get('zen_fitness', 0.0),
             'scores': arch.get('scores', {}),
             'generation': arch.get('generation', 0),
             'best_val_acc': detail.get('best_acc', 0.0),
@@ -107,9 +145,9 @@ def save_results(results: List[Dict], nas_result_dir: str) -> None:
 
     with open(csv_path, 'w', newline='') as f:
         fieldnames = [
-            'category', 'arch_id', 'aznas_fitness',
-            'expressivity', 'progressivity', 'trainability', 'fhe_latency',
-            'fhe_boot_count', 'fhe_max_depth',
+            'category', 'arch_id', 'json_path', 'zen_fitness',
+            'zen_score', 'synflow_score', 'params', 'flops',
+            'fhe_latency', 'fhe_boot_count', 'fhe_max_depth',
             'generation', 'best_val_acc', 'train_time',
             'final_train_loss', 'final_val_loss'
         ]
@@ -121,10 +159,12 @@ def save_results(results: List[Dict], nas_result_dir: str) -> None:
             writer.writerow({
                 'category': result['category'],
                 'arch_id': result['arch_id'],
-                'aznas_fitness': result['aznas_fitness'],
-                'expressivity': scores.get('expressivity', 0.0),
-                'progressivity': scores.get('progressivity', 0.0),
-                'trainability': scores.get('trainability', 0.0),
+                'json_path': result.get('json_path', ''),
+                'zen_fitness': result['zen_fitness'],
+                'zen_score': scores.get('zen_score', 0.0),
+                'synflow_score': scores.get('synflow_score', ''),
+                'params': scores.get('params', 0),
+                'flops': scores.get('flops', 0.0),
                 'fhe_latency': scores.get('fhe_latency', 0.0),
                 'fhe_boot_count': scores.get('fhe_boot_count', 0),
                 'fhe_max_depth': scores.get('fhe_max_depth', 0),
@@ -133,7 +173,7 @@ def save_results(results: List[Dict], nas_result_dir: str) -> None:
                 'train_time': result['train_time'],
                 'final_train_loss': result['final_train_loss'],
                 'final_val_loss': result['final_val_loss']
-                })
+            })
 
     print(f"\nResults saved to: {csv_path}")
 
@@ -144,7 +184,7 @@ def save_results(results: List[Dict], nas_result_dir: str) -> None:
         'timestamp': datetime.now().isoformat()
     }
 
-    for category in ['best', 'middle', 'worst']:
+    for category in sorted({r['category'] for r in results}):
         cat_results = [r for r in results if r['category'] == category]
         if cat_results:
             summary['by_category'][category] = {

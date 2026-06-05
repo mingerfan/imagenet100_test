@@ -14,6 +14,33 @@ import matplotlib.pyplot as plt
 from typing import Dict, List
 
 
+def get_fitness(arch: Dict) -> float:
+    return float(arch.get('zen_fitness', arch.get('aznas_fitness', 0.0)))
+
+
+def get_score(arch: Dict, key: str, default: float = 0.0) -> float:
+    scores = arch.get('scores', {}) if isinstance(arch, dict) else {}
+    value = scores.get(key, default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def summarize(values: List[float]) -> Dict:
+    if not values:
+        return {'mean': 0.0, 'std': 0.0, 'min': 0.0, 'max': 0.0}
+    finite = [v for v in values if np.isfinite(v)]
+    if not finite:
+        return {'mean': float('nan'), 'std': float('nan'), 'min': float('nan'), 'max': float('nan')}
+    return {
+        'mean': np.mean(finite),
+        'std': np.std(finite),
+        'min': np.min(finite),
+        'max': np.max(finite),
+    }
+
+
 def load_architectures(output_dir: str) -> Dict[str, List[Dict]]:
     """Load all sampled architectures
 
@@ -69,52 +96,23 @@ def compute_statistics(architectures: List[Dict]) -> Dict:
     if not architectures:
         return {}
 
-    # Extract metrics
-    fitness = [a['aznas_fitness'] for a in architectures]
-    expressivity = [a['scores']['expressivity'] for a in architectures]
-    progressivity = [a['scores']['progressivity'] for a in architectures]
-    trainability = [a['scores']['trainability'] for a in architectures]
-    latency = [a['scores']['fhe_latency'] for a in architectures]
-    boot_count = [a['scores']['fhe_boot_count'] for a in architectures]
+    fitness = [get_fitness(a) for a in architectures]
+    zen_score = [get_score(a, 'zen_score', float('-inf')) for a in architectures]
+    synflow = [get_score(a, 'synflow_score', float('nan')) for a in architectures]
+    params = [get_score(a, 'params', 0.0) for a in architectures]
+    flops = [get_score(a, 'flops', 0.0) for a in architectures]
+    latency = [get_score(a, 'fhe_latency', float('inf')) for a in architectures]
+    boot_count = [get_score(a, 'fhe_boot_count', 0.0) for a in architectures]
 
     return {
         'count': len(architectures),
-        'fitness': {
-            'mean': np.mean(fitness),
-            'std': np.std(fitness),
-            'min': np.min(fitness),
-            'max': np.max(fitness)
-        },
-        'expressivity': {
-            'mean': np.mean(expressivity),
-            'std': np.std(expressivity),
-            'min': np.min(expressivity),
-            'max': np.max(expressivity)
-        },
-        'progressivity': {
-            'mean': np.mean(progressivity),
-            'std': np.std(progressivity),
-            'min': np.min(progressivity),
-            'max': np.max(progressivity)
-        },
-        'trainability': {
-            'mean': np.mean(trainability),
-            'std': np.std(trainability),
-            'min': np.min(trainability),
-            'max': np.max(trainability)
-        },
-        'latency': {
-            'mean': np.mean(latency),
-            'std': np.std(latency),
-            'min': np.min(latency),
-            'max': np.max(latency)
-        },
-        'boot_count': {
-            'mean': np.mean(boot_count),
-            'std': np.std(boot_count),
-            'min': np.min(boot_count),
-            'max': np.max(boot_count)
-        }
+        'fitness': summarize(fitness),
+        'zen_score': summarize(zen_score),
+        'synflow_score': summarize(synflow),
+        'params': summarize(params),
+        'flops': summarize(flops),
+        'latency': summarize(latency),
+        'boot_count': summarize(boot_count),
     }
 
 
@@ -138,21 +136,25 @@ def print_statistics(results: Dict[str, List[Dict]]):
         print(f"\n{category.upper()} ARCHITECTURES ({stats['count']} total)")
         print("-" * 80)
 
-        print(f"\nAZ-NAS Fitness:")
+        print(f"\nZen Fitness:")
         print(f"  Mean: {stats['fitness']['mean']:.4f} ± {stats['fitness']['std']:.4f}")
         print(f"  Range: [{stats['fitness']['min']:.4f}, {stats['fitness']['max']:.4f}]")
 
-        print(f"\nExpressivity:")
-        print(f"  Mean: {stats['expressivity']['mean']:.4f} ± {stats['expressivity']['std']:.4f}")
-        print(f"  Range: [{stats['expressivity']['min']:.4f}, {stats['expressivity']['max']:.4f}]")
+        print(f"\nZEN Score:")
+        print(f"  Mean: {stats['zen_score']['mean']:.4f} ± {stats['zen_score']['std']:.4f}")
+        print(f"  Range: [{stats['zen_score']['min']:.4f}, {stats['zen_score']['max']:.4f}]")
 
-        print(f"\nProgressivity:")
-        print(f"  Mean: {stats['progressivity']['mean']:.4f} ± {stats['progressivity']['std']:.4f}")
-        print(f"  Range: [{stats['progressivity']['min']:.4f}, {stats['progressivity']['max']:.4f}]")
+        print(f"\nSynFlow Score:")
+        print(f"  Mean: {stats['synflow_score']['mean']:.4f} ± {stats['synflow_score']['std']:.4f}")
+        print(f"  Range: [{stats['synflow_score']['min']:.4f}, {stats['synflow_score']['max']:.4f}]")
 
-        print(f"\nTrainability:")
-        print(f"  Mean: {stats['trainability']['mean']:.4f} ± {stats['trainability']['std']:.4f}")
-        print(f"  Range: [{stats['trainability']['min']:.4f}, {stats['trainability']['max']:.4f}]")
+        print(f"\nParams:")
+        print(f"  Mean: {stats['params']['mean']/1e6:.2f}M ± {stats['params']['std']/1e6:.2f}M")
+        print(f"  Range: [{stats['params']['min']/1e6:.2f}M, {stats['params']['max']/1e6:.2f}M]")
+
+        print(f"\nFLOPs:")
+        print(f"  Mean: {stats['flops']['mean']/1e6:.2f}M ± {stats['flops']['std']/1e6:.2f}M")
+        print(f"  Range: [{stats['flops']['min']/1e6:.2f}M, {stats['flops']['max']/1e6:.2f}M]")
 
         print(f"\nFHE Latency (ms):")
         print(f"  Mean: {stats['latency']['mean']/1000:.2f} ± {stats['latency']['std']/1000:.2f}")
@@ -175,10 +177,10 @@ def plot_distributions(results: Dict[str, List[Dict]], output_dir: str):
     fig.suptitle('Stratified Sampling: Metric Distributions', fontsize=16, fontweight='bold')
 
     metrics = [
-        ('aznas_fitness', 'AZ-NAS Fitness'),
-        ('expressivity', 'Expressivity'),
-        ('progressivity', 'Progressivity'),
-        ('trainability', 'Trainability'),
+        ('zen_fitness', 'Zen Fitness'),
+        ('zen_score', 'ZEN Score'),
+        ('synflow_score', 'SynFlow Score'),
+        ('params', 'Params (M)', 1e6),
         ('fhe_latency', 'FHE Latency (ms)', 1000),
         ('fhe_boot_count', 'Bootstrap Count')
     ]
@@ -199,10 +201,13 @@ def plot_distributions(results: Dict[str, List[Dict]], output_dir: str):
                 continue
 
             # Extract values
-            if metric_key == 'aznas_fitness':
-                values = [a[metric_key] for a in archs]
+            if metric_key == 'zen_fitness':
+                values = [get_fitness(a) for a in archs]
             else:
-                values = [a['scores'][metric_key] / scale for a in archs]
+                values = [get_score(a, metric_key) / scale for a in archs]
+            values = [v for v in values if np.isfinite(v)]
+            if not values:
+                continue
 
             # Plot
             ax.hist(values, alpha=0.5, label=category, color=colors[category], bins=10)
@@ -230,30 +235,30 @@ def plot_distributions(results: Dict[str, List[Dict]], output_dir: str):
         if not archs:
             continue
 
-        fitness = [a['aznas_fitness'] for a in archs]
-        latency = [a['scores']['fhe_latency'] / 1000 for a in archs]
+        fitness = [get_fitness(a) for a in archs]
+        latency = [get_score(a, 'fhe_latency') / 1000 for a in archs]
 
         ax.scatter(latency, fitness, alpha=0.6, label=category, color=colors[category], s=50)
 
     ax.set_xlabel('FHE Latency (ms)')
-    ax.set_ylabel('AZ-NAS Fitness')
+    ax.set_ylabel('Zen Fitness')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    # Fitness vs Expressivity
+    # Fitness vs ZEN Score
     ax = axes[1]
     for category in ['top', 'middle', 'worst']:
         archs = results[category]
         if not archs:
             continue
 
-        fitness = [a['aznas_fitness'] for a in archs]
-        expressivity = [a['scores']['expressivity'] for a in archs]
+        fitness = [get_fitness(a) for a in archs]
+        zen_score = [get_score(a, 'zen_score') for a in archs]
 
-        ax.scatter(expressivity, fitness, alpha=0.6, label=category, color=colors[category], s=50)
+        ax.scatter(zen_score, fitness, alpha=0.6, label=category, color=colors[category], s=50)
 
-    ax.set_xlabel('Expressivity')
-    ax.set_ylabel('AZ-NAS Fitness')
+    ax.set_xlabel('ZEN Score')
+    ax.set_ylabel('Zen Fitness')
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -278,7 +283,7 @@ def export_for_training(results: Dict[str, List[Dict]], output_dir: str):
             export_data.append({
                 'category': category,
                 'config': arch['config'],
-                'aznas_fitness': arch['aznas_fitness'],
+                'zen_fitness': get_fitness(arch),
                 'scores': arch['scores']
             })
 

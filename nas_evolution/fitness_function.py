@@ -9,7 +9,8 @@ Reference:
 
 FHE Latency Constraints:
 - Hard constraint: Filter out architectures with latency > baseline
-- Soft reward: Give multiplier bonus for low-latency architectures
+- Soft reward: Give multiplier bonus to useful low-latency architectures,
+  while avoiding unlimited reward for models that are likely too small
 """
 
 import numpy as np
@@ -26,7 +27,9 @@ class ZenNASFitnessFunction:
 
     FHE Latency Integration:
     - Hard constraint: architectures with latency > baseline get score = -inf
-    - Soft reward: low latency architectures get bonus multiplier (1.0-1.3x)
+    - Soft reward: moderately low latency architectures get a bonus multiplier;
+      extremely tiny architectures are deliberately penalized relative to the
+      best efficiency band
 
     Formula:
         fitness = zen_score * latency_multiplier
@@ -78,13 +81,18 @@ class ZenNASFitnessFunction:
     def _compute_latency_multipliers(self, latencies: np.ndarray) -> np.ndarray:
         """Compute latency multipliers for fitness scores (soft rewards)
 
-        Lower latency → higher multiplier → better fitness score
+        The multiplier is intentionally non-monotonic. It rewards architectures
+        that reduce FHE latency, but penalizes extremely small models because
+        they often win latency while losing too much accuracy capacity.
 
         Reward tiers (from baseline):
-        - ≤ 40% baseline: 1.30x multiplier
-        - ≤ 50% baseline: 1.25x multiplier
-        - ≤ 60% baseline: 1.20x multiplier
-        - ≤ 70% baseline: 1.15x multiplier
+        - ≤ 10% baseline: 1.10x multiplier
+        - ≤ 20% baseline: 1.20x multiplier
+        - ≤ 30% baseline: 1.40x multiplier
+        - ≤ 40% baseline: 1.35x multiplier
+        - ≤ 50% baseline: 1.30x multiplier
+        - ≤ 60% baseline: 1.25x multiplier
+        - ≤ 70% baseline: 1.20x multiplier
         - ≤ 80% baseline: 1.10x multiplier
         - ≤ 90% baseline: 1.05x multiplier
         - ≤ 100% baseline: 1.00x multiplier (no bonus)

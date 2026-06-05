@@ -10,6 +10,8 @@ Implements the regularized evolution algorithm with:
 import sys
 import os
 import random
+import copy
+import math
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,6 +21,21 @@ from .mutations import MutationOperator
 from .evaluation import FitnessEvaluator
 from .fitness_function import ZenNASFitnessFunction
 from .utils import EvolutionCheckpoint, EvolutionLogger, save_best_architectures, save_sampled_architectures
+
+
+def _namespace_to_dict(value):
+    """Convert SimpleNamespace-style config sections into plain dictionaries."""
+    if hasattr(value, "__dict__"):
+        return {
+            key: _namespace_to_dict(item)
+            for key, item in vars(value).items()
+        }
+    if isinstance(value, dict):
+        return {
+            key: _namespace_to_dict(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 class RegularizedEvolution:
@@ -59,6 +76,9 @@ class RegularizedEvolution:
         stem_downsample = 4
         initial_min_channels = 16
         initial_max_channels = 64
+        allowed_stem_codes = None
+        allowed_second_ds_codes = None
+        allowed_ct_policies = None
         
         if hasattr(config, 'network_config') and config.network_config:
             try:
@@ -66,6 +86,9 @@ class RegularizedEvolution:
                 generator_config = GeneratorConfig.from_yaml(config.network_config)
                 search_space = generator_config.search_space
                 allowed_block_ids = search_space.blocks.allowed_block_ids
+                allowed_stem_codes = search_space.stem.allowed_codes
+                allowed_second_ds_codes = search_space.second_downsample.allowed_codes
+                allowed_ct_policies = search_space.ct_policies.allowed
                 ct_slots = getattr(search_space, 'ct_slots', ct_slots)
                 initial_min_channels = getattr(search_space, 'initial_min_channels', initial_min_channels)
                 initial_max_channels = getattr(search_space, 'initial_max_channels', initial_max_channels)
@@ -75,13 +98,18 @@ class RegularizedEvolution:
             except Exception:
                 pass  # Use defaults
         
+        mutation_probs = _namespace_to_dict(getattr(config, 'mutation_probs', None))
         self.mutator = MutationOperator(
+            mutation_probs=mutation_probs,
             allowed_block_ids=allowed_block_ids,
             ct_slots=ct_slots,
             input_size=input_size,
             stem_downsample=stem_downsample,
             initial_min_channels=initial_min_channels,
             initial_max_channels=initial_max_channels,
+            allowed_stem_codes=allowed_stem_codes,
+            allowed_second_ds_codes=allowed_second_ds_codes,
+            allowed_ct_policies=allowed_ct_policies,
         )
         self.evaluator = FitnessEvaluator(config)
         self.fitness_fn = ZenNASFitnessFunction(latency_baseline=latency_baseline)
@@ -94,6 +122,7 @@ class RegularizedEvolution:
         self.population_size = config.search.population_size
         self.num_generations = config.search.num_generations
         self.sample_size = config.search.sample_size
+        self.mutation_rate = float(getattr(config.search, 'mutation_rate', 1.0))
 
         # Set random seed for reproducibility
         if hasattr(config, 'seed'):
@@ -105,6 +134,8 @@ class RegularizedEvolution:
         print(f"  Population size: {self.population_size}")
         print(f"  Generations: {self.num_generations}")
         print(f"  Tournament sample size: {self.sample_size}")
+        print(f"  Mutation rate: {self.mutation_rate}")
+        print(f"  Mutation probabilities: {self.mutator.probs}")
 
     def run(self, resume_from: str = None):
         """Main evolution loop
@@ -121,6 +152,9 @@ class RegularizedEvolution:
             # Resume from checkpoint
             start_generation, self.population, eval_cache = self.checkpointer.load(resume_from)
             self.evaluator.eval_cache = eval_cache
+            self.fitness_fn.latency_baseline = self.population.latency_baseline
+            self.evaluator.latency_baseline = self.population.latency_baseline
+            self.evaluator.fitness_fn.latency_baseline = self.population.latency_baseline
             self.logger.log_message(f"Resumed from generation {start_generation}")
         else:
             # Initialize population with random architectures
@@ -136,7 +170,10 @@ class RegularizedEvolution:
             parent_config = self._tournament_select()
 
             # Mutation
-            offspring_config = self.mutator.mutate(parent_config)
+            if random.random() < self.mutation_rate:
+                offspring_config = self.mutator.mutate(parent_config)
+            else:
+                offspring_config = copy.deepcopy(parent_config)
 
             # Evaluation
             self.logger.log_message("Evaluating offspring...")
@@ -211,21 +248,21 @@ class RegularizedEvolution:
 
         self.logger.log_message(f"Generating {self.population_size} random architectures...")
 
+        initial_configs = []
         for i in range(self.population_size):
             if (i + 1) % 10 == 0:
-                self.logger.log_message(f"  Progress: {i+1}/{self.population_size}")
+                self.logger.log_message(f"  Generated: {i+1}/{self.population_size}")
 
             # Generate random architecture using configured generator
             network_config = generator.generate_random_config()
+            initial_configs.append(network_config)
 
-            # Evaluate
-            scores = self.evaluator.evaluate(network_config)
+        self.logger.log_message("Evaluating initial population...")
+        evaluated = self.evaluator.evaluate_population(initial_configs)
 
-            # Dummy fitness for initialization (will compute proper fitness later)
-            dummy_fitness = 0.0
-
+        for network_config, (scores, zen_fitness) in zip(initial_configs, evaluated):
             # Add to population
-            self.population.add(network_config, scores, dummy_fitness, generation=0)
+            self.population.add(network_config, scores, zen_fitness, generation=0)
 
         # Now compute proper ZenNAS fitness for entire population
         self._recompute_population_fitness()
@@ -265,6 +302,23 @@ class RegularizedEvolution:
         zen_scores = self.fitness_fn.compute_fitness(candidate_scores)
 
         # Select best
+        if len(candidates) == 0:
+            raise RuntimeError("Tournament selection requested from an empty population")
+
+        if not any(math.isfinite(float(score)) for score in zen_scores):
+            best_individual = min(
+                candidates,
+                key=lambda ind: (
+                    ind.scores.get('fhe_latency', float('inf')),
+                    -ind.scores.get('zen_score', float('-inf')),
+                ),
+            )
+            self.logger.log_message(
+                "Tournament candidates all had invalid fitness; "
+                f"falling back to lowest-latency parent id={best_individual.id}."
+            )
+            return best_individual.config
+
         best_idx = zen_scores.argmax()
         best_individual = candidates[best_idx]
 

@@ -104,11 +104,48 @@ python train.py
 
 ### 2. 指定GPU
 
-使用特定的GPU。项目默认使用 GPU 1/2/3，避开 GPU 0；GPU 0 长时间使用后更容易出现 ECC 问题，需要重置时不参与默认训练。
+默认使用所有 PyTorch 可见 GPU；在 4 卡机器上是 `0 1 2 3`，在 8 卡机器上是 `0 1 2 3 4 5 6 7`。如果某台旧机器需要避开 GPU 0，可以显式指定 `--exclude_gpus 0` 或只选择 `--gpus 1 2 3`。
 
 ```bash
-python train.py --gpus 1 2 3
+python train.py --gpus all
+python train.py --gpus 0-7
+python train.py --exclude_gpus 0
 ```
+
+并行训练是“多个模型/配置并行，各占一张 GPU”，不是单模型 DDP。配置里的 `batch_size` 和 `num_workers` 都是单个 GPU worker 的值；8 个模型并行时总数据加载 worker 数大约是 `8 * num_workers`。
+
+### 2.1 两阶段 NAS 搜索与代理短训
+
+当前推荐流程是先做结构搜索，再做有限 replacement mask 筛选：
+
+```bash
+# Phase 1: 全 Swish、无 selfgated、MBConv1/4 结构搜索
+uv run python nas_evolution/run_evolution.py \
+  --config nas_evolution/evolution_config_swish_mbconv.yaml \
+  --gpus all
+
+# 用 CIFAR-100@224 对 evolution 采样架构做代理短训
+uv run python tools/train_nas_architectures.py \
+  --nas-results nas_results/swish_mbconv_phase1 \
+  --selection top50_middle20_worst20 \
+  --dataset cifar100 \
+  --input-size 224 \
+  --epochs 12 \
+  --gpus all \
+  --download
+
+# Phase 2: 对选出的结构生成最多 30 个 replacement masks
+uv run python tools/nas_replacement_planner.py score-sites \
+  --arch nas_results/swish_mbconv_phase1/best_models/rank1_fitness*.json \
+  --output results/rank1_replacement_scores.json
+
+uv run python tools/nas_replacement_planner.py generate-masks \
+  --arch nas_results/swish_mbconv_phase1/best_models/rank1_fitness*.json \
+  --scores results/rank1_replacement_scores.json \
+  --output-dir configs/nas_replacement_masks/rank1
+```
+
+Phase 2 默认只改 body blocks，不改 stem 和第二次降采样。默认候选动作是 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`；第一版不生成 `gated_poly4`。mask 训练建议按 `2 -> 10 -> 20` epoch 晋级：先训练全部 masks 2 epoch，再用 `promoted8` 选前 8 个训 10 epoch，最后用 `promoted3` 训 20 epoch。
 
 ### 3. 训练特定模型
 
@@ -150,7 +187,8 @@ python train.py --config my_config.yaml
 | `--train_dir` | 训练集目录 | `/home/xuming/Documents/dataset/ImageNet_100/train` |
 | `--val_dir` | 验证集目录 | `/home/xuming/Documents/dataset/ImageNet_100/val` |
 | `--result_dir` | 结果保存目录 | `./results` |
-| `--gpus` | 使用的GPU列表，默认避开GPU 0 | `[1, 2, 3]` |
+| `--gpus` | 使用的GPU列表/范围，支持 `all`、`0-7`、`1,2,3` | `all visible` |
+| `--exclude_gpus` | 按physical GPU ID排除设备 | `None` |
 | `--force` | 强制重新训练 | `False` |
 | `--no_parallel` | 禁用并行训练 | `False` |
 | `--no_cache` | 不使用内存缓存 | `False` |

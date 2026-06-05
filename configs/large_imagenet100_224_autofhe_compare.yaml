@@ -1,6 +1,6 @@
 # ImageNet-100 at 224px for baseline vs AutoFHE stability comparison.
 # Run with:
-#   --dataset imagenet100 --input_size 224 --gpus 1 2 3 --no_memory_fs
+#   --dataset imagenet100 --input_size 224 --gpus all --no_memory_fs
 
 global:
   num_classes: 100

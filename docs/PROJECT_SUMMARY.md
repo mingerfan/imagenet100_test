@@ -99,11 +99,14 @@ uv run python train.py
 ### 选择GPU
 
 ```bash
-# 使用指定的GPU
-python train.py --gpus 0 1
+# 使用所有可见GPU
+python train.py --gpus all
 
-# 只使用GPU 0
-python train.py --gpus 0
+# 8卡设备
+python train.py --gpus 0-7
+
+# 旧机器避开physical GPU 0
+python train.py --exclude_gpus 0
 ```
 
 ### 训练特定模型

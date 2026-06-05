@@ -19,7 +19,15 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 from models import get_model, MODEL_REGISTRY
-from utils import load_config, get_model_configs, set_random_seed
+from utils import (
+    format_gpu_ids_with_physical,
+    format_visible_gpu_mapping,
+    load_config,
+    get_model_configs,
+    parse_gpu_id_list,
+    resolve_gpu_selection,
+    set_random_seed,
+)
 from data import create_dataloaders
 
 
@@ -124,7 +132,23 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--gpus", type=int, nargs="+", default=[0], help="使用的GPU列表"
+        "--gpus",
+        nargs="+",
+        default=None,
+        help="使用的GPU列表/范围，默认使用所有可见GPU",
+    )
+
+    parser.add_argument(
+        "--exclude_gpus",
+        nargs="+",
+        default=None,
+        help="按physical GPU ID排除设备，例如: --exclude_gpus 0",
+    )
+
+    parser.add_argument(
+        "--allow_gpu0",
+        action="store_true",
+        help="兼容旧脚本；当前默认已允许使用physical GPU 0",
     )
 
     parser.add_argument("--batch_size", type=int, default=32, help="验证批次大小")
@@ -296,9 +320,33 @@ def quick_validate(args):
         print("❌ CUDA不可用")
         return False
 
-    device = torch.device(f"cuda:{args.gpus[0]}")
-    props = torch.cuda.get_device_properties(args.gpus[0])
-    print(f"✓ GPU {args.gpus[0]}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
+    try:
+        exclude_device_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        excluded_gpus = parse_gpu_id_list(args.exclude_gpus, device_count=exclude_device_count)
+        gpu_selection = resolve_gpu_selection(
+            args.gpus,
+            excluded_physical_gpus=excluded_gpus,
+        )
+    except ValueError as exc:
+        print(f"❌ GPU参数错误: {exc}")
+        return False
+    if not gpu_selection.selected:
+        print("❌ 没有可用GPU；请调整 --gpus 或 --exclude_gpus")
+        return False
+
+    print(f"  请求GPU: {gpu_selection.requested}")
+    print(
+        "  实际GPU: "
+        f"{format_gpu_ids_with_physical(gpu_selection.selected, gpu_selection.visible_to_physical)}"
+    )
+    if excluded_gpus:
+        print(f"  排除physical GPU: {excluded_gpus}")
+    print(f"  可见GPU映射: {format_visible_gpu_mapping(gpu_selection.visible_to_physical)}")
+
+    selected_gpu = gpu_selection.selected[0]
+    device = torch.device(f"cuda:{selected_gpu}")
+    props = torch.cuda.get_device_properties(selected_gpu)
+    print(f"✓ GPU {selected_gpu}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
 
     # 创建数据加载器
     print("\n[3/5] 创建数据加载器...")

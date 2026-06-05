@@ -17,7 +17,9 @@ network_config: "network_gen/configs/imagenet_224.yaml"
 evaluation:
   resolution: 224                # Input image resolution
   batch_size: 64                 # Batch size for evaluation
-  gpu: 1                         # GPU device ID
+  gpus: all                      # GPU list/range: all, 0-7, or [0, 1, 2, 3]
+  exclude_gpus: []               # Physical GPU IDs to skip on machines with bad cards
+  parallel_evaluations: true     # Parallelize batched evaluations, especially initial population
   use_dataloader: false          # Use random input instead of dataloader
 
 # Fitness Function
