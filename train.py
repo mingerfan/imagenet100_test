@@ -9,7 +9,15 @@ import sys
 from pathlib import Path
 import torch
 from trainers import MultiGPUManager
-from utils import load_config, get_model_configs, get_json_model_configs, set_random_seed
+from utils import (
+    format_gpu_ids_with_physical,
+    format_visible_gpu_mapping,
+    load_config,
+    get_model_configs,
+    get_json_model_configs,
+    resolve_gpu_selection,
+    set_random_seed,
+)
 from models import MODEL_REGISTRY
 from data import get_dataset_info, normalize_dataset_name
 
@@ -59,10 +67,12 @@ def parse_args():
     # GPU设置
     parser.add_argument(
         '--gpus',
-        type=int,
         nargs='+',
-        default=[1, 2, 3],
-        help='使用的GPU设备ID列表，默认避开GPU 0，例如: --gpus 1 2 3'
+        default=None,
+        help=(
+            '使用的GPU设备ID列表/范围，默认使用所有可见GPU并避开physical GPU 0；'
+            '例如: --gpus 1 2 3, --gpus 0-7, --gpus all'
+        )
     )
     parser.add_argument(
         '--allow_gpu0',
@@ -208,16 +218,26 @@ def main():
     print("多模型训练系统")
     print("=" * 60)
 
-    requested_gpus = list(args.gpus or [])
-    if 0 in requested_gpus and not args.allow_gpu0:
-        args.gpus = [gpu for gpu in requested_gpus if gpu != 0]
-        print("⚠ 已过滤 physical GPU 0：该卡存在 memory/ECC 风险；如确需使用请加 --allow_gpu0")
+    try:
+        gpu_selection = resolve_gpu_selection(args.gpus, allow_gpu0=args.allow_gpu0)
+    except ValueError as exc:
+        print(f"❌ GPU参数错误: {exc}")
+        sys.exit(1)
+    args.gpus = gpu_selection.selected
+
+    if gpu_selection.skipped and not args.allow_gpu0:
+        skipped = format_gpu_ids_with_physical(
+            gpu_selection.skipped,
+            gpu_selection.visible_to_physical,
+        )
+        print(f"⚠ 已过滤 physical GPU 0: {skipped}；如确需使用请加 --allow_gpu0")
         if not args.gpus:
-            print("❌ 过滤 GPU0 后没有剩余 GPU。请使用 --gpus 1 2 3 或显式 --allow_gpu0。")
+            print("❌ 过滤 GPU0 后没有剩余 GPU。请指定非 GPU0 的设备，或显式 --allow_gpu0。")
             sys.exit(1)
-    print(f"请求GPU: {requested_gpus}")
-    print(f"实际GPU: {args.gpus}")
-    print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', '<未设置>')}")
+    print(f"请求GPU: {gpu_selection.requested}")
+    print(f"实际GPU: {format_gpu_ids_with_physical(args.gpus, gpu_selection.visible_to_physical)}")
+    print(f"CUDA_VISIBLE_DEVICES: {gpu_selection.cuda_visible_devices}")
+    print(f"可见GPU映射: {format_visible_gpu_mapping(gpu_selection.visible_to_physical)}")
 
     # 设置默认数据路径
     if args.train_dir is None:

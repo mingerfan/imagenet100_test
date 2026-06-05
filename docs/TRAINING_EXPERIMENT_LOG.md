@@ -4626,3 +4626,48 @@ head4/head6/all8 lose several accuracy points, and Hermite all8 produces
 astronomical validation losses despite finite batches. The next experiment
 should not simply replace more Swish activations simultaneously; it should use a
 staged/progressive replacement schedule or stronger coefficient/scale control.
+
+## 2026-06-05 CIFAR-100 Rank10 Continuation From Best Checkpoints
+
+Purpose: continue the requested rank10 control and selected HermitePoly4
+multi-replacement variants from their 40-epoch best checkpoints. The continuation
+used fresh optimizer/scheduler state with `learning_rate: 0.0002` and
+`scheduler: none`; HermitePoly4 variants also reran CT initialization at resume.
+
+Implementation notes:
+
+- Added trusted local checkpoint loading with explicit `weights_only=False` so
+  HermitePoly4 checkpoints containing LazyBatchNorm buffers can be resumed under
+  PyTorch 2.6+.
+- Added `resume_optimizer` and `resume_scheduler` config switches; defaults keep
+  the previous behavior, but these continuation runs reset both.
+- Added continuation configs:
+  - `configs/cifar100_rank10_original_continue_e80.yaml`
+  - `configs/cifar100_rank10_hermite_continue_e80.yaml`
+  - `configs/cifar100_rank10_hermite_head4_continue_e80.yaml`
+  - `configs/cifar100_rank10_hermite_all8_continue_e80.yaml`
+
+Commands:
+
+```bash
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_rank10_original_continue_e80.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 --input_size 32 --no_memory_fs --force > logs/cifar100_rank10_original_continue_e80.log 2>&1; echo $? > logs/cifar100_rank10_original_continue_e80.status' < /dev/null &
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_rank10_hermite_continue_e80.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 3 --input_size 32 --no_memory_fs --force > logs/cifar100_rank10_hermite_continue_e80.log 2>&1; echo $? > logs/cifar100_rank10_hermite_continue_e80.status' < /dev/null &
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_rank10_hermite_head4_continue_e80.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 2 --input_size 32 --no_memory_fs --force > logs/cifar100_rank10_hermite_head4_continue_e80.log 2>&1; echo $? > logs/cifar100_rank10_hermite_head4_continue_e80.status' < /dev/null &
+setsid bash -lc '.venv/bin/python -u train.py --config configs/cifar100_rank10_hermite_all8_continue_e80.yaml --dataset cifar100 --train_dir /home/xuming/Documents/dataset --val_dir /home/xuming/Documents/dataset --result_dir ./results --gpus 3 --input_size 32 --no_memory_fs --force > logs/cifar100_rank10_hermite_all8_continue_e80.log 2>&1; echo $? > logs/cifar100_rank10_hermite_all8_continue_e80.status' < /dev/null &
+```
+
+Result summary at the unexpected shutdown:
+
+| Model | Resume source | Epochs in CSV | Best | Best epoch | Final/current | Notes |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `cifar100-rank10-original-continue-e80-b256` | original e40 best | 80 | 40.80 | 23 | 40.22 | completed; +0.52 over original e40 best |
+| `cifar100-rank10-hermitepoly4-idx5-6-7-continue-e80-b256` | idx5/6/7 e40 best | 80 | 39.95 | 18 | 37.37 | completed; improved early, then overfit/unstable loss |
+| `cifar100-rank10-hermitepoly4-head4-continue-e80-b256` | head4 e40 best | 62 | 37.02 | 20 | 35.15 | partial; interrupted by shutdown |
+| `cifar100-rank10-hermitepoly4-all8-continue-e80-b256` | all8 e40 best | 55 | 36.87 | 22 | 34.20 | partial; interrupted by shutdown, val loss remained huge |
+
+Conclusion: continuing from the best checkpoints helped early validation
+accuracy, especially for Hermite idx5/6/7 and the partial all8 run, but the
+original rank10 control still has the best observed CIFAR-100 accuracy among
+these rank10 variants. The Hermite multi-replacement variants continue to show
+large validation-loss pathologies and accuracy decay after the early improved
+checkpoint.

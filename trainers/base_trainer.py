@@ -17,6 +17,11 @@ from tqdm import tqdm
 from datetime import datetime
 import pathlib
 
+
+def _load_trusted_checkpoint(path, map_location):
+    return torch.load(path, map_location=map_location, weights_only=False)
+
+
 class Trainer:
     """基础训练器类"""
 
@@ -38,6 +43,8 @@ class Trainer:
         poly4_warmup_ratio=0.5,
         resume_path=None,
         resume_strict=True,
+        resume_optimizer=True,
+        resume_scheduler=True,
         gate_reg_lambda=1e-3,
         eps_reg_lambda=0.0,
         poly4_range_lambda=0.0,
@@ -210,6 +217,8 @@ class Trainer:
         self.poly4_warmup_ratio = poly4_warmup_ratio
         self.resume_path = resume_path
         self.resume_strict = resume_strict
+        self.resume_optimizer = bool(resume_optimizer)
+        self.resume_scheduler = bool(resume_scheduler)
         self.gate_reg_lambda = gate_reg_lambda
         self.eps_reg_lambda = eps_reg_lambda
         self.poly4_range_lambda = poly4_range_lambda
@@ -1066,7 +1075,7 @@ class Trainer:
         if self.smartpaf_ds_to_ss_use_best:
             best_path = os.path.join(self.result_dir, 'best_model.pth')
             if os.path.exists(best_path):
-                checkpoint = torch.load(best_path, map_location=self.device)
+                checkpoint = _load_trusted_checkpoint(best_path, map_location=self.device)
                 model_state = checkpoint.get('model_state_dict')
                 if model_state is not None:
                     self.model.load_state_dict(model_state, strict=self.resume_strict)
@@ -1456,22 +1465,26 @@ class Trainer:
         if not os.path.exists(path):
             print(f"Warning: checkpoint not found: {path}")
             return
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = _load_trusted_checkpoint(path, map_location=self.device)
 
         model_state = checkpoint.get('model_state_dict')
         if model_state is not None:
             self.model.load_state_dict(model_state, strict=strict)
 
-        optim_state = checkpoint.get('optimizer_state_dict')
+        optim_state = checkpoint.get('optimizer_state_dict') if self.resume_optimizer else None
         if optim_state is not None and self.optimizer is not None:
             self.optimizer.load_state_dict(optim_state)
 
-        sched_state = checkpoint.get('scheduler_state_dict')
+        sched_state = checkpoint.get('scheduler_state_dict') if self.resume_scheduler else None
         if sched_state is not None and self.scheduler is not None:
             try:
                 self.scheduler.load_state_dict(sched_state)
             except Exception as exc:
                 print(f"Warning: failed to load scheduler state: {exc}")
+        if not self.resume_optimizer:
+            print("Resume: optimizer state reset by config")
+        if not self.resume_scheduler:
+            print("Resume: scheduler state reset by config")
 
         scaler_state = checkpoint.get('scaler_state_dict')
         if scaler_state is not None and self.scaler is not None:
@@ -2085,7 +2098,7 @@ class Trainer:
         if self.bn_recalibrate_use_best:
             best_path = os.path.join(self.result_dir, 'best_model.pth')
             if os.path.exists(best_path):
-                checkpoint = torch.load(best_path, map_location=self.device)
+                checkpoint = _load_trusted_checkpoint(best_path, map_location=self.device)
                 model_state = checkpoint.get('model_state_dict')
                 if model_state is not None:
                     self.model.load_state_dict(model_state, strict=self.resume_strict)
@@ -2202,7 +2215,7 @@ class Trainer:
         restored = False
         best_path = os.path.join(self.result_dir, 'best_model.pth')
         if os.path.exists(best_path):
-            checkpoint = torch.load(best_path, map_location=self.device)
+            checkpoint = _load_trusted_checkpoint(best_path, map_location=self.device)
             model_state = checkpoint.get('model_state_dict')
             if model_state is not None:
                 self.model.load_state_dict(model_state, strict=self.resume_strict)

@@ -10,7 +10,12 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from .base_trainer import Trainer
 from models import get_model
 from data import create_dataloaders
-from utils import set_random_seed
+from utils import (
+    format_gpu_ids_with_physical,
+    format_visible_gpu_mapping,
+    resolve_gpu_selection,
+    set_random_seed,
+)
 from typing import List, Dict, Optional
 import multiprocessing as mp
 import os
@@ -204,7 +209,7 @@ class MultiGPUManager:
         train_dir: str,
         val_dir: str,
         result_dir: str = './results',
-        gpus: List[int] = [1, 2, 3],
+        gpus: Optional[List[int]] = None,
         excluded_gpus: Optional[List[int]] = None,
         num_classes: int = 100,
         default_epochs: int = 60,
@@ -224,7 +229,7 @@ class MultiGPUManager:
             train_dir: 训练集目录
             val_dir: 验证集目录
             result_dir: 结果保存目录
-            gpus: 可用的GPU设备列表，默认使用GPU 1/2/3并避开GPU 0
+            gpus: 可用的PyTorch可见GPU设备列表；None表示所有可见GPU并避开physical GPU 0
             excluded_gpus: 运行时强制排除的GPU列表，默认排除physical GPU 0
             num_classes: 类别数量
             default_epochs: 默认训练epoch数
@@ -241,8 +246,27 @@ class MultiGPUManager:
         self.train_dir = train_dir
         self.val_dir = val_dir
         self.result_dir = result_dir
-        self.gpus = gpus
         self.excluded_gpus = [0] if excluded_gpus is None else list(excluded_gpus)
+        try:
+            gpu_selection = resolve_gpu_selection(
+                gpus,
+                allow_gpu0=0 not in self.excluded_gpus,
+                excluded_physical_gpus=self.excluded_gpus,
+            )
+        except ValueError as exc:
+            raise ValueError(f"Invalid MultiGPUManager gpus={gpus}: {exc}") from exc
+
+        self.gpus = gpu_selection.selected
+        self.visible_to_physical_gpus = gpu_selection.visible_to_physical
+        self.skipped_gpus = gpu_selection.skipped
+        if self.skipped_gpus:
+            print(
+                "⚠ 已按环境约束排除GPU: "
+                f"{format_gpu_ids_with_physical(self.skipped_gpus, self.visible_to_physical_gpus)}"
+            )
+        print(f"请求GPU: {gpu_selection.requested}")
+        print(f"候选GPU: {format_gpu_ids_with_physical(self.gpus, self.visible_to_physical_gpus)}")
+        print(f"可见GPU映射: {format_visible_gpu_mapping(self.visible_to_physical_gpus)}")
         self.num_classes = num_classes
         self.default_epochs = default_epochs
         self.default_batch_size = default_batch_size
@@ -257,7 +281,7 @@ class MultiGPUManager:
             'train_dir': train_dir,
             'val_dir': val_dir,
             'result_dir': result_dir,
-            'gpus': gpus,
+            'gpus': self.gpus,
             'excluded_gpus': self.excluded_gpus,
             'num_classes': num_classes,
             'default_epochs': default_epochs,
@@ -295,16 +319,20 @@ class MultiGPUManager:
         available = []
         excluded = set(self.excluded_gpus or [])
         if excluded:
-            print(f"默认排除GPU: {sorted(excluded)} (physical GPU0/第一张V100存在memory/ECC风险)")
+            print(f"默认排除physical GPU: {sorted(excluded)}")
         for gpu_id in self.gpus:
-            if gpu_id in excluded:
-                print(f"⚠ 跳过 GPU {gpu_id}: 已按环境约束排除")
-                continue
             try:
                 torch.cuda.set_device(gpu_id)
                 props = torch.cuda.get_device_properties(gpu_id)
                 available.append(gpu_id)
-                print(f"✓ GPU {gpu_id}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
+                physical = self.visible_to_physical_gpus.get(gpu_id)
+                physical_suffix = (
+                    "" if physical is None or physical == gpu_id else f" / physical {physical}"
+                )
+                print(
+                    f"✓ GPU {gpu_id}{physical_suffix}: "
+                    f"{props.name} ({props.total_memory / 1024**3:.1f} GB)"
+                )
             except Exception as e:
                 print(f"⚠ GPU {gpu_id} 不可用: {e}")
         
@@ -490,6 +518,8 @@ class MultiGPUManager:
         resume_path = self._resolve_resume_path(model_config, model_result_dir)
         if (model_config.get('resume', False) or model_config.get('resume_path')) and not resume_path:
             print("Resume enabled but no checkpoint found. Starting from scratch.")
+        resume_optimizer = model_config.get('resume_optimizer', True)
+        resume_scheduler = model_config.get('resume_scheduler', True)
         trainer_kwargs = dict(model_config.get('trainer_kwargs', {}) or {})
         for key in (
             'model',
@@ -506,6 +536,8 @@ class MultiGPUManager:
             'save_checkpoints',
             'grad_clip_max_norm',
             'resume_path',
+            'resume_optimizer',
+            'resume_scheduler',
             'val_force_fp32',
             'scheduler',
             'warmup_epochs',
@@ -538,6 +570,8 @@ class MultiGPUManager:
             save_checkpoints=save_checkpoints,
             grad_clip_max_norm=grad_clip_max_norm,
             resume_path=resume_path,
+            resume_optimizer=resume_optimizer,
+            resume_scheduler=resume_scheduler,
             **trainer_kwargs,
         )
         
