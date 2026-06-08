@@ -12,6 +12,7 @@ import os
 import random
 import copy
 import math
+import numpy as np
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -246,28 +247,80 @@ class RegularizedEvolution:
         # Create generator with config
         generator = RandomNetworkGenerator(config=generator_config)
 
-        self.logger.log_message(f"Generating {self.population_size} random architectures...")
+        max_replacement_attempts = int(
+            getattr(self.config.search, "initial_replacement_attempts", self.population_size * 5)
+        )
+        batch_size = int(
+            getattr(self.config.search, "initial_eval_batch_size", self.population_size)
+        )
+        batch_size = max(1, min(batch_size, self.population_size))
+        generated_count = 0
+        invalid_count = 0
 
-        initial_configs = []
-        for i in range(self.population_size):
-            if (i + 1) % 10 == 0:
-                self.logger.log_message(f"  Generated: {i+1}/{self.population_size}")
+        self.logger.log_message(
+            f"Generating initial population until {self.population_size} valid architectures are evaluated..."
+        )
 
-            # Generate random architecture using configured generator
-            network_config = generator.generate_random_config()
-            initial_configs.append(network_config)
+        while len(self.population) < self.population_size:
+            remaining = self.population_size - len(self.population)
+            attempts_left = max_replacement_attempts - generated_count
+            if attempts_left <= 0:
+                raise RuntimeError(
+                    "Could not initialize population with enough valid architectures: "
+                    f"{len(self.population)}/{self.population_size} valid after "
+                    f"{generated_count} generated, {invalid_count} invalid."
+                )
 
-        self.logger.log_message("Evaluating initial population...")
-        evaluated = self.evaluator.evaluate_population(initial_configs)
+            current_batch_size = min(batch_size, remaining, attempts_left)
+            initial_configs = []
+            for _ in range(current_batch_size):
+                generated_count += 1
+                if generated_count % 10 == 0:
+                    self.logger.log_message(
+                        f"  Generated: {generated_count} total, "
+                        f"{len(self.population)}/{self.population_size} valid"
+                    )
+                initial_configs.append(generator.generate_random_config())
 
-        for network_config, (scores, zen_fitness) in zip(initial_configs, evaluated):
-            # Add to population
-            self.population.add(network_config, scores, zen_fitness, generation=0)
+            self.logger.log_message(
+                "Evaluating initial population batch: "
+                f"{len(initial_configs)} candidates "
+                f"({len(self.population)}/{self.population_size} valid so far)..."
+            )
+            evaluated = self.evaluator.evaluate_population(initial_configs)
+
+            for network_config, (scores, zen_fitness) in zip(initial_configs, evaluated):
+                if self._is_evaluation_failure(scores):
+                    invalid_count += 1
+                    reason = scores.get("evaluation_status", "invalid_scores")
+                    self.logger.log_message(
+                        f"  Discarded invalid initial architecture ({reason}); "
+                        "generating a replacement."
+                    )
+                    continue
+
+                self.population.add(network_config, scores, zen_fitness, generation=0)
+
+        if invalid_count:
+            self.logger.log_message(
+                f"Initial population replacements: {invalid_count} invalid candidates discarded."
+            )
 
         # Now compute proper ZenNAS fitness for entire population
         self._recompute_population_fitness()
 
         self.logger.log_message(f"Initial population created: {len(self.population)} architectures")
+
+    def _is_evaluation_failure(self, scores) -> bool:
+        """Return True for failed evaluations, not for valid latency violations."""
+        if not isinstance(scores, dict):
+            return True
+        status = scores.get("evaluation_status", "ok")
+        if status != "ok":
+            return True
+        zen_score = scores.get("zen_score", float("-inf"))
+        fhe_latency = scores.get("fhe_latency", float("inf"))
+        return not (np.isfinite(zen_score) and np.isfinite(fhe_latency))
 
     def _recompute_population_fitness(self):
         """Recompute ZenNAS fitness for entire population

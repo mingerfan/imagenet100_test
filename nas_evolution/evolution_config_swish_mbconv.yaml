@@ -8,14 +8,19 @@ search:
   sample_size: 25
   mutation_rate: 1.0
   diversity_quota: 0.01
+  initial_eval_batch_size: 200
+  initial_replacement_attempts: 1000
 
 network_config: "network_gen/configs/imagenet_224_swish_mbconv.yaml"
 
 evaluation:
   resolution: 224
   batch_size: 64
+  fhe_batch_size: 1
   gpus: all
   exclude_gpus: []
+  max_workers: null
+  task_timeout: 600
   parallel_evaluations: true
   use_dataloader: false
 

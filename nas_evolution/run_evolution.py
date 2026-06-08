@@ -76,6 +76,27 @@ def parse_args():
     )
 
     parser.add_argument(
+        '--max_workers',
+        type=int,
+        default=None,
+        help='Maximum parallel GPU evaluation workers; useful to cap 8-GPU machines'
+    )
+
+    parser.add_argument(
+        '--task_timeout',
+        type=float,
+        default=None,
+        help='Seconds before a single architecture evaluation is marked invalid'
+    )
+
+    parser.add_argument(
+        '--fhe_batch_size',
+        type=int,
+        default=None,
+        help='Batch dimension for FHE shape propagation; independent from ZEN batch size'
+    )
+
+    parser.add_argument(
         '--population_size',
         type=int,
         default=None,
@@ -127,6 +148,12 @@ def main():
             config.evaluation.gpus = None
     if args.exclude_gpus is not None:
         config.evaluation.exclude_gpus = args.exclude_gpus
+    if args.max_workers is not None:
+        config.evaluation.max_workers = args.max_workers
+    if args.task_timeout is not None:
+        config.evaluation.task_timeout = args.task_timeout
+    if args.fhe_batch_size is not None:
+        config.evaluation.fhe_batch_size = args.fhe_batch_size
     if args.population_size:
         config.search.population_size = args.population_size
     if args.num_generations:
@@ -150,8 +177,11 @@ def main():
     print(f"  GPU: {getattr(config.evaluation, 'gpu', None)}")
     print(f"  GPUs: {getattr(config.evaluation, 'gpus', None)}")
     print(f"  Exclude GPUs: {getattr(config.evaluation, 'exclude_gpus', None)}")
+    print(f"  Max workers: {getattr(config.evaluation, 'max_workers', None)}")
+    print(f"  Task timeout: {getattr(config.evaluation, 'task_timeout', None)}")
     print(f"  Resolution: {config.evaluation.resolution}")
     print(f"  Batch size: {config.evaluation.batch_size}")
+    print(f"  FHE batch size: {getattr(config.evaluation, 'fhe_batch_size', 1)}")
 
     if args.resume:
         print(f"\nResuming from checkpoint: {args.resume}")

@@ -345,7 +345,8 @@ def compute_fhe_latency(model: nn.Module, input_shape: Tuple[int, int, int, int]
 
 
 def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=False,
-                       repeat=8, mixup_gamma=1e-2, include_synflow=False):
+                       repeat=8, mixup_gamma=1e-2, include_synflow=False,
+                       fhe_batch_size=1):
     """Compute NAS score using ZenNAS zero-cost proxy and FHE latency
 
     Uses ZEN score as the primary evaluation metric, which has been shown to have
@@ -364,6 +365,9 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
         repeat: Number of repetitions for ZEN score averaging
         mixup_gamma: Mixup coefficient for ZEN score
         include_synflow: Whether to compute SynFlow for sanity checking
+        fhe_batch_size: Batch dimension used only for FHE shape propagation.
+                        FHE latency accounting depends on C/H/W ciphertext
+                        packing, not batch size, so keep this small.
 
     Returns:
         dict with keys:
@@ -409,7 +413,7 @@ def compute_nas_score(model, gpu, trainloader, resolution, batch_size, fp16=Fals
         info['flops'] = float(flops)
 
         # ============ 3. Compute FHE Latency (for constraints) ============
-        fhe_metrics = compute_fhe_latency(eval_model, (batch_size, 3, resolution, resolution))
+        fhe_metrics = compute_fhe_latency(eval_model, (fhe_batch_size, 3, resolution, resolution))
         info.update(fhe_metrics)
 
         # ============ 4. Optional SynFlow Check ============

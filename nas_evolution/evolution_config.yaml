@@ -8,6 +8,8 @@ search:
   sample_size: 25                # Tournament selection sample size
   mutation_rate: 1.0             # Probability of mutation per offspring (always mutate)
   diversity_quota: 0.01          # Minimum fraction to preserve per depth (1% = 2 individuals)
+  initial_eval_batch_size: 200    # Candidate batch size during initial population fill
+  initial_replacement_attempts: 1000  # Max generated candidates to fill initial population
 
 # Network Generation
 # Reuses network_gen constraints for architecture search space
@@ -17,8 +19,11 @@ network_config: "network_gen/configs/imagenet_224.yaml"
 evaluation:
   resolution: 224                # Input image resolution
   batch_size: 64                 # Batch size for evaluation
+  fhe_batch_size: 1              # Batch dimension for FHE shape propagation
   gpus: all                      # GPU list/range: all, 0-7, or [0, 1, 2, 3]
   exclude_gpus: []               # Physical GPU IDs to skip on machines with bad cards
+  max_workers: null              # Cap parallel GPU workers; null means one worker per selected GPU
+  task_timeout: 600              # Mark one stuck architecture invalid after this many seconds
   parallel_evaluations: true     # Parallelize batched evaluations, especially initial population
   use_dataloader: false          # Use random input instead of dataloader
 
