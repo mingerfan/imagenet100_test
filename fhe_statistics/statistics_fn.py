@@ -53,6 +53,8 @@ from .depth_binning import DepthBinner, DepthMetricsCollector
 from .operation_registry import OperationHandlerRegistry
 from .boot_optimizer import BootOptimizer, NodeInfo as BootNodeInfo
 
+ACTIVATION_OP_TYPES = frozenset(ACTIVATION_CONFIGS.keys())
+
 
 def get_script_dir():
     """获取脚本所在目录的绝对路径"""
@@ -179,10 +181,13 @@ class FheInfo:
             "latency": 0,
             "boot_latency": 0,
             "boot_count": 0,
+            "depth_delta": 0,
         })
         self.total_boot_count = 0
         self.total_boot_latency = 0
         self.total_latency = 0
+        self.total_depth_delta = 0
+        self.activation_depth_delta = 0
 
     def get_in_depth(self, node: Node) -> int:
         inputs = node.all_input_nodes
@@ -282,6 +287,9 @@ class FheInfo:
             node_meta.mul_both * self.mul_double_cost +
             node_meta.rescale * self.rescale_cost
         )
+
+    def _is_activation_op(self, op_type: str) -> bool:
+        return op_type in ACTIVATION_OP_TYPES
 
     def _finalize_node(self, node: Node, node_meta: NodeMeta, op_type: str, is_fused: bool = False):
         """完成节点处理：计算boot、延迟、记录"""
@@ -698,12 +706,15 @@ class FheInfo:
         self.total_boot_count = 0
         self.total_boot_latency = 0
         self.total_latency = 0
+        self.total_depth_delta = 0
+        self.activation_depth_delta = 0
 
         for node, meta in self.node_meta_list.items():
             if meta.is_fused:
                 continue  # 跳过fused算子
 
             op_type = meta.op_type
+            depth_delta = max(0, meta.out_depth - meta.in_depth)
             self.op_stats[op_type]["count"] += 1
             self.op_stats[op_type]["rotation"] += meta.rotation
             self.op_stats[op_type]["mul_single"] += meta.mul_single
@@ -712,10 +723,27 @@ class FheInfo:
             self.op_stats[op_type]["latency"] += meta.latency
             self.op_stats[op_type]["boot_latency"] += meta.boot_latency
             self.op_stats[op_type]["boot_count"] += meta.boot_count
+            self.op_stats[op_type]["depth_delta"] += depth_delta
 
             self.total_boot_count += meta.boot_count
             self.total_boot_latency += meta.boot_latency
             self.total_latency += meta.latency
+            self.total_depth_delta += depth_delta
+
+            if self._is_activation_op(op_type):
+                self.activation_depth_delta += depth_delta
+
+    def get_activation_depth_summary(self) -> Dict[str, float]:
+        """获取激活函数深度开销汇总及占比。"""
+        activation_depth_pct = (
+            self.activation_depth_delta / self.total_depth_delta * 100
+            if self.total_depth_delta > 0 else 0.0
+        )
+        return {
+            "total_depth_delta": float(self.total_depth_delta),
+            "activation_depth_delta": float(self.activation_depth_delta),
+            "activation_depth_pct": float(activation_depth_pct),
+        }
 
     # ========== 输出与可视化 ==========
 
@@ -752,9 +780,19 @@ class FheInfo:
         boot_pct = self.total_boot_latency / total_with_boot * 100 if total_with_boot > 0 else 0
         lines.append(f"{'Boot (Total)':<20} {self.total_boot_count:>8} {'-':>12} {'-':>12} {'-':>12} {'-':>16} {self.total_boot_latency:>16.2f} {boot_pct:>8.2f}")
 
+        depth_summary = self.get_activation_depth_summary()
         lines.append("=" * 110)
         lines.append(f"Total Latency (without boot): {self.total_latency:.2f}")
         lines.append(f"Total Boot Latency: {self.total_boot_latency:.2f}")
+        lines.append(
+            f"Total Depth Cost (sum of op depth deltas): "
+            f"{int(depth_summary['total_depth_delta'])}"
+        )
+        lines.append(
+            f"Activation Depth Cost: {int(depth_summary['activation_depth_delta'])} / "
+            f"{int(depth_summary['total_depth_delta'])} "
+            f"({depth_summary['activation_depth_pct']:.2f}% of depth cost)"
+        )
         lines.append(f"Total Latency (with boot): {total_with_boot:.2f}")
         lines.append(f"Max Depth: {max(m.out_depth for m in self.node_meta_list.values())}")
         lines.append("=" * 110)
@@ -854,6 +892,16 @@ class FheInfo:
         lines.append("=" * 130)
         lines.append(f"Total Operation Latency (without boot): {total_latency:.2f}")
         lines.append(f"Total Boot Latency: {total_boot:.2f}")
+        depth_summary = self.get_activation_depth_summary()
+        lines.append(
+            f"Total Depth Cost (sum of op depth deltas): "
+            f"{int(depth_summary['total_depth_delta'])}"
+        )
+        lines.append(
+            f"Activation Depth Cost: {int(depth_summary['activation_depth_delta'])} / "
+            f"{int(depth_summary['total_depth_delta'])} "
+            f"({depth_summary['activation_depth_pct']:.2f}% of depth cost)"
+        )
         lines.append(f"Total Latency (with boot): {total_latency + total_boot:.2f}")
         lines.append("=" * 130)
 
