@@ -200,6 +200,24 @@ def parse_args():
         default=0 if os.name == 'nt' else 16,
         help='数据加载worker数量'
     )
+    parser.add_argument(
+        '--prefetch_factor',
+        type=int,
+        default=4,
+        help='每个DataLoader worker预取batch数'
+    )
+    parser.add_argument(
+        '--max_parallel_workers',
+        type=int,
+        default=None,
+        help='限制并行模型训练进程数；默认等于可用GPU数'
+    )
+    parser.add_argument(
+        '--worker_result_timeout',
+        type=float,
+        default=60.0,
+        help='等待worker结果的诊断间隔秒数'
+    )
     
     parser.add_argument(
         '--seed',
@@ -214,7 +232,7 @@ def parse_args():
 def main():
     """主函数"""
     args = parse_args()
-    set_random_seed(args.seed)
+    set_random_seed(args.seed, seed_cuda=False)
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
 
@@ -372,11 +390,14 @@ def main():
         excluded_gpus=excluded_gpus,
         num_classes=args.num_classes,
         default_num_workers=args.num_workers,
+        default_prefetch_factor=args.prefetch_factor,
         use_memory_fs=args.use_memory_fs,
         dataset=dataset_name,
         download=args.download,
         input_size=args.input_size,
-        seed=args.seed
+        seed=args.seed,
+        max_parallel_workers=args.max_parallel_workers,
+        worker_result_timeout=args.worker_result_timeout,
     )
     
     # 训练模型

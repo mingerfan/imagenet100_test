@@ -73,6 +73,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=7e-4)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=4,
+        help="DataLoader prefetch factor per train/val loader worker.",
+    )
+    parser.add_argument(
+        "--max-parallel-workers",
+        type=int,
+        default=None,
+        help="Cap process workers for multi-GPU model-parallel training.",
+    )
+    parser.add_argument(
+        "--worker-result-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds between worker result checks before liveness diagnostics.",
+    )
     parser.add_argument("--save-freq", type=int, default=0)
     parser.add_argument("--use-amp", action="store_true", default=False)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -294,6 +312,7 @@ def build_training_config(args: argparse.Namespace) -> Dict:
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "num_workers": args.num_workers,
+        "prefetch_factor": args.prefetch_factor,
         "save_checkpoints": args.save_freq > 0,
         "save_freq": args.save_freq,
         "use_amp": args.use_amp,
@@ -409,11 +428,14 @@ def main() -> None:
         default_batch_size=args.batch_size,
         default_lr=args.learning_rate,
         default_num_workers=args.num_workers,
+        default_prefetch_factor=args.prefetch_factor,
         use_memory_fs=dataset_info["type"] == "imagefolder",
         dataset=dataset_name,
         download=args.download,
         input_size=args.input_size,
         seed=args.seed,
+        max_parallel_workers=args.max_parallel_workers,
+        worker_result_timeout=args.worker_result_timeout,
     )
     train_results = manager.train_models(
         model_configs=model_configs,
@@ -435,6 +457,7 @@ def main() -> None:
         "input_size": args.input_size,
         "epochs": args.epochs,
         "batch_size": args.batch_size,
+        "prefetch_factor": args.prefetch_factor,
         "training_preset": args.training_preset,
     }
     with open(result_dir / "run_summary.json", "w", encoding="utf-8") as f:

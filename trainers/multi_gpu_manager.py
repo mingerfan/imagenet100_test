@@ -19,6 +19,8 @@ from utils import (
 from typing import List, Dict, Optional
 import multiprocessing as mp
 import os
+import queue
+import time
 
 
 def _model_has_module_class(model, class_name):
@@ -182,8 +184,16 @@ def create_lr_scheduler(optimizer, model_config, default_lr, epochs):
 
 def _process_worker(manager_kwargs, task_queue, result_queue, gpu_id, force, return_details):
     """Process-isolated worker to avoid CUDA/DataLoader hangs from Python threads."""
-    manager = MultiGPUManager(**manager_kwargs)
+    worker_kwargs = dict(manager_kwargs)
+    worker_kwargs['gpus'] = [gpu_id] if gpu_id is not None else []
+    worker_kwargs['excluded_gpus'] = []
+    worker_kwargs['check_gpus'] = False
+    worker_kwargs['seed_cuda_device'] = gpu_id
+    manager = MultiGPUManager(**worker_kwargs)
     manager.available_gpus = [gpu_id] if gpu_id is not None else []
+    if gpu_id is not None and torch.cuda.is_available():
+        torch.cuda.set_device(gpu_id)
+
     while True:
         model_config = task_queue.get()
         if model_config is None:
@@ -199,6 +209,17 @@ def _process_worker(manager_kwargs, task_queue, result_queue, gpu_id, force, ret
             result_queue.put(('success', model_name, detail))
         except Exception as exc:
             result_queue.put(('failed', model_name, str(exc)))
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes, sec = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m{sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m{sec:02d}s"
 
 
 class MultiGPUManager:
@@ -220,7 +241,12 @@ class MultiGPUManager:
         dataset: str = "imagenet100",
         download: bool = False,
         input_size: Optional[int] = None,
-        seed: Optional[int] = 42
+        seed: Optional[int] = 42,
+        default_prefetch_factor: int = 4,
+        check_gpus: bool = True,
+        seed_cuda_device: Optional[int] = None,
+        max_parallel_workers: Optional[int] = None,
+        worker_result_timeout: float = 60.0,
     ):
         """
         初始化多GPU管理器
@@ -276,6 +302,11 @@ class MultiGPUManager:
         self.download = download
         self.input_size = input_size
         self.seed = seed
+        self.default_prefetch_factor = int(default_prefetch_factor)
+        self.check_gpus = check_gpus
+        self.seed_cuda_device = seed_cuda_device
+        self.max_parallel_workers = max_parallel_workers
+        self.worker_result_timeout = float(worker_result_timeout)
         self._init_kwargs = {
             'train_dir': train_dir,
             'val_dir': val_dir,
@@ -292,16 +323,25 @@ class MultiGPUManager:
             'download': download,
             'input_size': input_size,
             'seed': seed,
+            'default_prefetch_factor': default_prefetch_factor,
+            'check_gpus': check_gpus,
+            'seed_cuda_device': seed_cuda_device,
+            'max_parallel_workers': max_parallel_workers,
+            'worker_result_timeout': worker_result_timeout,
         }
 
-        set_random_seed(self.seed)
+        set_random_seed(
+            self.seed,
+            cuda_device=self.seed_cuda_device,
+            seed_cuda=self.seed_cuda_device is not None,
+        )
 
         # 创建结果目录
         import os
         os.makedirs(result_dir, exist_ok=True)
         
         # 检查GPU可用性
-        self.available_gpus = self._check_available_gpus()
+        self.available_gpus = self._check_available_gpus() if self.check_gpus else list(self.gpus)
         print(f"可用GPU: {self.available_gpus}")
     
     def _check_available_gpus(self) -> List[int]:
@@ -437,11 +477,16 @@ class MultiGPUManager:
         
         # 设置设备
         device = torch.device(f'cuda:{gpu_id}' if gpu_id is not None else 'cpu')
+        set_random_seed(
+            self.seed,
+            cuda_device=gpu_id if gpu_id is not None else None,
+            seed_cuda=gpu_id is not None,
+        )
         
         # 创建数据加载器
         batch_size = model_config.get('batch_size', self.default_batch_size)
         num_workers = model_config.get('num_workers', self.default_num_workers)
-        prefetch_factor = model_config.get('prefetch_factor', 4)
+        prefetch_factor = model_config.get('prefetch_factor', self.default_prefetch_factor)
         
         # 每个GPU进程创建独立的DataLoader实例
         # 如果启用use_memory_fs，所有进程都会从同一个内存文件系统路径读取数据
@@ -640,7 +685,28 @@ class MultiGPUManager:
                     results['failed'][model_name] = str(e)
         elif parallel and len(self.available_gpus) > 1:
             # 进程级并行训练：避免多线程共享 CUDA context / DataLoader 导致卡住
-            print(f"\n并行训练模式，使用 {len(self.available_gpus)} 个GPU（process workers）")
+            worker_gpus = list(self.available_gpus)
+            if self.max_parallel_workers is not None:
+                worker_gpus = worker_gpus[:max(1, int(self.max_parallel_workers))]
+            worker_count = min(len(worker_gpus), len(model_configs))
+            model_loader_workers = []
+            model_prefetch = []
+            for config in model_configs[:worker_count]:
+                num_workers = int(config.get('num_workers', self.default_num_workers))
+                prefetch_factor = int(config.get('prefetch_factor', self.default_prefetch_factor))
+                model_loader_workers.append(num_workers)
+                model_prefetch.append(prefetch_factor)
+            max_loader_workers = max(model_loader_workers or [int(self.default_num_workers)])
+            max_prefetch = max(model_prefetch or [int(self.default_prefetch_factor)])
+            total_loader_processes = worker_count * max_loader_workers * 2
+            total_prefetch_batches = worker_count * max_loader_workers * max_prefetch * 2
+            print(f"\n并行训练模式，使用 {worker_count} 个GPU（process workers）")
+            print(
+                f"每个worker batch_size={self.default_batch_size}, "
+                f"num_workers≤{max_loader_workers}, prefetch_factor≤{max_prefetch}; "
+                f"总DataLoader进程≈{total_loader_processes}, "
+                f"预取batch≈{total_prefetch_batches}"
+            )
 
             try:
                 ctx = mp.get_context('spawn')
@@ -652,12 +718,11 @@ class MultiGPUManager:
             for model_config in model_configs:
                 task_queue.put(model_config)
 
-            worker_count = min(len(self.available_gpus), len(model_configs))
             for _ in range(worker_count):
                 task_queue.put(None)
 
             processes = []
-            for i, gpu_id in enumerate(self.available_gpus[:worker_count]):
+            for gpu_id in worker_gpus[:worker_count]:
                 process = ctx.Process(
                     target=_process_worker,
                     args=(self._init_kwargs, task_queue, result_queue, gpu_id, force, return_details),
@@ -666,21 +731,87 @@ class MultiGPUManager:
                 process.start()
                 processes.append(process)
 
+            start_time = time.perf_counter()
             received = 0
-            while received < len(model_configs):
-                status, model_name, value = result_queue.get()
-                received += 1
-                if status == 'success':
-                    if value is not None:
-                        if return_details:
-                            results['success'][model_name] = value['best_acc']
-                            results['details'][model_name] = value
+            completed_names = set()
+
+            def _print_progress(final: bool = False):
+                elapsed = time.perf_counter() - start_time
+                rate = received / elapsed if elapsed > 0 else 0.0
+                remaining = max(0, len(model_configs) - received)
+                eta = remaining / rate if rate > 0 else 0.0
+                avg = elapsed / received if received > 0 else 0.0
+                line = (
+                    f"[{received}/{len(model_configs)}] done | "
+                    f"elapsed: {_format_duration(elapsed)} | "
+                    f"ETA: {_format_duration(eta)} | "
+                    f"{remaining} remaining | "
+                    f"{rate:.2f} model/s | "
+                    f"avg: {avg:.1f}s/model"
+                )
+                print("\r" + line, end="\n" if final else "", flush=True)
+
+            def _failed_workers():
+                return [
+                    (process.name, int(process.exitcode))
+                    for process in processes
+                    if process.exitcode not in (None, 0)
+                ]
+
+            try:
+                while received < len(model_configs):
+                    try:
+                        status, model_name, value = result_queue.get(
+                            timeout=self.worker_result_timeout
+                        )
+                    except queue.Empty as exc:
+                        failed = _failed_workers()
+                        if failed:
+                            unfinished = [
+                                config['name']
+                                for config in model_configs
+                                if config['name'] not in completed_names
+                            ]
+                            raise RuntimeError(
+                                "Training worker failed before returning all results: "
+                                f"{failed}. Unfinished models: {unfinished[:20]}"
+                            ) from exc
+                        if not any(process.is_alive() for process in processes):
+                            unfinished = [
+                                config['name']
+                                for config in model_configs
+                                if config['name'] not in completed_names
+                            ]
+                            raise RuntimeError(
+                                "All training workers exited before returning all results. "
+                                f"Unfinished models: {unfinished[:20]}"
+                            ) from exc
+                        _print_progress()
+                        continue
+
+                    completed_names.add(model_name)
+                    received += 1
+                    if status == 'success':
+                        if value is not None:
+                            if return_details:
+                                results['success'][model_name] = value['best_acc']
+                                results['details'][model_name] = value
+                            else:
+                                results['success'][model_name] = value
                         else:
-                            results['success'][model_name] = value
-                    else:
-                        results['skipped'][model_name] = '已训练'
-                elif status == 'failed':
-                    results['failed'][model_name] = value
+                            results['skipped'][model_name] = '已训练'
+                    elif status == 'failed':
+                        results['failed'][model_name] = value
+                    _print_progress()
+            except Exception:
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                for process in processes:
+                    process.join(timeout=10)
+                raise
+            finally:
+                _print_progress(final=True)
 
             for process in processes:
                 process.join(timeout=30)

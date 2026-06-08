@@ -58,6 +58,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase1-batch-size", type=int, default=128)
     parser.add_argument("--phase1-learning-rate", type=float, default=7e-4)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--prefetch-factor", type=int, default=4)
+    parser.add_argument("--max-parallel-workers", type=int, default=None)
+    parser.add_argument("--worker-result-timeout", type=float, default=60.0)
 
     parser.add_argument(
         "--replacement-source",
@@ -83,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replacement-batch-size", type=int, default=None)
     parser.add_argument("--replacement-learning-rate", type=float, default=None)
     parser.add_argument("--replacement-num-workers", type=int, default=None)
+    parser.add_argument("--replacement-prefetch-factor", type=int, default=None)
     parser.add_argument(
         "--replacement-training-preset",
         choices=(
@@ -166,12 +170,18 @@ def run_phase1_proxy_train(args: argparse.Namespace, evolution_dir: Path, result
         str(args.phase1_learning_rate),
         "--num-workers",
         str(args.num_workers),
+        "--prefetch-factor",
+        str(args.prefetch_factor),
+        "--worker-result-timeout",
+        str(args.worker_result_timeout),
         "--result-dir",
         str(result_dir),
         "--training-preset",
         "swish_proxy",
     ]
     add_common_train_args(cmd, args)
+    if args.max_parallel_workers is not None:
+        cmd.extend(["--max-parallel-workers", str(args.max_parallel_workers)])
     run_command(cmd, dry_run=args.dry_run)
     return result_dir / "training_results.csv"
 
@@ -355,6 +365,10 @@ def run_replacement_training(
             str(args.replacement_learning_rate or args.phase1_learning_rate),
             "--num-workers",
             str(args.replacement_num_workers or args.num_workers),
+            "--prefetch-factor",
+            str(args.replacement_prefetch_factor or args.prefetch_factor),
+            "--worker-result-timeout",
+            str(args.worker_result_timeout),
             "--result-dir",
             str(result_dir),
             "--training-preset",
@@ -372,6 +386,8 @@ def run_replacement_training(
             promote_n = args.promotion_counts[round_idx - 1]
             cmd.extend(["--selection", f"promoted{promote_n}", "--training-results", str(previous_csv)])
         add_common_train_args(cmd, args)
+        if args.max_parallel_workers is not None:
+            cmd.extend(["--max-parallel-workers", str(args.max_parallel_workers)])
         run_command(cmd, dry_run=args.dry_run)
         previous_csv = result_dir / "training_results.csv"
         csv_paths.append(previous_csv)

@@ -15,7 +15,12 @@ except Exception:  # pragma: no cover - optional dependency
     np = None
 
 
-def set_random_seed(seed: Optional[int]) -> None:
+def set_random_seed(
+    seed: Optional[int],
+    *,
+    cuda_device: Optional[int] = None,
+    seed_cuda: bool = True,
+) -> None:
     """Set random seeds for Python, NumPy, and PyTorch."""
     if seed is None:
         return
@@ -23,6 +28,12 @@ def set_random_seed(seed: Optional[int]) -> None:
     random.seed(seed)
     if np is not None:
         np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
+    # Seed the CPU generator without implicitly touching every CUDA device.
+    torch.default_generator.manual_seed(seed)
+    if seed_cuda and torch.cuda.is_available():
+        if cuda_device is None:
+            torch.cuda.manual_seed_all(seed)
+        else:
+            with torch.cuda.device(cuda_device):
+                torch.cuda.manual_seed(seed)
