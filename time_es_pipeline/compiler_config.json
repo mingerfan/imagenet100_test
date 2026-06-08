@@ -20,7 +20,7 @@
   "max_chess": 2,
   "relin_key" : 1,
   "rot_key" : 0,
-  "mode": 1,
+  "mode": 0,
   "statistic": 0,
   "json_map_path": "build/map.json",
   "latencyTable" : {
