@@ -47,7 +47,14 @@ SELF_GATED_TO_PLAIN_BLOCK = {
     21: 17,
 }
 
-POLY_OVERRIDES = {"poly4", "poly4_herpn", "hermitepoly4", "stablepoly4"}
+POLY_OVERRIDES = {
+    "poly4",
+    "poly4_herpn",
+    "hermitepoly4",
+    "stablepoly4",
+    "swish_herpn",
+    "swishherpn",
+}
 
 VARIANT_KINDS = (
     "source",
