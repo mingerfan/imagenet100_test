@@ -148,6 +148,8 @@ def save_results(results: List[Dict], nas_result_dir: str) -> None:
             'category', 'arch_id', 'json_path', 'zen_fitness',
             'zen_score', 'synflow_score', 'params', 'flops',
             'fhe_latency', 'fhe_boot_count', 'fhe_max_depth',
+            'source_fhe_latency', 'fhe_latency_ratio',
+            'fhe_latency_delta', 'fhe_latency_reduction_pct',
             'generation', 'best_val_acc', 'train_time',
             'final_train_loss', 'final_val_loss'
         ]
@@ -168,6 +170,10 @@ def save_results(results: List[Dict], nas_result_dir: str) -> None:
                 'fhe_latency': scores.get('fhe_latency', 0.0),
                 'fhe_boot_count': scores.get('fhe_boot_count', 0),
                 'fhe_max_depth': scores.get('fhe_max_depth', 0),
+                'source_fhe_latency': scores.get('source_fhe_latency', ''),
+                'fhe_latency_ratio': scores.get('fhe_latency_ratio', ''),
+                'fhe_latency_delta': scores.get('fhe_latency_delta', ''),
+                'fhe_latency_reduction_pct': scores.get('fhe_latency_reduction_pct', ''),
                 'generation': result['generation'],
                 'best_val_acc': result['best_val_acc'],
                 'train_time': result['train_time'],

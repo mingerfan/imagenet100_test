@@ -52,7 +52,14 @@ def parse_args() -> argparse.Namespace:
     score.add_argument("--include-second-downsample", action="store_true", help="Reserved; body-only by default.")
     score.add_argument("--recompute-fhe", action="store_true")
     score.add_argument("--input-size", type=int, default=224)
-    score.add_argument("--batch-size", type=int, default=64)
+    score.add_argument(
+        "--batch-size",
+        "--fhe-batch-size",
+        dest="fhe_batch_size",
+        type=int,
+        default=1,
+        help="Batch dimension used only for FHE shape propagation.",
+    )
 
     masks = subparsers.add_parser("generate-masks", help="Generate bounded replacement JSON masks.")
     add_common_arch_args(masks)
@@ -64,7 +71,19 @@ def parse_args() -> argparse.Namespace:
     masks.add_argument("--actions", nargs="+", default=list(ACTION_DEFAULTS))
     masks.add_argument("--recompute-fhe", action="store_true")
     masks.add_argument("--input-size", type=int, default=224)
-    masks.add_argument("--batch-size", type=int, default=64)
+    masks.add_argument(
+        "--batch-size",
+        "--fhe-batch-size",
+        dest="fhe_batch_size",
+        type=int,
+        default=1,
+        help="Batch dimension used only for FHE shape propagation.",
+    )
+    masks.add_argument(
+        "--skip-mask-latency",
+        action="store_true",
+        help="Do not recompute FHE latency for generated replacement masks.",
+    )
     return parser.parse_args()
 
 
@@ -196,12 +215,45 @@ def build_model_from_config(config: Dict):
     return create_network(NetworkConfig.from_dict(config))
 
 
-def compute_latency(config: Dict, input_size: int, batch_size: int) -> float:
-    from network_evaluate.zero_cost_proxy import compute_fhe_latency
+def compute_latency_metrics(config: Dict, input_size: int, fhe_batch_size: int) -> Dict:
+    from network_evaluate.zero_cost_proxy import compute_fhe_latency, compute_flops
 
     model = build_model_from_config(config)
-    metrics = compute_fhe_latency(model, (batch_size, 3, input_size, input_size))
+    metrics = compute_fhe_latency(model, (fhe_batch_size, 3, input_size, input_size))
+    output = dict(metrics)
+    output["params"] = int(sum(param.numel() for param in model.parameters()))
+    output["flops"] = float(compute_flops(model, input_size))
+    return output
+
+
+def compute_latency(config: Dict, input_size: int, fhe_batch_size: int) -> float:
+    metrics = compute_latency_metrics(config, input_size, fhe_batch_size)
     return float(metrics.get("fhe_latency", float("inf")))
+
+
+def latency_delta_metrics(baseline_latency: float, variant_latency: float) -> Dict:
+    output = {
+        "source_fhe_latency": baseline_latency,
+        "fhe_latency_ratio": float("nan"),
+        "fhe_latency_delta": float("nan"),
+        "fhe_latency_reduction_pct": float("nan"),
+    }
+    if (
+        math.isfinite(baseline_latency)
+        and baseline_latency > 0
+        and math.isfinite(variant_latency)
+    ):
+        delta = variant_latency - baseline_latency
+        output.update(
+            {
+                "fhe_latency_ratio": variant_latency / baseline_latency,
+                "fhe_latency_delta": delta,
+                "fhe_latency_reduction_pct": (baseline_latency - variant_latency)
+                / baseline_latency
+                * 100.0,
+            }
+        )
+    return output
 
 
 def recomputed_score(
@@ -210,10 +262,10 @@ def recomputed_score(
     action: str,
     baseline_latency: float,
     input_size: int,
-    batch_size: int,
+    fhe_batch_size: int,
 ) -> Dict:
     variant_config = apply_action(config, site["block_index"], action)
-    latency = compute_latency(variant_config, input_size, batch_size)
+    latency = compute_latency(variant_config, input_size, fhe_batch_size)
     if math.isfinite(baseline_latency) and baseline_latency > 0 and math.isfinite(latency):
         actual_gain = (baseline_latency - latency) / baseline_latency
     else:
@@ -246,7 +298,7 @@ def score_sites(args: argparse.Namespace) -> Dict:
     baseline_scores = wrapper.get("scores", {}) if isinstance(wrapper.get("scores"), dict) else {}
     baseline_latency = float(baseline_scores.get("fhe_latency", float("nan")))
     if args.recompute_fhe or not math.isfinite(baseline_latency):
-        baseline_latency = compute_latency(config, args.input_size, args.batch_size)
+        baseline_latency = compute_latency(config, args.input_size, args.fhe_batch_size)
 
     rows = []
     for site in body_site_features(config, args.input_size):
@@ -258,7 +310,7 @@ def score_sites(args: argparse.Namespace) -> Dict:
                     action,
                     baseline_latency,
                     args.input_size,
-                    args.batch_size,
+                    args.fhe_batch_size,
                 )
             else:
                 score_info = heuristic_score(site, action)
@@ -325,7 +377,7 @@ def load_or_compute_scores(args: argparse.Namespace) -> Dict:
         actions=args.actions,
         recompute_fhe=args.recompute_fhe,
         input_size=args.input_size,
-        batch_size=args.batch_size,
+        fhe_batch_size=args.fhe_batch_size,
         top_k=args.top_site_actions,
     )
     return score_sites(score_args)
@@ -344,6 +396,14 @@ def make_variant_name(source_stem: str, mask_idx: int, replacements: List[Dict])
 def generate_masks(args: argparse.Namespace) -> Dict:
     wrapper, config = load_architecture(args.arch)
     scores = load_or_compute_scores(args)
+    source_scores = copy.deepcopy(
+        wrapper.get("scores", {}) if isinstance(wrapper.get("scores"), dict) else {}
+    )
+    if not source_scores and isinstance(scores.get("baseline_scores"), dict):
+        source_scores = copy.deepcopy(scores["baseline_scores"])
+    baseline_latency = float(scores.get("baseline_latency", float("nan")))
+    if not math.isfinite(baseline_latency):
+        baseline_latency = float(source_scores.get("fhe_latency", float("nan")))
     candidates = scores["site_actions"][: args.top_site_actions]
 
     combos: List[Tuple[Dict, ...]] = []
@@ -383,6 +443,20 @@ def generate_masks(args: argparse.Namespace) -> Dict:
         variant["config"] = variant_config
         if "scores" in variant:
             variant["source_scores"] = variant.pop("scores")
+
+        variant_scores: Dict = {}
+        latency_metrics: Dict = {}
+        if not args.skip_mask_latency:
+            latency_metrics = compute_latency_metrics(
+                variant_config,
+                args.input_size,
+                args.fhe_batch_size,
+            )
+            variant_latency = float(latency_metrics.get("fhe_latency", float("inf")))
+            variant_scores.update(latency_metrics)
+            variant_scores.update(latency_delta_metrics(baseline_latency, variant_latency))
+            variant["scores"] = variant_scores
+
         variant.pop("zen_fitness", None)
         variant.pop("aznas_fitness", None)
         variant["category"] = "replacement_mask"
@@ -392,8 +466,26 @@ def generate_masks(args: argparse.Namespace) -> Dict:
             "replacements": replacements,
             "combined_score": combo_key(combo),
             "acceptance_rule": ACCEPTANCE_RULE,
-            "baseline_latency": scores.get("baseline_latency"),
+            "baseline_latency": baseline_latency,
+            "mask_latency_evaluated": not args.skip_mask_latency,
         }
+        if latency_metrics:
+            plan_metrics = latency_delta_metrics(
+                baseline_latency,
+                float(latency_metrics.get("fhe_latency", float("inf"))),
+            )
+            variant["replacement_plan"].update(
+                {
+                    "variant_latency": latency_metrics.get("fhe_latency"),
+                    "variant_fhe_boot_count": latency_metrics.get("fhe_boot_count"),
+                    "variant_fhe_max_depth": latency_metrics.get("fhe_max_depth"),
+                    "variant_fhe_operation_latency": latency_metrics.get(
+                        "fhe_operation_latency"
+                    ),
+                    "variant_fhe_boot_latency": latency_metrics.get("fhe_boot_latency"),
+                    **plan_metrics,
+                }
+            )
 
         out_path = output_dir / f"{variant_name}.json"
         with open(out_path, "w", encoding="utf-8") as f:
@@ -405,6 +497,13 @@ def generate_masks(args: argparse.Namespace) -> Dict:
                 "num_replacements": len(replacements),
                 "combined_score": combo_key(combo),
                 "replacements": replacements,
+                "mask_latency_evaluated": not args.skip_mask_latency,
+                "fhe_latency": variant_scores.get("fhe_latency"),
+                "source_fhe_latency": variant_scores.get("source_fhe_latency"),
+                "fhe_latency_ratio": variant_scores.get("fhe_latency_ratio"),
+                "fhe_latency_reduction_pct": variant_scores.get(
+                    "fhe_latency_reduction_pct"
+                ),
             }
         )
 
@@ -414,6 +513,8 @@ def generate_masks(args: argparse.Namespace) -> Dict:
         "top_site_actions": args.top_site_actions,
         "max_replacements": args.max_replacements,
         "max_masks": args.max_masks,
+        "mask_latency_evaluated": not args.skip_mask_latency,
+        "fhe_batch_size": args.fhe_batch_size,
         "generated": generated,
         "acceptance_rule": ACCEPTANCE_RULE,
     }

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import re
 import sys
@@ -56,6 +57,21 @@ def parse_args() -> argparse.Namespace:
         "--training-results",
         default=None,
         help="CSV used by promotedN selection; defaults to <nas-results>/training_results.csv.",
+    )
+    parser.add_argument(
+        "--promotion-metric",
+        choices=("accuracy", "accuracy_latency"),
+        default="accuracy",
+        help="Metric used by promotedN selection.",
+    )
+    parser.add_argument(
+        "--latency-tradeoff-weight",
+        type=float,
+        default=0.1,
+        help=(
+            "Accuracy percentage points credited per 1% latency reduction when "
+            "--promotion-metric=accuracy_latency."
+        ),
     )
     parser.add_argument("--dataset", default="cifar100", help="cifar100/cifar10/imagenet100.")
     parser.add_argument("--train-dir", default=None, help="Training root or CIFAR root.")
@@ -131,6 +147,43 @@ def _fitness(arch: Dict) -> float:
     return float(arch.get("zen_fitness", arch.get("aznas_fitness", 0.0)))
 
 
+def _float_from_row(row: Dict, key: str, default: float = 0.0) -> float:
+    try:
+        value = row.get(key, default)
+        if value in ("", None):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _row_latency_reduction_pct(row: Dict) -> float:
+    reduction_pct = _float_from_row(row, "fhe_latency_reduction_pct", math.nan)
+    if math.isfinite(reduction_pct):
+        return reduction_pct
+
+    baseline_latency = _float_from_row(row, "source_fhe_latency", math.nan)
+    latency = _float_from_row(row, "fhe_latency", math.nan)
+    if (
+        math.isfinite(baseline_latency)
+        and baseline_latency > 0
+        and math.isfinite(latency)
+    ):
+        return (baseline_latency - latency) / baseline_latency * 100.0
+    return 0.0
+
+
+def _promotion_score(
+    row: Dict,
+    promotion_metric: str,
+    latency_tradeoff_weight: float,
+) -> float:
+    acc = _float_from_row(row, "best_val_acc", 0.0)
+    if promotion_metric == "accuracy_latency":
+        return acc + latency_tradeoff_weight * _row_latency_reduction_pct(row)
+    return acc
+
+
 def _load_explicit_jsons(paths: Iterable[str]) -> List[Dict]:
     architectures = []
     for raw_path in paths:
@@ -164,7 +217,12 @@ def _take_by_category(architectures: List[Dict], category: str, count: int) -> L
     return selected[:count]
 
 
-def _load_promoted(selection: str, csv_path: Path) -> List[Dict]:
+def _load_promoted(
+    selection: str,
+    csv_path: Path,
+    promotion_metric: str,
+    latency_tradeoff_weight: float,
+) -> List[Dict]:
     match = re.fullmatch(r"promoted(\d+)", selection)
     if not match:
         return []
@@ -178,13 +236,13 @@ def _load_promoted(selection: str, csv_path: Path) -> List[Dict]:
             json_path = row.get("json_path")
             if not json_path:
                 continue
-            try:
-                acc = float(row.get("best_val_acc", 0.0))
-            except ValueError:
-                acc = 0.0
-            row["_best_val_acc"] = acc
+            row["_promotion_score"] = _promotion_score(
+                row,
+                promotion_metric,
+                latency_tradeoff_weight,
+            )
             rows.append(row)
-    rows.sort(key=lambda row: row["_best_val_acc"], reverse=True)
+    rows.sort(key=lambda row: row["_promotion_score"], reverse=True)
 
     promoted = []
     for row in rows[:limit]:
@@ -198,6 +256,8 @@ def select_architectures(
     architectures: List[Dict],
     selection: str,
     training_results_csv: Path | None,
+    promotion_metric: str,
+    latency_tradeoff_weight: float,
 ) -> List[Dict]:
     selection = selection.strip().lower()
     if selection == "all":
@@ -214,7 +274,12 @@ def select_architectures(
     if promoted_match:
         if training_results_csv is None:
             raise ValueError("promotedN selection requires --training-results or --nas-results")
-        return _load_promoted(selection, training_results_csv)
+        return _load_promoted(
+            selection,
+            training_results_csv,
+            promotion_metric,
+            latency_tradeoff_weight,
+        )
 
     match = re.fullmatch(r"(top|best|middle|worst)(\d+)", selection)
     if match:
@@ -396,7 +461,13 @@ def main() -> None:
     elif args.nas_results:
         training_csv = Path(args.nas_results) / "training_results.csv"
 
-    selected = select_architectures(architectures, args.selection, training_csv)
+    selected = select_architectures(
+        architectures,
+        args.selection,
+        training_csv,
+        args.promotion_metric,
+        args.latency_tradeoff_weight,
+    )
     if not selected:
         raise ValueError(f"Selection {args.selection!r} produced no architectures")
 
@@ -459,6 +530,8 @@ def main() -> None:
         "batch_size": args.batch_size,
         "prefetch_factor": args.prefetch_factor,
         "training_preset": args.training_preset,
+        "promotion_metric": args.promotion_metric,
+        "latency_tradeoff_weight": args.latency_tradeoff_weight,
     }
     with open(result_dir / "run_summary.json", "w", encoding="utf-8") as f:
         json.dump(run_summary, f, indent=2)

@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shlex
+import statistics
 import subprocess
 import sys
 from datetime import datetime
@@ -68,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         default="proxy_promoted",
         help="Choose source architectures for replacement masks.",
     )
+    parser.add_argument(
+        "--replacement-source-metric",
+        choices=("accuracy", "accuracy_latency"),
+        default="accuracy_latency",
+        help="Metric used when --replacement-source=proxy_promoted.",
+    )
     parser.add_argument("--replacement-source-csv", default=None)
     parser.add_argument("--replacement-arch-count", type=int, default=1)
     parser.add_argument(
@@ -80,9 +88,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-replacements", type=int, default=3)
     parser.add_argument("--max-masks", type=int, default=30)
     parser.add_argument("--recompute-fhe", action="store_true")
+    parser.add_argument("--replacement-fhe-batch-size", type=int, default=1)
+    parser.add_argument("--skip-mask-latency", action="store_true")
 
     parser.add_argument("--replacement-rounds", nargs="+", type=int, default=[2, 10, 20])
     parser.add_argument("--promotion-counts", nargs="+", type=int, default=[8, 3])
+    parser.add_argument(
+        "--replacement-promotion-metric",
+        choices=("accuracy", "accuracy_latency"),
+        default="accuracy_latency",
+        help="Metric used by promotedN replacement training rounds.",
+    )
+    parser.add_argument(
+        "--latency-tradeoff-weight",
+        type=float,
+        default=0.1,
+        help=(
+            "Accuracy percentage points credited per 1% latency reduction for "
+            "latency-aware source selection and mask promotion."
+        ),
+    )
     parser.add_argument("--replacement-batch-size", type=int, default=None)
     parser.add_argument("--replacement-learning-rate", type=float, default=None)
     parser.add_argument("--replacement-num-workers", type=int, default=None)
@@ -186,14 +211,54 @@ def run_phase1_proxy_train(args: argparse.Namespace, evolution_dir: Path, result
     return result_dir / "training_results.csv"
 
 
-def _float_from_row(row: dict, key: str) -> float:
+def _float_from_row(row: dict, key: str, default: float = 0.0) -> float:
     try:
-        return float(row.get(key, 0.0))
+        value = row.get(key, default)
+        if value in ("", None):
+            return default
+        return float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return default
 
 
-def select_proxy_promoted(csv_path: Path, limit: int) -> List[Path]:
+def _finite_latency_reference(rows: List[dict]) -> float:
+    latencies = [
+        _float_from_row(row, "fhe_latency", math.nan)
+        for row in rows
+    ]
+    latencies = [lat for lat in latencies if math.isfinite(lat) and lat > 0]
+    if not latencies:
+        return float("nan")
+    return float(statistics.median(latencies))
+
+
+def _source_selection_score(
+    row: dict,
+    metric: str,
+    latency_reference: float,
+    latency_tradeoff_weight: float,
+) -> float:
+    acc = _float_from_row(row, "best_val_acc")
+    if metric != "accuracy_latency":
+        return acc
+
+    latency = _float_from_row(row, "fhe_latency", math.nan)
+    if (
+        math.isfinite(latency_reference)
+        and latency_reference > 0
+        and math.isfinite(latency)
+    ):
+        latency_reduction_pct = (latency_reference - latency) / latency_reference * 100.0
+        return acc + latency_tradeoff_weight * latency_reduction_pct
+    return acc
+
+
+def select_proxy_promoted(
+    csv_path: Path,
+    limit: int,
+    metric: str,
+    latency_tradeoff_weight: float,
+) -> List[Path]:
     if not csv_path.exists():
         raise FileNotFoundError(f"Phase-1 training CSV not found: {csv_path}")
     rows = []
@@ -202,7 +267,22 @@ def select_proxy_promoted(csv_path: Path, limit: int) -> List[Path]:
             json_path = row.get("json_path")
             if json_path:
                 rows.append(row)
-    rows.sort(key=lambda row: _float_from_row(row, "best_val_acc"), reverse=True)
+    latency_reference = _finite_latency_reference(rows)
+    for row in rows:
+        row["_selection_score"] = _source_selection_score(
+            row,
+            metric,
+            latency_reference,
+            latency_tradeoff_weight,
+        )
+        row["_latency"] = _float_from_row(row, "fhe_latency", math.inf)
+    rows.sort(
+        key=lambda row: (
+            row["_selection_score"],
+            -row["_latency"] if math.isfinite(row["_latency"]) else -math.inf,
+        ),
+        reverse=True,
+    )
 
     selected = []
     seen = set()
@@ -216,6 +296,12 @@ def select_proxy_promoted(csv_path: Path, limit: int) -> List[Path]:
         selected.append(path)
         if len(selected) >= limit:
             break
+    if metric == "accuracy_latency":
+        print(
+            f"\nReplacement source metric: accuracy_latency "
+            f"(latency reference={latency_reference:.0f}, "
+            f"weight={latency_tradeoff_weight:g})"
+        )
     return selected
 
 
@@ -240,7 +326,12 @@ def select_replacement_sources(
         csv_path = Path(args.replacement_source_csv) if args.replacement_source_csv else phase1_csv
         if not csv_path.is_absolute():
             csv_path = REPO_ROOT / csv_path
-        selected = select_proxy_promoted(csv_path, args.replacement_arch_count)
+        selected = select_proxy_promoted(
+            csv_path,
+            args.replacement_arch_count,
+            args.replacement_source_metric,
+            args.latency_tradeoff_weight,
+        )
     if not selected:
         raise RuntimeError("No replacement source architectures were selected")
     print("\nReplacement source architectures:")
@@ -288,6 +379,8 @@ def run_replacement_planning(
             str(args.top_site_actions),
             "--input-size",
             str(args.input_size),
+            "--fhe-batch-size",
+            str(args.replacement_fhe_batch_size),
         ]
         if args.actions:
             score_cmd.extend(["--actions", *args.actions])
@@ -313,11 +406,15 @@ def run_replacement_planning(
             str(args.max_masks),
             "--input-size",
             str(args.input_size),
+            "--fhe-batch-size",
+            str(args.replacement_fhe_batch_size),
         ]
         if args.actions:
             mask_cmd.extend(["--actions", *args.actions])
         if args.recompute_fhe:
             mask_cmd.append("--recompute-fhe")
+        if args.skip_mask_latency:
+            mask_cmd.append("--skip-mask-latency")
         run_command(mask_cmd, dry_run=args.dry_run)
 
         manifest_path = arch_dir / "manifest.json"
@@ -377,6 +474,10 @@ def run_replacement_training(
             str(args.smartpaf_calibration_batches),
             "--smartpaf-ct-steps",
             str(args.smartpaf_ct_steps),
+            "--promotion-metric",
+            args.replacement_promotion_metric,
+            "--latency-tradeoff-weight",
+            str(args.latency_tradeoff_weight),
         ]
         if round_idx == 0:
             cmd.extend(["--json", *[str(path) for path in mask_paths], "--selection", "all"])
@@ -414,6 +515,11 @@ def write_pipeline_manifest(
         "replacement_training_csvs": [str(path) for path in replacement_csvs],
         "replacement_rounds": args.replacement_rounds,
         "promotion_counts": args.promotion_counts,
+        "replacement_source_metric": args.replacement_source_metric,
+        "replacement_promotion_metric": args.replacement_promotion_metric,
+        "latency_tradeoff_weight": args.latency_tradeoff_weight,
+        "replacement_fhe_batch_size": args.replacement_fhe_batch_size,
+        "mask_latency_evaluated": not args.skip_mask_latency,
         "phase1_training_preset": "swish_proxy",
         "replacement_training_preset": args.replacement_training_preset,
     }
