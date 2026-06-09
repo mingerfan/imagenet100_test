@@ -40,7 +40,7 @@ IMAGENET1K_ACCURACY = {
 try:
     sys.path.insert(0, '..')
     from models.gate_net_cmp.block_def import (
-        LearnableSwish, LearnableRelu, StablePoly4, Relu, Swish,
+        HermitePoly4, LearnableSwish, LearnableRelu, StablePoly4, Relu, Swish, SwishHerPN,
         SelfGated, BasicBlock, BottleneckBlock, BasicSelfGatedBlock, BottleneckSelfGatedBlock
     )
     HAS_CUSTOM_MODULES = True
@@ -145,7 +145,7 @@ class FheInfo:
             class CustomTracer(fx.Tracer):
                 def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
                     # 将自定义激活函数视为叶子模块，不进入内部trace
-                    if isinstance(m, (LearnableSwish, LearnableRelu, StablePoly4, Relu, Swish)):
+                    if isinstance(m, (LearnableSwish, LearnableRelu, StablePoly4, HermitePoly4, Relu, Swish, SwishHerPN)):
                         return True
                     return super().is_leaf_module(m, module_qualified_name)
 
@@ -168,8 +168,10 @@ class FheInfo:
             self.op_registry.register_module(LearnableSwish, 'learnable_swish_statistics')
             self.op_registry.register_module(LearnableRelu, 'learnable_relu_statistics')
             self.op_registry.register_module(StablePoly4, 'poly4_statistics')
+            self.op_registry.register_module(HermitePoly4, 'poly4_herpn_statistics')
             self.op_registry.register_module(Relu, 'relu_statistics')
             self.op_registry.register_module(Swish, 'swish_statistics')
+            self.op_registry.register_module(SwishHerPN, 'swish_herpn_statistics')
 
         # 统计汇总
         self.op_stats: Dict[str, Dict] = defaultdict(lambda: {
@@ -401,6 +403,18 @@ class FheInfo:
     def poly4_statistics(self, node: Node):
         """StablePoly4: 4次多项式，深度3"""
         self.activation_statistics(node, 'poly4')
+
+    def poly4_herpn_statistics(self, node: Node):
+        """HermitePoly4: HerPN/Hermite-basis 4次多项式，按 poly4 成本计入。"""
+        self.activation_statistics(node, 'poly4_herpn')
+
+    def hermitepoly4_statistics(self, node: Node):
+        """Compatibility wrapper for replacement action naming."""
+        self.activation_statistics(node, 'hermitepoly4')
+
+    def swish_herpn_statistics(self, node: Node):
+        """SwishHerPN: degree-2 Hermite-basis Swish proxy."""
+        self.activation_statistics(node, 'swish_herpn')
 
     def maxpool_statistics(self, node: Node):
         node_meta, in_shape, out_shape, in_ct, out_ct = self._init_node_meta(node, out_depth_delta=30)

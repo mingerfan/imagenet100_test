@@ -135,7 +135,8 @@ class FhelipeInfo(FheInfo):
 
     def _infer_layout(self, node: Node, op_type: str) -> LayoutInfo:
         if op_type in {"relu", "relu6", "swish", "learnable_swish", "learnable_relu",
-                       "sigmoid", "poly4", "pass_through", "add", "mul"}:
+                       "sigmoid", "poly4", "poly4_herpn", "hermitepoly4",
+                       "swish_herpn", "pass_through", "add", "mul"}:
             return self._input_layout(node)
 
         if op_type in {"conv", "maxpool", "avepool", "adaptive_avgpool"}:

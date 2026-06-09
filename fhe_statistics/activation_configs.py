@@ -40,6 +40,21 @@ ACTIVATION_CONFIGS: Dict[str, Dict[str, Any]] = {
         'mul_both_factor': 8,
         'mul_single_factor': 8,
     },
+    'poly4_herpn': {
+        'depth_delta': 3,
+        'mul_both_factor': 8,
+        'mul_single_factor': 8,
+    },
+    'hermitepoly4': {
+        'depth_delta': 3,
+        'mul_both_factor': 8,
+        'mul_single_factor': 8,
+    },
+    'swish_herpn': {
+        'depth_delta': 1,
+        'mul_both_factor': 4,
+        'mul_single_factor': 4,
+    },
 }
 
 

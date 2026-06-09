@@ -18,6 +18,9 @@ ORION_ACTIVATION_CONFIGS: Dict[str, Dict[str, int]] = {
     "learnable_relu": {"depth_delta": 14, "mul_both_factor": 33, "mul_single_factor": 33},
     "sigmoid": {"depth_delta": 7, "mul_both_factor": 15, "mul_single_factor": 15},
     "poly4": {"depth_delta": 3, "mul_both_factor": 8, "mul_single_factor": 8},
+    "poly4_herpn": {"depth_delta": 3, "mul_both_factor": 8, "mul_single_factor": 8},
+    "hermitepoly4": {"depth_delta": 3, "mul_both_factor": 8, "mul_single_factor": 8},
+    "swish_herpn": {"depth_delta": 1, "mul_both_factor": 4, "mul_single_factor": 4},
 }
 
 
@@ -281,6 +284,15 @@ class OrionInfo(FheInfo):
 
     def poly4_statistics(self, node: Node):
         self.activation_statistics(node, "poly4")
+
+    def poly4_herpn_statistics(self, node: Node):
+        self.activation_statistics(node, "poly4_herpn")
+
+    def hermitepoly4_statistics(self, node: Node):
+        self.activation_statistics(node, "hermitepoly4")
+
+    def swish_herpn_statistics(self, node: Node):
+        self.activation_statistics(node, "swish_herpn")
 
     def add_statistics(self, node: Node):
         inputs = node.all_input_nodes
