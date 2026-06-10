@@ -1,0 +1,46 @@
+# Phase-1 regularized evolution config.
+# Search structure with all-ReLU, non-gated MBConv candidates for comparison
+# against ReLU baselines such as ResNet-18-ReLU.
+
+search:
+  population_size: 200
+  num_generations: 1500
+  sample_size: 25
+  mutation_rate: 1.0
+  diversity_quota: 0.01
+  initial_eval_batch_size: 200
+  initial_replacement_attempts: 1000
+
+network_config: "network_gen/configs/imagenet_224_relu_mbconv.yaml"
+
+evaluation:
+  resolution: 224
+  batch_size: 64
+  fhe_batch_size: 1
+  gpus: all
+  exclude_gpus: []
+  max_workers: null
+  task_timeout: 600
+  parallel_evaluations: true
+  use_dataloader: false
+
+fitness:
+  type: "zen_ranking"
+  epsilon: 1.0e-10
+  latency_baseline: 22334905.50
+
+logging:
+  checkpoint_interval: 10
+  log_interval: 1
+  save_history: true
+  output_dir: "nas_results/relu_mbconv_phase1"
+
+seed: 42
+
+mutation_probs:
+  block: 0.45
+  stem: 0.0
+  stride: 0.25
+  ct_policy: 0.15
+  downsample: 0.10
+  initial_ct: 0.05

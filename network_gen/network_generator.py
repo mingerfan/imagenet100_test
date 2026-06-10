@@ -52,7 +52,9 @@ class HierarchicalBlockSelector:
 
     NUM_INDIVIDUAL = 4  # 前4个单独选择
     GROUP_SIZE = 2       # 后面每2个一组
-    NUM_BLOCK_TYPES = 22  # 22种统一Block
+    @property
+    def num_block_types(self) -> int:
+        return len(UNIFIED_BLOCKS)
 
     def __init__(self):
         pass
@@ -117,7 +119,7 @@ class HierarchicalBlockSelector:
             随机选择位列表
         """
         num_choices = self.compute_num_choices(num_blocks)
-        return [random.randint(0, self.NUM_BLOCK_TYPES - 1) for _ in range(num_choices)]
+        return [random.randint(0, self.num_block_types - 1) for _ in range(num_choices)]
 
 
 class RandomNetworkGenerator:
@@ -437,11 +439,11 @@ class RandomNetworkGenerator:
 
     def _get_allowed_block_ids(self, position: Optional[int] = None) -> List[int]:
         if self.config is None:
-            allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
+            allowed_ids = list(range(self.block_selector.num_block_types))
         else:
             allowed_ids = self.config.search_space.blocks.allowed_block_ids
             if allowed_ids is None:
-                allowed_ids = list(range(self.block_selector.NUM_BLOCK_TYPES))
+                allowed_ids = list(range(self.block_selector.num_block_types))
 
             if position is not None:
                 constraints = self.config.search_space.blocks.first_layers_constraints

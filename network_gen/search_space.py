@@ -41,6 +41,7 @@ from models.gate_net_cmp.block_def import (
     GatedDepthwiseConv,
     HermitePoly4,
     LearnableSwish,
+    Relu,
     StablePoly4,
     Swish,
     SwishHerPN,
@@ -68,6 +69,11 @@ ACTIVATION_TYPES: Dict[str, ActivationSpec] = {
         activation_class=LearnableSwish,
         trainable=True,
         description="可学习Swish"
+    ),
+    "relu": ActivationSpec(
+        name="relu",
+        activation_class=Relu,
+        description="ReLU激活"
     ),
     "poly4": ActivationSpec(
         name="poly4",
@@ -303,7 +309,38 @@ def _create_unified_blocks() -> Dict[int, UnifiedBlockSpec]:
         description="FullGatedBasicBlock + LSwish"
     )
 
-    assert len(blocks) == 22, f"Expected 22 blocks, got {len(blocks)}"
+    # ========== 4. ReLU MBConv系列（4种）==========
+    # Keep legacy IDs stable and append ReLU variants for ResNet-ReLU matched NAS.
+    blocks[22] = UnifiedBlockSpec(
+        id=22, name="mbconv1_relu",
+        block_class=MBConvBlock,
+        activation_class=Relu,
+        expansion=1.0, use_se=False, use_gated_dw=False,
+        description="MBConv(exp=1.0) + ReLU"
+    )
+    blocks[23] = UnifiedBlockSpec(
+        id=23, name="mbconv1_relu_se",
+        block_class=MBConvBlock,
+        activation_class=Relu,
+        expansion=1.0, use_se=True, use_gated_dw=False,
+        description="MBConv(exp=1.0) + ReLU + SE"
+    )
+    blocks[24] = UnifiedBlockSpec(
+        id=24, name="mbconv4_relu",
+        block_class=MBConvBlock,
+        activation_class=Relu,
+        expansion=4.0, use_se=False, use_gated_dw=False,
+        description="MBConv(exp=4.0) + ReLU"
+    )
+    blocks[25] = UnifiedBlockSpec(
+        id=25, name="mbconv4_relu_se",
+        block_class=MBConvBlock,
+        activation_class=Relu,
+        expansion=4.0, use_se=True, use_gated_dw=False,
+        description="MBConv(exp=4.0) + ReLU + SE"
+    )
+
+    assert len(blocks) == 26, f"Expected 26 blocks, got {len(blocks)}"
     return blocks
 
 
@@ -457,6 +494,8 @@ STEM_CONFIGS = [
     StemConfig(use_selfgate=False, activation="swish"),   # 1
     StemConfig(use_selfgate=True, activation="poly4"),    # 2
     StemConfig(use_selfgate=True, activation="swish"),    # 3
+    StemConfig(use_selfgate=False, activation="relu"),    # 4
+    StemConfig(use_selfgate=True, activation="relu"),     # 5
 ]
 
 
@@ -498,6 +537,8 @@ SECOND_DOWNSAMPLE_CONFIGS = [
     SecondDownsampleConfig(type="conv", use_selfgate=True, activation="poly4"),   # 3
     SecondDownsampleConfig(type="conv", use_selfgate=True, activation="swish"),   # 4
     SecondDownsampleConfig(type="none"),                                       # 5 (新增: 不使用)
+    SecondDownsampleConfig(type="conv", use_selfgate=False, activation="relu"),   # 6
+    SecondDownsampleConfig(type="conv", use_selfgate=True, activation="relu"),    # 7
 ]
 
 
@@ -790,12 +831,12 @@ class SearchSpace:
         - Stride: 1344
         - CT策略: 8
         """
-        stem_choices = self.num_stem_configs  # 4
-        second_ds_choices = self.num_second_ds_configs  # 6
+        stem_choices = self.num_stem_configs
+        second_ds_choices = self.num_second_ds_configs
         stride_choices = self.num_stride_configs  # 1344
         ct_policy_choices = len(self.ct_policy_options) ** 3  # 8
 
-        num_unified_blocks = 22
+        num_unified_blocks = len(UNIFIED_BLOCKS)
 
         # 分层选择: 前4个单独选 + 后面每2个一组
         # 假设平均10个block: 4 + ceil(6/2) = 4 + 3 = 7个选择位
@@ -824,7 +865,7 @@ class SearchSpace:
         Returns:
             block选择的组合数
         """
-        num_unified_blocks = 22
+        num_unified_blocks = len(UNIFIED_BLOCKS)
         individual_blocks = min(4, num_blocks)  # 前4个单独选
         remaining = max(0, num_blocks - 4)
         grouped_choices = (remaining + 1) // 2  # 每2个一组
@@ -849,14 +890,15 @@ class SearchSpace:
         lines.append("")
         lines.append(self.stride_encoder.summary())
 
-        lines.append("\n22种统一Block定义:")
-        for i in range(22):
+        num_unified_blocks = len(UNIFIED_BLOCKS)
+        lines.append(f"\n{num_unified_blocks}种统一Block定义:")
+        for i in range(num_unified_blocks):
             spec = UNIFIED_BLOCKS[i]
             lines.append(f"  [{i:2d}] {spec.name:25s} {spec.description}")
 
         lines.append("\n分层选择策略:")
-        lines.append("  - 前4个block: 每个单独选择 (22种/位置)")
-        lines.append("  - 后面block: 每2个共享选择 (22种/组)")
+        lines.append(f"  - 前4个block: 每个单独选择 ({num_unified_blocks}种/位置)")
+        lines.append(f"  - 后面block: 每2个共享选择 ({num_unified_blocks}种/组)")
 
         lines.append(f"\nCT策略选项: {self.ct_policy_options}")
         lines.append(f"CT槽位数: {self.ct_slots}")
@@ -865,8 +907,14 @@ class SearchSpace:
 
         # 详细的搜索空间计算
         lines.append("\n搜索空间估算 (平均10个block):")
-        lines.append(f"  Block选择: 22^(4+3) = 22^7 ≈ {22**7:.2e}")
-        lines.append("  × Stem(4) × SecondDS(6) × Stride(1344) × CT策略(8)")
+        lines.append(
+            f"  Block选择: {num_unified_blocks}^(4+3) = "
+            f"{num_unified_blocks}^7 ≈ {num_unified_blocks**7:.2e}"
+        )
+        lines.append(
+            f"  × Stem({self.num_stem_configs}) × "
+            f"SecondDS({self.num_second_ds_configs}) × Stride(1344) × CT策略(8)"
+        )
         lines.append(f"  = {self.compute_search_space_size():.2e}")
         lines.append("=" * 60)
 

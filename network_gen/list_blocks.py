@@ -38,6 +38,7 @@ def list_blocks(filter_str: str = None):
         'BasicBlock': (16, 17),
         'BasicSelfGatedBlock': (18, 19),
         'FullGatedBasicBlock': (20, 21),
+        'ReLU MBConv': (22, 25),
     }
 
     total_shown = 0
