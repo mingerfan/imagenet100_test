@@ -28,6 +28,7 @@ from utils.nas_training import (
 
 TRAINING_PRESETS = (
     "swish_proxy",
+    "relu_proxy",
     "replacement_autofhe_degree2",
     "replacement_learned_slow_scale",
     "replacement_smartpaf",
@@ -118,6 +119,7 @@ def parse_args() -> argparse.Namespace:
         default="swish_proxy",
         help=(
             "Training defaults to apply. swish_proxy is for phase-1 short training; "
+            "relu_proxy is the same generic phase-1 recipe for ReLU-profile NAS; "
             "replacement_autofhe_degree2 and replacement_learned_slow_scale are "
             "the recommended phase-2 mask presets."
         ),
@@ -398,7 +400,7 @@ def build_training_config(args: argparse.Namespace) -> Dict:
         },
     }
 
-    if args.training_preset == "swish_proxy":
+    if args.training_preset in {"swish_proxy", "relu_proxy"}:
         return training_config
 
     training_config["poly_weight_decay"] = 0.0

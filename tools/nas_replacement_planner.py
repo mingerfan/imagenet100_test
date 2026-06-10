@@ -23,13 +23,35 @@ SWISH_TO_STABLEPOLY4 = {
     5: 4,
     7: 6,
 }
+RELU_TO_STABLEPOLY4 = {
+    22: 0,
+    23: 2,
+    24: 4,
+    25: 6,
+}
 SWISH_TO_GATED_LSWISH = {
     1: 9,
     3: 11,
     5: 13,
     7: 15,
 }
+RELU_TO_GATED_LSWISH = {
+    22: 9,
+    23: 11,
+    24: 13,
+    25: 15,
+}
+PLAIN_MB_CONV_TO_STABLEPOLY4 = {
+    **SWISH_TO_STABLEPOLY4,
+    **RELU_TO_STABLEPOLY4,
+}
+PLAIN_MB_CONV_TO_GATED_LSWISH = {
+    **SWISH_TO_GATED_LSWISH,
+    **RELU_TO_GATED_LSWISH,
+}
 BODY_SWISH_MB_CONV_IDS = set(SWISH_TO_STABLEPOLY4)
+BODY_RELU_MB_CONV_IDS = set(RELU_TO_STABLEPOLY4)
+BODY_PLAIN_MB_CONV_IDS = set(PLAIN_MB_CONV_TO_STABLEPOLY4)
 ACTION_DEFAULTS = ("stablepoly4", "hermitepoly4", "swish_herpn", "gated_lswish")
 ACCEPTANCE_RULE = (
     "Keep a mask if best_acc >= baseline_best_acc - 0.5pp, or if "
@@ -119,12 +141,12 @@ def apply_action(config: Dict, block_index: int, action: str) -> Dict:
     action = action.lower()
 
     if action == "stablepoly4":
-        if old_id not in SWISH_TO_STABLEPOLY4:
+        if old_id not in PLAIN_MB_CONV_TO_STABLEPOLY4:
             raise ValueError(f"Block {block_index} id={old_id} is not eligible for stablepoly4")
-        block["block_id"] = SWISH_TO_STABLEPOLY4[old_id]
+        block["block_id"] = PLAIN_MB_CONV_TO_STABLEPOLY4[old_id]
         block.pop("activation_override", None)
     elif action == "hermitepoly4":
-        if old_id not in BODY_SWISH_MB_CONV_IDS:
+        if old_id not in BODY_PLAIN_MB_CONV_IDS:
             raise ValueError(f"Block {block_index} id={old_id} is not eligible for hermitepoly4")
         block["activation_override"] = "poly4_herpn"
     elif action == "swish_herpn":
@@ -132,9 +154,9 @@ def apply_action(config: Dict, block_index: int, action: str) -> Dict:
             raise ValueError(f"Block {block_index} id={old_id} is not eligible for swish_herpn")
         block["activation_override"] = "swish_herpn"
     elif action == "gated_lswish":
-        if old_id not in SWISH_TO_GATED_LSWISH:
+        if old_id not in PLAIN_MB_CONV_TO_GATED_LSWISH:
             raise ValueError(f"Block {block_index} id={old_id} is not eligible for gated_lswish")
-        block["block_id"] = SWISH_TO_GATED_LSWISH[old_id]
+        block["block_id"] = PLAIN_MB_CONV_TO_GATED_LSWISH[old_id]
         block.pop("activation_override", None)
     else:
         raise ValueError(f"Unsupported action: {action}")
@@ -286,9 +308,11 @@ def eligible_actions(block_id: int, actions: Iterable[str]) -> List[str]:
     result = []
     for action in actions:
         action = action.lower()
-        if action in {"stablepoly4", "gated_lswish"} and block_id in SWISH_TO_STABLEPOLY4:
+        if action in {"stablepoly4", "gated_lswish"} and block_id in BODY_PLAIN_MB_CONV_IDS:
             result.append(action)
-        elif action in {"hermitepoly4", "swish_herpn"} and block_id in BODY_SWISH_MB_CONV_IDS:
+        elif action == "hermitepoly4" and block_id in BODY_PLAIN_MB_CONV_IDS:
+            result.append(action)
+        elif action == "swish_herpn" and block_id in BODY_SWISH_MB_CONV_IDS:
             result.append(action)
     return result
 
@@ -436,7 +460,7 @@ def generate_masks(args: argparse.Namespace) -> Dict:
         variant_name = make_variant_name(source_stem, mask_idx, replacements)
         variant_config["name"] = variant_name
         variant_config["description"] = (
-            "Phase-2 replacement mask generated from a Swish MBConv NAS architecture."
+            "Phase-2 replacement mask generated from a plain MBConv NAS architecture."
         )
 
         variant = copy.deepcopy(wrapper)

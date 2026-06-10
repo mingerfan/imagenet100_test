@@ -256,12 +256,12 @@ uv run python tools/train_nas_architectures.py \
 
 ### 6. Phase 2 replacement masks
 
-在 Phase 1 搜出的 Swish 结构上，再离线生成有限数量的替换 mask。默认只改 body block，不碰 stem/second downsample。支持的动作：
+在 Phase 1 搜出的 plain MBConv 结构上，再离线生成有限数量的替换 mask。默认只改 body block，不碰 stem/second downsample。支持的动作：
 
-- `stablepoly4`: `1->0, 3->2, 5->4, 7->6`
-- `hermitepoly4`: `activation_override: poly4_herpn`
-- `swish_herpn`: `activation_override: swish_herpn`
-- `gated_lswish`: `1->9, 3->11, 5->13, 7->15`
+- `stablepoly4`: Swish `1->0, 3->2, 5->4, 7->6`; ReLU `22->0, 23->2, 24->4, 25->6`
+- `hermitepoly4`: `activation_override: poly4_herpn` for Swish/ReLU plain MBConv blocks
+- `swish_herpn`: `activation_override: swish_herpn` for Swish plain MBConv blocks only
+- `gated_lswish`: Swish `1->9, 3->11, 5->13, 7->15`; ReLU `22->9, 23->11, 24->13, 25->15`
 
 ```bash
 uv run python tools/nas_replacement_planner.py score-sites \

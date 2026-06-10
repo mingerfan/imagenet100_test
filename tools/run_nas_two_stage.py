@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase1-epochs", type=int, default=12)
     parser.add_argument("--phase1-batch-size", type=int, default=128)
     parser.add_argument("--phase1-learning-rate", type=float, default=7e-4)
+    parser.add_argument(
+        "--phase1-training-preset",
+        choices=("auto", "swish_proxy", "relu_proxy"),
+        default="auto",
+        help="Training preset for phase-1 proxy training.",
+    )
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=4)
     parser.add_argument("--max-parallel-workers", type=int, default=None)
@@ -180,6 +186,7 @@ def run_evolution(args: argparse.Namespace, evolution_dir: Path) -> None:
 
 
 def run_phase1_proxy_train(args: argparse.Namespace, evolution_dir: Path, result_dir: Path) -> Path:
+    preset = phase1_training_preset(args)
     cmd = [
         PYTHON,
         "tools/train_nas_architectures.py",
@@ -202,13 +209,29 @@ def run_phase1_proxy_train(args: argparse.Namespace, evolution_dir: Path, result
         "--result-dir",
         str(result_dir),
         "--training-preset",
-        "swish_proxy",
+        preset,
     ]
     add_common_train_args(cmd, args)
     if args.max_parallel_workers is not None:
         cmd.extend(["--max-parallel-workers", str(args.max_parallel_workers)])
     run_command(cmd, dry_run=args.dry_run)
     return result_dir / "training_results.csv"
+
+
+def phase1_training_preset(args: argparse.Namespace) -> str:
+    if args.phase1_training_preset != "auto":
+        return args.phase1_training_preset
+    profile_hint = " ".join(
+        str(value or "")
+        for value in (
+            args.network_config,
+            args.evolution_config,
+            args.nas_results,
+        )
+    ).lower()
+    if "relu" in profile_hint:
+        return "relu_proxy"
+    return "swish_proxy"
 
 
 def _float_from_row(row: dict, key: str, default: float = 0.0) -> float:
@@ -520,7 +543,7 @@ def write_pipeline_manifest(
         "latency_tradeoff_weight": args.latency_tradeoff_weight,
         "replacement_fhe_batch_size": args.replacement_fhe_batch_size,
         "mask_latency_evaluated": not args.skip_mask_latency,
-        "phase1_training_preset": "swish_proxy",
+        "phase1_training_preset": phase1_training_preset(args),
         "replacement_training_preset": args.replacement_training_preset,
     }
     path.parent.mkdir(parents=True, exist_ok=True)

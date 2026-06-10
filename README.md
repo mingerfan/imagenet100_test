@@ -117,7 +117,7 @@ python train.py --exclude_gpus 0
 ### 2.1 两阶段 NAS 搜索与代理短训
 
 当前推荐流程是先做结构搜索，再做有限 replacement mask 筛选。一键入口会按以下顺序执行：
-Phase 1 evolution -> Swish 架构代理短训 -> promoted 架构生成 replacement masks -> `2 -> 10 -> 20` epoch mask 晋级训练。
+Phase 1 evolution -> plain MBConv 架构代理短训 -> promoted 架构生成 replacement masks -> `2 -> 10 -> 20` epoch mask 晋级训练。
 
 ```bash
 uv run python tools/run_nas_two_stage.py \
@@ -136,7 +136,7 @@ uv run python tools/run_nas_two_stage.py \
   --download
 ```
 
-Phase 1 的代理短训默认使用 `swish_proxy` preset，不启用 SmartPAF/AutoFHE。replacement mask 训练默认自动选择两个有正向证据的 no-PAT/no-AT preset：2 epoch 筛选用 `replacement_autofhe_degree2`（learned scale + CT + degree2/output_scale0.2 + progressive），10/20 epoch 晋级用 `replacement_learned_slow_scale`（在前者基础上用 `poly_scale_lr_mult=0.1` 控制 scale）。AT/PAT 保留为显式实验选项，不走默认路径。
+Phase 1 的代理短训默认按 profile 自动选择普通 proxy preset：Swish profile 用 `swish_proxy`，ReLU profile 用 `relu_proxy`，都不启用 SmartPAF/AutoFHE。replacement mask 训练默认自动选择两个有正向证据的 no-PAT/no-AT preset：2 epoch 筛选用 `replacement_autofhe_degree2`（learned scale + CT + degree2/output_scale0.2 + progressive），10/20 epoch 晋级用 `replacement_learned_slow_scale`（在前者基础上用 `poly_scale_lr_mult=0.1` 控制 scale）。AT/PAT 保留为显式实验选项，不走默认路径。
 
 ```bash
 uv run python tools/run_nas_two_stage.py \
@@ -146,7 +146,7 @@ uv run python tools/run_nas_two_stage.py \
   --download
 ```
 
-Phase 2 默认只改 body blocks，不改 stem 和第二次降采样。默认候选动作是 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`；第一版不生成 `gated_poly4`。mask 训练建议按 `2 -> 10 -> 20` epoch 晋级：先训练全部 masks 2 epoch，再用 `promoted8` 选前 8 个训 10 epoch，最后用 `promoted3` 训 20 epoch。
+Phase 2 默认只改 body blocks，不改 stem 和第二次降采样。默认候选动作是 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`；`swish_herpn` 只用于 Swish body blocks，其余动作同时支持 Swish/ReLU plain MBConv。第一版不生成 `gated_poly4`。mask 训练建议按 `2 -> 10 -> 20` epoch 晋级：先训练全部 masks 2 epoch，再用 `promoted8` 选前 8 个训 10 epoch，最后用 `promoted3` 训 20 epoch。
 
 ### 3. 训练特定模型
 
