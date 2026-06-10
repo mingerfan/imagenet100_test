@@ -319,6 +319,20 @@ uv run python tools/train_nas_architectures.py \
   --download
 ```
 
+由于当前默认 replacement masks 不添加 gated/self-gated 模块，旧的
+`tools/archive_create_nas_ablation_variants.py` 消融 JSON 生成脚本已废弃归档。需要对已有 masks
+做独立多轮筛选训练时，使用：
+
+```bash
+uv run python tools/train_select_phase2_replacements.py \
+  --mask-root results/nas_two_stage/replacement_masks \
+  --run-root results/phase2_replacement_selection \
+  --rounds 2 10 20 \
+  --promotion-counts 8 3 \
+  --gpus all \
+  --download
+```
+
 接受规则：若 `best_acc >= baseline_best_acc - 0.5pp`，保留；或者 `fhe_latency <= 0.9 * baseline_latency` 且 `best_acc >= baseline_best_acc - 1.0pp`，保留。
 
 ### 7. 两阶段一键流程、产物位置与大训衔接

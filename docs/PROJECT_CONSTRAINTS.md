@@ -35,5 +35,6 @@ python nas_evolution/run_evolution.py --gpus all --exclude_gpus 0
 - NAS evolution 的 `evaluation.batch_size` 是单个评估 worker 的 batch size；短训工具 `tools/train_nas_architectures.py` 的 `--batch-size` 也是单 GPU worker batch size。
 - 默认代理训练使用 CIFAR-100@224；ImageNet-100 留作后期筛选，不建议放进 evolution 内循环。
 - Phase 1 代理短训按 profile 使用普通 proxy preset：Swish profile 为 `swish_proxy`，ReLU profile 为 `relu_proxy`，不启用 SmartPAF/AutoFHE；replacement mask 默认使用两个正向 no-PAT/no-AT preset：`replacement_autofhe_degree2` 和 `replacement_learned_slow_scale`。AT/PAT 只作为显式实验选项。
-- replacement mask 默认只改 body blocks，不改 stem/second downsample；支持 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`，其中 `swish_herpn` 只用于 Swish body blocks，其余动作支持 Swish/ReLU plain MBConv；不生成 `gated_poly4`。
+- replacement mask 默认只改 body blocks，不改 stem/second downsample；默认只使用 `stablepoly4`、`hermitepoly4`、`swish_herpn`，不添加 gated/self-gated 模块；`gated_lswish` 只作为显式 `--actions` 实验选项保留。
 - Phase 2 replacement mask 晋级默认使用 `accuracy_efficiency` 双分支策略：每个 `promotedN` quota 默认 50% 按 accuracy-biased 加权分支选，剩余按 efficiency-biased 加权分支选；两个分支都使用 `best_val_acc + weight * fhe_latency_reduction_pct`，默认权重分别为 0.1 和 0.3，去重后用原始 promotion metric 补齐；需要旧行为时显式传 `--replacement-promotion-strategy single`。
+- `tools/archive_create_nas_ablation_variants.py` 已废弃归档；当前 no-selfgated Phase 2 流程使用 `tools/train_select_phase2_replacements.py` 对已有 replacement masks 做多轮训练，并输出最低延迟和最高效率候选。

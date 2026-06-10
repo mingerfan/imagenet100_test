@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Create NAS phase-2 ablation variants and a full-training YAML."""
+"""Deprecated: create NAS phase-2 ablation variants and a full-training YAML.
+
+Phase-2 replacement masks no longer add gated/self-gated blocks by default, so
+the self-gated ablation JSON workflow is obsolete for the current two-stage NAS
+pipeline. This archived script is kept only for reproducing older experiments.
+Prefer tools/train_select_phase2_replacements.py for training and selecting
+replacement-mask candidates.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +24,13 @@ from typing import Dict, Iterable, List, Sequence
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEPRECATION_NOTICE = (
+    "tools/archive_create_nas_ablation_variants.py is deprecated. Current Phase-2 "
+    "replacement masks do not add gated/self-gated blocks by default, so the "
+    "old self-gated ablation JSON workflow is no longer needed. Use "
+    "tools/train_select_phase2_replacements.py for candidate training and "
+    "selection."
+)
 
 POLY_TO_NON_POLY_BLOCK = {
     0: 1,
@@ -453,6 +467,7 @@ def _write_yaml(path: Path, model_entries: Sequence[Dict], args: argparse.Namesp
 
 
 def main() -> None:
+    print(f"Deprecated: {DEPRECATION_NOTICE}", file=sys.stderr)
     args = parse_args()
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
