@@ -66,12 +66,40 @@ def parse_args() -> argparse.Namespace:
         help="Metric used by promotedN selection.",
     )
     parser.add_argument(
+        "--promotion-strategy",
+        choices=("single", "accuracy_efficiency"),
+        default="single",
+        help=(
+            "How promotedN candidates are selected. single keeps the old global "
+            "--promotion-metric ranking; accuracy_efficiency splits the quota "
+            "between accuracy-biased and efficiency-biased latency-aware rankings."
+        ),
+    )
+    parser.add_argument(
+        "--promotion-accuracy-share",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of promotedN reserved for the accuracy-biased branch when "
+            "--promotion-strategy=accuracy_efficiency."
+        ),
+    )
+    parser.add_argument(
         "--latency-tradeoff-weight",
         type=float,
         default=0.1,
         help=(
-            "Accuracy percentage points credited per 1% latency reduction when "
+            "Accuracy percentage points credited per 1%% latency reduction when "
             "--promotion-metric=accuracy_latency."
+        ),
+    )
+    parser.add_argument(
+        "--efficiency-latency-tradeoff-weight",
+        type=float,
+        default=0.3,
+        help=(
+            "Accuracy percentage points credited per 1%% latency reduction for the "
+            "efficiency branch of --promotion-strategy=accuracy_efficiency."
         ),
     )
     parser.add_argument("--dataset", default="cifar100", help="cifar100/cifar10/imagenet100.")
@@ -186,6 +214,95 @@ def _promotion_score(
     return acc
 
 
+def _rank_rows(
+    rows: List[Dict],
+    promotion_metric: str,
+    latency_tradeoff_weight: float,
+) -> List[Dict]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _promotion_score(row, promotion_metric, latency_tradeoff_weight),
+            _float_from_row(row, "best_val_acc", 0.0),
+            _row_latency_reduction_pct(row),
+            -int(row.get("_source_order", 0)),
+        ),
+        reverse=True,
+    )
+
+
+def _split_promotion_counts(limit: int, accuracy_share: float) -> tuple[int, int]:
+    if not 0.0 <= accuracy_share <= 1.0:
+        raise ValueError("--promotion-accuracy-share must be between 0 and 1")
+    if limit <= 0:
+        return 0, 0
+    if limit == 1:
+        return (1, 0) if accuracy_share >= 0.5 else (0, 1)
+    if accuracy_share <= 0.0:
+        return 0, limit
+    if accuracy_share >= 1.0:
+        return limit, 0
+
+    accuracy_count = int(math.ceil(limit * accuracy_share))
+    accuracy_count = min(max(accuracy_count, 1), limit - 1)
+    return accuracy_count, limit - accuracy_count
+
+
+def _select_split_promoted_rows(
+    rows: List[Dict],
+    limit: int,
+    promotion_metric: str,
+    latency_tradeoff_weight: float,
+    promotion_accuracy_share: float,
+    efficiency_latency_tradeoff_weight: float,
+) -> List[Dict]:
+    accuracy_count, efficiency_count = _split_promotion_counts(
+        limit,
+        promotion_accuracy_share,
+    )
+    selected: List[Dict] = []
+    seen_paths = set()
+    branch_counts = {"accuracy": 0, "efficiency": 0}
+
+    def append_from_ranked(ranked: List[Dict], count: int, branch: str) -> None:
+        for row in ranked:
+            if branch_counts[branch] >= count:
+                return
+            path = row.get("json_path")
+            if not path or path in seen_paths:
+                continue
+            copy_row = dict(row)
+            copy_row["_promotion_branch"] = branch
+            selected.append(copy_row)
+            seen_paths.add(path)
+            branch_counts[branch] += 1
+
+    append_from_ranked(
+        _rank_rows(rows, "accuracy_latency", latency_tradeoff_weight),
+        accuracy_count,
+        "accuracy",
+    )
+    append_from_ranked(
+        _rank_rows(rows, "accuracy_latency", efficiency_latency_tradeoff_weight),
+        efficiency_count,
+        "efficiency",
+    )
+
+    if len(selected) < limit:
+        for row in _rank_rows(rows, promotion_metric, latency_tradeoff_weight):
+            path = row.get("json_path")
+            if not path or path in seen_paths:
+                continue
+            copy_row = dict(row)
+            copy_row["_promotion_branch"] = "backfill"
+            selected.append(copy_row)
+            seen_paths.add(path)
+            if len(selected) >= limit:
+                break
+
+    return selected[:limit]
+
+
 def _load_explicit_jsons(paths: Iterable[str]) -> List[Dict]:
     architectures = []
     for raw_path in paths:
@@ -223,7 +340,10 @@ def _load_promoted(
     selection: str,
     csv_path: Path,
     promotion_metric: str,
+    promotion_strategy: str,
+    promotion_accuracy_share: float,
     latency_tradeoff_weight: float,
+    efficiency_latency_tradeoff_weight: float,
 ) -> List[Dict]:
     match = re.fullmatch(r"promoted(\d+)", selection)
     if not match:
@@ -234,23 +354,42 @@ def _load_promoted(
 
     rows = []
     with open(csv_path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+        for row_idx, row in enumerate(csv.DictReader(f)):
             json_path = row.get("json_path")
             if not json_path:
                 continue
+            row["_source_order"] = row_idx
             row["_promotion_score"] = _promotion_score(
                 row,
                 promotion_metric,
                 latency_tradeoff_weight,
             )
             rows.append(row)
-    rows.sort(key=lambda row: row["_promotion_score"], reverse=True)
+    if promotion_strategy == "accuracy_efficiency":
+        selected_rows = _select_split_promoted_rows(
+            rows,
+            limit,
+            promotion_metric,
+            latency_tradeoff_weight,
+            promotion_accuracy_share,
+            efficiency_latency_tradeoff_weight,
+        )
+    else:
+        selected_rows = _rank_rows(rows, promotion_metric, latency_tradeoff_weight)[:limit]
 
     promoted = []
-    for row in rows[:limit]:
+    for row in selected_rows:
         json_path = row["json_path"]
         promoted.extend(_load_explicit_jsons([json_path]))
         promoted[-1]["category"] = "promoted"
+        promoted[-1]["promotion_branch"] = row.get("_promotion_branch", "single")
+        promoted[-1]["promotion_score"] = _promotion_score(
+            row,
+            promotion_metric,
+            latency_tradeoff_weight,
+        )
+        promoted[-1]["promotion_accuracy"] = _float_from_row(row, "best_val_acc", 0.0)
+        promoted[-1]["promotion_latency_reduction_pct"] = _row_latency_reduction_pct(row)
     return promoted
 
 
@@ -259,7 +398,10 @@ def select_architectures(
     selection: str,
     training_results_csv: Path | None,
     promotion_metric: str,
+    promotion_strategy: str,
+    promotion_accuracy_share: float,
     latency_tradeoff_weight: float,
+    efficiency_latency_tradeoff_weight: float,
 ) -> List[Dict]:
     selection = selection.strip().lower()
     if selection == "all":
@@ -280,7 +422,10 @@ def select_architectures(
             selection,
             training_results_csv,
             promotion_metric,
+            promotion_strategy,
+            promotion_accuracy_share,
             latency_tradeoff_weight,
+            efficiency_latency_tradeoff_weight,
         )
 
     match = re.fullmatch(r"(top|best|middle|worst)(\d+)", selection)
@@ -468,7 +613,10 @@ def main() -> None:
         args.selection,
         training_csv,
         args.promotion_metric,
+        args.promotion_strategy,
+        args.promotion_accuracy_share,
         args.latency_tradeoff_weight,
+        args.efficiency_latency_tradeoff_weight,
     )
     if not selected:
         raise ValueError(f"Selection {args.selection!r} produced no architectures")
@@ -533,7 +681,10 @@ def main() -> None:
         "prefetch_factor": args.prefetch_factor,
         "training_preset": args.training_preset,
         "promotion_metric": args.promotion_metric,
+        "promotion_strategy": args.promotion_strategy,
+        "promotion_accuracy_share": args.promotion_accuracy_share,
         "latency_tradeoff_weight": args.latency_tradeoff_weight,
+        "efficiency_latency_tradeoff_weight": args.efficiency_latency_tradeoff_weight,
     }
     with open(result_dir / "run_summary.json", "w", encoding="utf-8") as f:
         json.dump(run_summary, f, indent=2)

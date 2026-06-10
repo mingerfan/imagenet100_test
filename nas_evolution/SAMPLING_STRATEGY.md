@@ -256,7 +256,7 @@ uv run python tools/train_nas_architectures.py \
 
 ### 6. Phase 2 replacement masks
 
-在 Phase 1 搜出的 plain MBConv 结构上，再离线生成有限数量的替换 mask。默认只改 body block，不碰 stem/second downsample。支持的动作：
+在 Phase 1 搜出的 plain MBConv 结构上，再离线生成有限数量的替换 mask。默认只改 body block，不碰 stem/second downsample。默认不添加 gated/self-gated 模块，只使用前三个激活替换动作；`gated_lswish` 保留为显式 `--actions` 实验选项。
 
 - `stablepoly4`: Swish `1->0, 3->2, 5->4, 7->6`; ReLU `22->0, 23->2, 24->4, 25->6`
 - `hermitepoly4`: `activation_override: poly4_herpn` for Swish/ReLU plain MBConv blocks
@@ -279,8 +279,19 @@ uv run python tools/nas_replacement_planner.py generate-masks \
 
 默认预算：
 - 全部 masks 先训 2 epoch
-- 用 `promoted8` 选择前 8 个训 10 epoch
-- 用 `promoted3` 选择前 3 个训 20 epoch
+- 用 `promoted8` 选择 8 个训 10 epoch
+- 用 `promoted3` 选择 3 个训 20 epoch
+
+一键流程默认不是只按单一“短训最好”排序晋级，而是用
+`--replacement-promotion-strategy accuracy_efficiency` 做双分支：
+`--replacement-promotion-accuracy-share 0.5` 会让 `promoted8` 拆成 4 个
+accuracy-biased 候选和 4 个 efficiency-biased 候选，`promoted3` 拆成 2 个
+accuracy-biased 候选和 1 个 efficiency-biased 候选。两个分支都使用
+`best_val_acc + weight * fhe_latency_reduction_pct`，accuracy-biased 分支默认用
+`--latency-tradeoff-weight 0.1`，efficiency-biased 分支默认用
+`--replacement-efficiency-latency-tradeoff-weight 0.3`；两个分支重复时会去重，并按
+`--replacement-promotion-metric` 补足 quota。旧的单排序行为可以显式设
+`--replacement-promotion-strategy single`。
 
 ```bash
 uv run python tools/train_nas_architectures.py \
@@ -296,6 +307,10 @@ uv run python tools/train_nas_architectures.py \
 uv run python tools/train_nas_architectures.py \
   --selection promoted8 \
   --training-results results/rank1_masks_e2/training_results.csv \
+  --promotion-strategy accuracy_efficiency \
+  --promotion-accuracy-share 0.5 \
+  --latency-tradeoff-weight 0.1 \
+  --efficiency-latency-tradeoff-weight 0.3 \
   --dataset cifar100 \
   --input-size 224 \
   --epochs 10 \

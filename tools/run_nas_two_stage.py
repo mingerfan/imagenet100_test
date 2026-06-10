@@ -103,15 +103,46 @@ def parse_args() -> argparse.Namespace:
         "--replacement-promotion-metric",
         choices=("accuracy", "accuracy_latency"),
         default="accuracy_latency",
-        help="Metric used by promotedN replacement training rounds.",
+        help=(
+            "Metric used by promotedN replacement training rounds when "
+            "--replacement-promotion-strategy=single, and for backfill in split mode."
+        ),
+    )
+    parser.add_argument(
+        "--replacement-promotion-strategy",
+        choices=("single", "accuracy_efficiency"),
+        default="accuracy_efficiency",
+        help=(
+            "How promotedN replacement candidates advance between rounds. "
+            "accuracy_efficiency splits each promotion quota between accuracy-biased "
+            "and efficiency-biased latency-aware branches."
+        ),
+    )
+    parser.add_argument(
+        "--replacement-promotion-accuracy-share",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of each promotedN quota reserved for accuracy-biased ranking "
+            "when --replacement-promotion-strategy=accuracy_efficiency."
+        ),
     )
     parser.add_argument(
         "--latency-tradeoff-weight",
         type=float,
         default=0.1,
         help=(
-            "Accuracy percentage points credited per 1% latency reduction for "
+            "Accuracy percentage points credited per 1%% latency reduction for "
             "latency-aware source selection and mask promotion."
+        ),
+    )
+    parser.add_argument(
+        "--replacement-efficiency-latency-tradeoff-weight",
+        type=float,
+        default=0.3,
+        help=(
+            "Accuracy percentage points credited per 1%% latency reduction for the "
+            "efficiency branch of split replacement promotion."
         ),
     )
     parser.add_argument("--replacement-batch-size", type=int, default=None)
@@ -499,8 +530,14 @@ def run_replacement_training(
             str(args.smartpaf_ct_steps),
             "--promotion-metric",
             args.replacement_promotion_metric,
+            "--promotion-strategy",
+            args.replacement_promotion_strategy,
+            "--promotion-accuracy-share",
+            str(args.replacement_promotion_accuracy_share),
             "--latency-tradeoff-weight",
             str(args.latency_tradeoff_weight),
+            "--efficiency-latency-tradeoff-weight",
+            str(args.replacement_efficiency_latency_tradeoff_weight),
         ]
         if round_idx == 0:
             cmd.extend(["--json", *[str(path) for path in mask_paths], "--selection", "all"])
@@ -540,7 +577,12 @@ def write_pipeline_manifest(
         "promotion_counts": args.promotion_counts,
         "replacement_source_metric": args.replacement_source_metric,
         "replacement_promotion_metric": args.replacement_promotion_metric,
+        "replacement_promotion_strategy": args.replacement_promotion_strategy,
+        "replacement_promotion_accuracy_share": args.replacement_promotion_accuracy_share,
         "latency_tradeoff_weight": args.latency_tradeoff_weight,
+        "replacement_efficiency_latency_tradeoff_weight": (
+            args.replacement_efficiency_latency_tradeoff_weight
+        ),
         "replacement_fhe_batch_size": args.replacement_fhe_batch_size,
         "mask_latency_evaluated": not args.skip_mask_latency,
         "phase1_training_preset": phase1_training_preset(args),

@@ -146,7 +146,7 @@ uv run python tools/run_nas_two_stage.py \
   --download
 ```
 
-Phase 2 默认只改 body blocks，不改 stem 和第二次降采样。默认候选动作是 `stablepoly4`、`hermitepoly4`、`swish_herpn`、`gated_lswish`；`swish_herpn` 只用于 Swish body blocks，其余动作同时支持 Swish/ReLU plain MBConv。第一版不生成 `gated_poly4`。mask 训练建议按 `2 -> 10 -> 20` epoch 晋级：先训练全部 masks 2 epoch，再用 `promoted8` 选前 8 个训 10 epoch，最后用 `promoted3` 训 20 epoch。
+Phase 2 默认只改 body blocks，不改 stem 和第二次降采样。默认候选动作是 `stablepoly4`、`hermitepoly4`、`swish_herpn`，不添加 gated/self-gated 模块；`swish_herpn` 只用于 Swish body blocks，其余默认动作同时支持 Swish/ReLU plain MBConv。`gated_lswish` 保留为显式实验选项，可通过 `--actions` 手动启用。mask 训练建议按 `2 -> 10 -> 20` epoch 晋级：先训练全部 masks 2 epoch，再用 `promoted8` 选前 8 个训 10 epoch，最后用 `promoted3` 训 20 epoch。默认晋级策略是 `accuracy_efficiency`，把每轮 quota 分成 accuracy-biased 和 efficiency-biased 两个加权分支；两个分支都按 `best_val_acc + weight * fhe_latency_reduction_pct` 排序，默认 accuracy 分支用 `--latency-tradeoff-weight 0.1`，efficiency 分支用 `--replacement-efficiency-latency-tradeoff-weight 0.3`。默认 `--replacement-promotion-accuracy-share 0.5`，所以 `promoted8` 是 4+4，`promoted3` 是 2+1，重复候选会去重并补足。旧的单一排序可用 `--replacement-promotion-strategy single`。
 
 ### 3. 训练特定模型
 
